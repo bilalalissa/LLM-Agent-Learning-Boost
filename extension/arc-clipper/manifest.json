@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "LLM Wiki Agent Clipper",
+  "name": "LLM Agent Learning Boost Clipper",
   "version": "0.1.0",
-  "description": "Send selected text, media, links, or whole pages from Arc into an Obsidian vault through LLM Wiki Agent.",
+  "description": "Send selected text, media, links, or whole pages from Arc into an Obsidian vault through LLM Agent Learning Boost.",
   "permissions": [
     "activeTab",
     "contextMenus",
@@ -16,7 +16,7 @@
     "<all_urls>"
   ],
   "action": {
-    "default_title": "LLM Wiki Agent Clipper",
+    "default_title": "LLM Agent Learning Boost Clipper",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",

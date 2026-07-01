@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$ROOT/release-template/llm-wiki-agent"
+OUT="$ROOT/release-template/llm-agent-learning-boost"
 
 rm -rf "$OUT"
 mkdir -p "$OUT"

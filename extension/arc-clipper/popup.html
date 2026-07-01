@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LLM Wiki Agent Clipper</title>
+  <title>LLM Agent Learning Boost Clipper</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <main>
-    <h1>LLM Wiki Clipper</h1>
+    <h1>Learning Boost Clipper</h1>
     <label>
       Agent URL
       <input id="server-url" type="url" value="http://127.0.0.1:8789">
@@ -56,18 +56,18 @@
           <span>Save transcript only</span>
         </label>
         <label class="radio-row">
-          <input type="radio" name="video-handling" value="temp-copy">
-          <span>Download temporary copy outside raw/</span>
+          <input type="radio" name="video-handling" value="raw-copy">
+          <span>Download video + transcript to vault</span>
         </label>
         <label class="radio-row">
-          <input type="radio" name="video-handling" value="raw-copy">
-          <span>Save video into vault raw assets</span>
+          <input type="radio" name="video-handling" value="temp-copy">
+          <span>Download temporary video + transcript outside vault</span>
         </label>
       </section>
       <ol id="media-list"></ol>
       <button id="submit" type="button">Submit to vault</button>
     </section>
-    <p id="status" role="status">Start LLM Wiki Agent, then choose a vault.</p>
+    <p id="status" role="status">Start LLM Agent Learning Boost, then choose a vault.</p>
   </main>
   <script src="popup.js" type="module"></script>
 </body>

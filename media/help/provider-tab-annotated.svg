@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760" role="img" aria-labelledby="title desc">
+  <title id="title">Annotated Provider tab</title>
+  <desc id="desc">A simplified map of the Provider tab with numbered callouts for vault-independent provider status, config actions, health checks, and fallback guidance.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f4ecd8; }
+      .panel { fill: #fffaf0; stroke: #d8c7a3; stroke-width: 2; }
+      .soft { fill: #eadfca; stroke: #d8c7a3; stroke-width: 1.5; }
+      .text { fill: #2f271f; font: 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .muted { fill: #75664f; font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .small { fill: #75664f; font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .heading { fill: #2f271f; font: 700 22px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .tab { fill: #75664f; font: 700 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .active { fill: #8a5a19; font: 800 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .button { fill: #fffaf0; stroke: #d8c7a3; stroke-width: 1.5; }
+      .accent { fill: #9a6518; }
+      .ok { fill: #16a34a; }
+      .warn { fill: #f59e0b; }
+      .callout { fill: #1f5eff; stroke: #ffffff; stroke-width: 3; }
+      .calloutText { fill: #ffffff; font: 800 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; dominant-baseline: central; }
+      .line { stroke: #1f5eff; stroke-width: 3; fill: none; stroke-linecap: round; }
+    </style>
+  </defs>
+  <rect class="bg" width="1280" height="760"/>
+  <rect class="panel" x="28" y="34" width="1224" height="682" rx="8"/>
+  <text class="heading" x="58" y="78">LLM Agent Learning Boost</text>
+  <text class="tab" x="58" y="122">Chat</text>
+  <text class="tab" x="126" y="122">Local</text>
+  <text class="tab" x="194" y="122">Files</text>
+  <text class="tab" x="262" y="122">Archive</text>
+  <text class="tab" x="352" y="122">Topics</text>
+  <text class="tab" x="438" y="122">Learning</text>
+  <circle class="warn" cx="536" cy="116" r="6"/>
+  <text class="active" x="552" y="122">Provider</text>
+  <rect class="accent" x="552" y="136" width="78" height="4" rx="2"/>
+  <text class="tab" x="658" y="122">Notes</text>
+
+  <text class="muted" x="58" y="178">Current AI provider configuration. Secret values are hidden.</text>
+  <rect class="button" x="58" y="204" width="92" height="36" rx="6"/>
+  <text class="text" x="80" y="228">Refresh</text>
+  <rect class="button" x="160" y="204" width="122" height="36" rx="6"/>
+  <text class="text" x="180" y="228">Open config</text>
+  <rect class="button" x="292" y="204" width="166" height="36" rx="6"/>
+  <text class="text" x="314" y="228">Choose config file</text>
+
+  <rect class="soft" x="58" y="260" width="1080" height="46" rx="6"/>
+  <text class="muted" x="78" y="289">~/Library/Application Support/LLM Agent Learning Boost/config.env</text>
+  <rect class="button" x="1152" y="260" width="72" height="46" rx="6"/>
+  <text class="text" x="1174" y="289">Use</text>
+
+  <rect class="panel" x="58" y="334" width="1166" height="316" rx="8"/>
+  <text class="heading" x="84" y="380">Current Provider</text>
+  <circle class="ok" cx="103" cy="420" r="9"/>
+  <text class="text" x="126" y="427">Ready: local_auto is using Ollama on this Mac</text>
+  <rect class="soft" x="84" y="462" width="512" height="132" rx="6"/>
+  <text class="text" x="106" y="498">Provider details</text>
+  <text class="small" x="106" y="528">Active provider: ollama</text>
+  <text class="small" x="106" y="554">Active model: qwen3:8b</text>
+  <text class="small" x="106" y="580">Cloud fallback requires confirmation</text>
+  <rect class="soft" x="626" y="462" width="554" height="132" rx="6"/>
+  <text class="text" x="648" y="498">Local Provider Health</text>
+  <text class="small" x="648" y="528">Ollama: reachable</text>
+  <text class="small" x="648" y="554">MLX-LM Server: not running</text>
+  <text class="small" x="648" y="580">Suggestions show only non-secret setup hints</text>
+
+  <circle class="callout" cx="540" cy="116" r="18"/><text class="calloutText" x="540" y="116">1</text>
+  <path class="line" d="M540 140 L580 180"/>
+  <circle class="callout" cx="458" cy="222" r="18"/><text class="calloutText" x="458" y="222">2</text>
+  <path class="line" d="M458 244 L394 260"/>
+  <circle class="callout" cx="1204" cy="285" r="18"/><text class="calloutText" x="1204" y="285">3</text>
+  <path class="line" d="M1186 290 L1110 305"/>
+  <circle class="callout" cx="104" cy="420" r="18"/><text class="calloutText" x="104" y="420">4</text>
+  <path class="line" d="M124 420 L240 420"/>
+  <circle class="callout" cx="600" cy="560" r="18"/><text class="calloutText" x="600" y="560">5</text>
+  <path class="line" d="M622 560 L700 560"/>
+
+  <rect class="panel" x="58" y="668" width="1166" height="40" rx="6"/>
+  <text class="small" x="76" y="693">Callouts: 1 status dot, 2 config actions, 3 config path, 4 current provider state, 5 health and fallback guidance.</text>
+</svg>

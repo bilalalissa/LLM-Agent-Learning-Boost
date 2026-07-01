@@ -1,7 +1,8 @@
 {
-  "name": "obsidian-llm-wiki-agent",
+  "name": "llm-agent-learning-boost",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "ingest": "node src/ingest.mjs",
@@ -9,6 +10,10 @@
     "chat": "node src/chat.mjs",
     "serve": "node src/server.mjs",
     "check": "node src/check.mjs",
+    "learning:backfill": "node src/backfill-learning-boost.mjs",
+    "learning:export-remnote": "node src/remnote-export.mjs",
+    "learning:plan": "node src/learning-plan-cli.mjs",
+    "learning:check": "node src/learning-check.mjs",
     "test": "node --test"
   },
   "engines": {

@@ -4,6 +4,10 @@ const maxBrowserMediaBytes = 50 * 1024 * 1024;
 const maxManifestExpansionItems = 12000;
 const maxManifestDepth = 3;
 const mediaDownloadConcurrency = 6;
+const mediaFetchTimeoutMs = 12000;
+const manifestFetchTimeoutMs = 8000;
+const vaultFetchTimeoutMs = 5000;
+const submitClipTimeoutMs = 20 * 60 * 1000;
 const mediaByTab = new Map();
 let preparedClip = null;
 let clipState = {
@@ -21,22 +25,22 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "clip-selection",
-      title: "Clip selected text to LLM Wiki",
+      title: "Clip selected text to Learning Boost",
       contexts: ["selection"]
     });
     chrome.contextMenus.create({
       id: "clip-page",
-      title: "Clip whole page to LLM Wiki",
+      title: "Clip whole page to Learning Boost",
       contexts: ["page"]
     });
     chrome.contextMenus.create({
       id: "clip-media",
-      title: "Clip media to LLM Wiki",
+      title: "Clip media to Learning Boost",
       contexts: ["image", "video", "audio"]
     });
     chrome.contextMenus.create({
       id: "clip-link",
-      title: "Clip link to LLM Wiki",
+      title: "Clip link to Learning Boost",
       contexts: ["link"]
     });
   });
@@ -173,9 +177,11 @@ async function collectAndSend(tabId, captureType) {
 async function submitPreparedClip(updates = {}) {
   if (!preparedClip) throw new Error("Prepare a clip before submitting.");
   const title = String(updates.title || "").trim();
+  const selectedMediaIds = Array.isArray(updates.selectedMediaIds) ? updates.selectedMediaIds.map(String).filter(Boolean) : null;
   preparedClip = {
     ...preparedClip,
     ...(title ? { title } : {}),
+    ...(selectedMediaIds ? { media: filterSelectedMedia(preparedClip.media, selectedMediaIds), selectedMediaIds } : {}),
     tags: normalizeClipTags(updates.tags)
   };
   if (preparedClip.singleVideoRequest && updates.videoHandling) {
@@ -183,6 +189,7 @@ async function submitPreparedClip(updates = {}) {
       ...preparedClip,
       singleVideoRequest: {
         ...preparedClip.singleVideoRequest,
+        ...(title ? { title } : {}),
         handling: updates.videoHandling
       }
     };
@@ -234,10 +241,11 @@ async function enrichMedia(payload, tabId, requestId = "") {
   const pageVideo = pageVideoRequest(payload);
   if (pageVideo) {
     if (requestId) progress(requestId, 90, "Prepared one page-video request; chunk assets are excluded.");
+    const title = payload.mediaTitle || payload.title || "";
     return {
       ...payload,
       media: [],
-      singleVideoRequest: pageVideo,
+      singleVideoRequest: { ...pageVideo, title },
       text: [
         payload.text || `Media exported from ${payload.url || "this page"}`,
         "",
@@ -269,6 +277,7 @@ async function enrichMedia(payload, tabId, requestId = "") {
     }
     media.push(next);
   }
+  const selectableMedia = assignMediaIds(media);
   const summary = mediaSummary(media);
   const text = payload?.captureType === "media"
     ? [
@@ -281,7 +290,7 @@ async function enrichMedia(payload, tabId, requestId = "") {
         summary.failed ? `Failed non-stream media downloads: ${summary.failed}` : ""
       ].filter(Boolean).join("\n")
     : payload.text;
-  return { ...payload, text, media };
+  return { ...payload, text, media: selectableMedia };
 }
 
 async function downloadMediaItems(items, requestId = "") {
@@ -337,12 +346,12 @@ async function mediaPayload(url, alt, source = {}) {
         downloadMethod: "data-url"
       };
     }
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
       credentials: "include",
       cache: "force-cache",
       redirect: "follow",
       referrerPolicy: "no-referrer-when-downgrade"
-    });
+    }, mediaFetchTimeoutMs);
     if (!response.ok) {
       return { ...base, downloadStatus: "url-only", downloadError: `Browser fetch failed: HTTP ${response.status}` };
     }
@@ -358,7 +367,7 @@ async function mediaPayload(url, alt, source = {}) {
       downloadMethod: source.downloadMethod || "browser-fetch"
     };
   } catch (error) {
-    return { ...base, downloadStatus: "url-only", downloadError: `${error.name || "Error"}: ${error.message || "Browser fetch failed"}` };
+    return { ...base, downloadStatus: "url-only", downloadError: `${error.name || "Error"}: ${error.message || "Browser fetch failed or timed out"}` };
   }
 }
 
@@ -414,12 +423,12 @@ async function expandManifestUrl(manifestUrl, state) {
   if (!manifestUrl || state.depth > maxManifestDepth || state.remaining <= 0 || state.visited.has(manifestUrl)) return [];
   state.visited.add(manifestUrl);
   try {
-    const response = await fetch(manifestUrl, {
+    const response = await fetchWithTimeout(manifestUrl, {
       credentials: "include",
       cache: "no-store",
       redirect: "follow",
       referrerPolicy: "no-referrer-when-downgrade"
-    });
+    }, manifestFetchTimeoutMs);
     if (!response.ok) return [];
     const text = await response.text();
     if (/^\s*#EXTM3U/im.test(text) || /\.m3u8(\?|#|$)/i.test(manifestUrl)) {
@@ -639,19 +648,19 @@ async function collectMediaState(tabId) {
 async function postClip(payload) {
   const settings = await getSettings();
   const vault = settings.vault || await firstVault(settings.serverUrl);
-  if (!vault) throw new Error("Select a vault in the LLM Wiki Agent Clipper popup.");
-  const response = await fetch(`${settings.serverUrl.replace(/\/+$/, "")}/api/clip`, {
+  if (!vault) throw new Error("Select a vault in the LLM Agent Learning Boost Clipper popup.");
+  const response = await fetchWithTimeout(`${settings.serverUrl.replace(/\/+$/, "")}/api/clip`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ ...payload, vault })
-  });
+  }, submitClipTimeoutMs);
   const raw = await response.text();
   const data = parseJson(raw);
   if (!response.ok) {
     if (response.status === 404) {
-      throw new Error("The running LLM Wiki Agent app does not include the browser clip endpoint yet. Rebuild/reinstall the app, then restart it.");
+      throw new Error("The running LLM Agent Learning Boost app does not include the browser clip endpoint yet. Rebuild/reinstall the app, then restart it.");
     }
-    throw new Error(data.error || raw.replace(/\s+/g, " ").trim().slice(0, 240) || "The LLM Wiki Agent rejected the clip.");
+    throw new Error(data.error || raw.replace(/\s+/g, " ").trim().slice(0, 240) || "The LLM Agent Learning Boost rejected the clip.");
   }
   return data;
 }
@@ -673,6 +682,32 @@ function summarizePreparedClip(payload) {
     singleVideoRequest: payload?.singleVideoRequest || null,
     summary
   };
+}
+
+function assignMediaIds(media) {
+  return (Array.isArray(media) ? media : []).map((item, index) => {
+    const clipId = item?.clipId || `media-${index + 1}-${hashString(item?.url || item?.src || item?.filename || "")}`;
+    return {
+      ...item,
+      clipId,
+      selectable: item?.selectable !== false && !isStreamReferenceItem(item),
+      selected: item?.selected !== false
+    };
+  });
+}
+
+function filterSelectedMedia(media, selectedMediaIds) {
+  const selected = new Set(selectedMediaIds);
+  return (Array.isArray(media) ? media : []).filter((item) => selected.has(item?.clipId || item?.id || item?.url || item?.src || ""));
+}
+
+function hashString(value) {
+  let hash = 0;
+  const text = String(value || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash).toString(36);
 }
 
 function normalizeClipTags(value) {
@@ -755,9 +790,27 @@ function updateBadge(state) {
 }
 
 async function firstVault(serverUrl) {
-  const response = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/vaults`);
+  const response = await fetchWithTimeout(`${serverUrl.replace(/\/+$/, "")}/api/vaults`, {}, vaultFetchTimeoutMs);
   const data = await response.json();
   return data?.vaults?.[0]?.name || "";
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: options.signal || controller.signal
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function getSettings() {
@@ -842,7 +895,8 @@ function pageVideoRequest(payload) {
   if (!isYouTubePageUrl(pageUrl)) return null;
   return {
     provider: "youtube",
-    url: pageUrl
+    url: pageUrl,
+    title: payload?.mediaTitle || payload?.title || ""
   };
 }
 

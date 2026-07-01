@@ -1,6 +1,9 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { trackBehaviorEvent } from "./behavior-tracker.mjs";
+import { collectBrowserClip } from "./source-collectors/browser-clip-collector.mjs";
 import { ensureDir, listVaults, slugify, vaultName } from "./vaults.mjs";
 
 const maxTextChars = 240000;
@@ -8,6 +11,10 @@ const maxHtmlChars = 120000;
 const maxAssetBytes = 60 * 1024 * 1024;
 const maxTranscriptChars = 180000;
 const maxRawVideoBytes = Number(process.env.LLM_WIKI_VIDEO_RAW_MAX_BYTES || 300 * 1024 * 1024);
+const serverMediaFetchTimeoutMs = Number(process.env.LLM_WIKI_MEDIA_FETCH_TIMEOUT_MS || 15000);
+const youtubePreflightTimeoutMs = Number(process.env.LLM_WIKI_YOUTUBE_PREFLIGHT_TIMEOUT_MS || 45000);
+const youtubeTranscriptTimeoutMs = Number(process.env.LLM_WIKI_YOUTUBE_TRANSCRIPT_TIMEOUT_MS || 120000);
+const youtubeDownloadTimeoutMs = Number(process.env.LLM_WIKI_YOUTUBE_DOWNLOAD_TIMEOUT_MS || 8 * 60 * 1000);
 const youtubeVideoFormat = "b[ext=mp4][height<=360]/bv*[height<=360][ext=mp4]+ba[ext=m4a]/bv*[height<=360]+ba/b[height<=360]/b";
 
 export async function preflightBrowserClip(_config, payload) {
@@ -19,28 +26,34 @@ export async function preflightBrowserClip(_config, payload) {
     error: cleanText(error.message, 500)
   }));
   const estimatedBytes = Number(estimate.estimatedBytes || 0);
+  const estimateKnown = estimatedBytes > 0;
   const tooLargeForRaw = estimatedBytes > maxRawVideoBytes;
   return {
     requiresChoice: true,
     provider: pageVideo.provider,
     url: pageVideo.url,
     ok: estimate.ok !== false,
-    title: estimate.title || "",
+    title: estimate.title || pageVideo.title || "",
+    transcriptRequired: true,
+    hasTranscriptCandidates: Array.isArray(estimate.transcriptCandidates) && estimate.transcriptCandidates.length > 0,
+    transcriptCandidates: Array.isArray(estimate.transcriptCandidates) ? estimate.transcriptCandidates.slice(0, 8) : [],
     duration: estimate.duration || 0,
     format: estimate.format || "",
     estimatedBytes,
     estimatedLabel: estimatedBytes ? formatBytes(estimatedBytes) : "unknown size",
     rawLimitBytes: maxRawVideoBytes,
     rawLimitLabel: formatBytes(maxRawVideoBytes),
-    recommendedHandling: tooLargeForRaw ? "transcript-only" : "raw-copy",
+    recommendedHandling: tooLargeForRaw || !estimateKnown ? "transcript-only" : "raw-copy",
     warning: tooLargeForRaw
       ? `Estimated video size is ${formatBytes(estimatedBytes)}, above the ${formatBytes(maxRawVideoBytes)} raw-vault safety limit.`
+      : !estimateKnown
+        ? "Video size could not be estimated. Start with transcript-only unless you explicitly need the video file."
       : "",
     error: estimate.error || "",
     options: [
       { value: "transcript-only", label: "Save transcript only", description: "Fastest and safest. No large video file is saved." },
-      { value: "temp-copy", label: "Download temporary copy", description: `Save the video outside raw/ in ${externalClipDir()}.` },
-      { value: "raw-copy", label: "Save video into vault raw assets", description: "Best for permanent local archive; can be large." }
+      { value: "raw-copy", label: "Download video + transcript to vault", description: "Save both the merged video and transcript in raw/assets/browser-clips/." },
+      { value: "temp-copy", label: "Download temporary video + transcript outside vault", description: `Save the video outside the vault in ${externalClipDir()} and keep the transcript in the vault.` }
     ]
   };
 }
@@ -49,7 +62,7 @@ export async function saveBrowserClip(config, payload) {
   const vaultPath = resolveVault(config, payload?.vault);
   const captureType = normalizeCaptureType(payload?.captureType);
   const now = new Date();
-  const title = cleanText(payload?.title || payload?.url || `${captureType} clip`, 160) || `${captureType} clip`;
+  const title = bestClipTitle(payload, captureType);
   const tags = normalizeTags(payload?.tags);
   const stamp = now.toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const file = uniquePath(path.join(
@@ -61,7 +74,8 @@ export async function saveBrowserClip(config, payload) {
   const savedMedia = await saveClipMedia(vaultPath, payload?.media, stamp, {
     payload: payload || {},
     captureType,
-    title
+    title,
+    selectedMediaIds: normalizeSelectedMediaIds(payload?.selectedMediaIds)
   });
   ensureDir(path.dirname(file));
   fs.writeFileSync(file, renderClipMarkdown({
@@ -72,6 +86,26 @@ export async function saveBrowserClip(config, payload) {
     now,
     savedMedia
   }), "utf8");
+  trackBehaviorEvent(vaultPath, {
+    type: "source_added",
+    sourcePath: relativeVaultPath(vaultPath, file),
+    sourceKind: `browser-${captureType}`,
+    metadata: {
+      captureType,
+      tags: tags.length,
+      mediaItems: savedMedia.length
+    }
+  });
+  collectBrowserClip(vaultPath, {
+    title,
+    url: payload?.url || "",
+    file: relativeVaultPath(vaultPath, file),
+    topic: tags[0] || "",
+    tags,
+    processingStatus: "ready_for_ingest",
+    recommendedNextAction: "Review the clip and ingest it when ready.",
+    evidenceQuality: payload?.text ? "medium" : "unknown"
+  });
   return {
     vault: vaultName(vaultPath),
     file: relativeVaultPath(vaultPath, file),
@@ -174,7 +208,7 @@ function renderClipMarkdown({ payload, captureType, title, tags, now, savedMedia
 
   lines.push("## Processing Notes");
   lines.push("");
-  lines.push("- This source was created by the LLM Wiki Agent browser companion extension.");
+  lines.push("- This source was created by the LLM Agent Learning Boost browser companion extension.");
   lines.push("- Review media URLs manually if the browser could not export the binary file.");
   lines.push("");
   return `${lines.join("\n")}\n`;
@@ -185,7 +219,9 @@ async function saveClipMedia(vaultPath, mediaList, stamp, options = {}) {
   if (pageVideo) {
     return [await saveSinglePageVideo(vaultPath, pageVideo, stamp, options.title)];
   }
-  const items = Array.isArray(mediaList) ? mediaList : [];
+  const selectedMediaIds = options.selectedMediaIds instanceof Set ? options.selectedMediaIds : null;
+  const items = (Array.isArray(mediaList) ? mediaList : [])
+    .filter((media) => !selectedMediaIds || selectedMediaIds.has(mediaItemId(media)));
   const streamItems = items.filter(isStreamChunkMedia);
   const regularItems = items.filter((item) => !isStreamChunkMedia(item));
   const saved = [];
@@ -224,6 +260,32 @@ async function saveClipMedia(vaultPath, mediaList, stamp, options = {}) {
   return saved;
 }
 
+function bestClipTitle(payload, captureType) {
+  const mediaTitle = Array.isArray(payload?.media)
+    ? payload.media.map((item) => item?.title || item?.alt || item?.filename || "").find(Boolean)
+    : "";
+  return cleanText(
+    payload?.title ||
+      payload?.mediaTitle ||
+      payload?.singleVideoRequest?.title ||
+      payload?.mediaDownload?.title ||
+      mediaTitle ||
+      payload?.url ||
+      `${captureType} clip`,
+    160
+  ) || `${captureType} clip`;
+}
+
+function normalizeSelectedMediaIds(value) {
+  if (!Array.isArray(value)) return null;
+  const ids = value.map((item) => cleanText(item, 200)).filter(Boolean);
+  return ids.length ? new Set(ids) : new Set();
+}
+
+function mediaItemId(media) {
+  return cleanText(media?.clipId || media?.id || media?.url || media?.src || media?.filename || "", 200);
+}
+
 function pageVideoRequest(payload, captureType) {
   if (captureType !== "media") return null;
   const explicit = payload?.singleVideoRequest || payload?.mediaDownload || {};
@@ -232,6 +294,7 @@ function pageVideoRequest(payload, captureType) {
   return {
     provider: "youtube",
     url,
+    title: cleanText(explicit.title || payload?.mediaTitle || payload?.title || "", 200),
     handling: cleanText(explicit.handling || explicit.downloadMode || "", 40)
   };
 }
@@ -240,47 +303,44 @@ async function saveSinglePageVideo(vaultPath, request, stamp, title) {
   const label = "Single YouTube video file";
   let handling = normalizeVideoHandling(request.handling);
   if (process.env.LLM_WIKI_DISABLE_EXTERNAL_VIDEO_DOWNLOAD === "1") {
-    return {
-      label,
-      kind: "video-download",
-      status: "skipped",
-      handling: handling || "raw-copy",
-      sourceUrl: request.url,
-      error: "External video download is disabled by LLM_WIKI_DISABLE_EXTERNAL_VIDEO_DOWNLOAD=1."
-    };
+    throw new Error("YouTube transcript is required, but external video tools are disabled by LLM_WIKI_DISABLE_EXTERNAL_VIDEO_DOWNLOAD=1.");
   }
   if (!handling) {
     const estimate = await estimateSinglePageVideo(request.url).catch(() => null);
-    handling = Number(estimate?.estimatedBytes || 0) > maxRawVideoBytes ? "transcript-only" : "raw-copy";
+    const estimatedBytes = Number(estimate?.estimatedBytes || 0);
+    handling = !estimatedBytes || estimatedBytes > maxRawVideoBytes ? "transcript-only" : "raw-copy";
   }
-  const dir = handling === "temp-copy"
-    ? externalClipDir()
-    : path.join(vaultPath, "raw", "assets", "browser-clips");
-  const prefix = `${stamp}--single-video--${slugify(title || "youtube-video")}`;
+  const rawAssetDir = path.join(vaultPath, "raw", "assets", "browser-clips");
+  const videoDir = handling === "temp-copy" ? externalClipDir() : rawAssetDir;
+  const prefix = `${stamp}--single-video--${slugify(title || request.title || "youtube-video")}`;
   const sourceUrl = request.url;
-  ensureDir(dir);
-
   const ytDlp = ytDlpInvocation();
-  if (handling === "transcript-only") {
-    const transcript = await saveYoutubeTranscript(vaultPath, dir, prefix, sourceUrl, ytDlp).catch((error) => ({
-      error: cleanText(error.message, 500)
-    }));
-    return {
-      label,
-      kind: "video-download",
-      status: transcript?.path ? "transcript-only" : "failed",
-      handling,
-      sourceUrl,
-      transcriptPath: transcript?.path || "",
-      transcriptText: transcript?.text || "",
-      error: transcript?.error || ""
-    };
-  }
-
-  const outputTemplate = path.join(dir, `${prefix}.%(ext)s`);
+  const stageDir = fs.mkdtempSync(path.join(os.tmpdir(), "llm-learning-youtube-"));
   try {
+    if (handling === "transcript-only") {
+      const transcript = await saveYoutubeTranscript(vaultPath, stageDir, prefix, sourceUrl, ytDlp).catch((error) => ({
+        error: cleanText(error.message, 500)
+      }));
+      if (!transcript?.file) {
+        throw new Error(`YouTube transcript is required before saving this clip. ${transcript?.error || "No subtitle file was produced."}`.trim());
+      }
+      const finalTranscript = finalizeTranscriptAsset(vaultPath, rawAssetDir, transcript.file);
+      return {
+        label,
+        kind: "video-download",
+        status: "transcript-only",
+        handling,
+        sourceUrl,
+        transcriptPath: finalTranscript.path,
+        transcriptText: finalTranscript.text,
+        error: ""
+      };
+    }
+
+    const outputTemplate = path.join(stageDir, `${prefix}.%(ext)s`);
     await runCommand(ytDlp.command, [
       ...ytDlp.argsPrefix,
+      ...ytDlpNetworkArgs(),
       "--no-playlist",
       "--no-part",
       "--write-auto-subs",
@@ -296,54 +356,44 @@ async function saveSinglePageVideo(vaultPath, request, stamp, title) {
       "-o",
       outputTemplate,
       sourceUrl
-    ], { timeoutMs: 15 * 60 * 1000 });
-  } catch (error) {
-    const transcript = await saveYoutubeTranscript(vaultPath, dir, prefix, sourceUrl, ytDlp).catch(() => null);
-    return {
-      label,
-      kind: "video-download",
-      status: "failed",
-      handling,
-      sourceUrl,
-      transcriptPath: transcript?.path || "",
-      transcriptText: transcript?.text || "",
-      error: cleanText(error.message, 500)
-    };
-  }
+    ], { timeoutMs: youtubeDownloadTimeoutMs });
 
-  const files = fs.readdirSync(dir)
-    .filter((file) => file.startsWith(prefix) && !file.endsWith(".part") && !file.endsWith(".ytdl"))
-    .map((file) => path.join(dir, file));
-  const videoFile = files.find((file) => /\.(mp4|m4v|mov|webm|mkv)$/i.test(file));
-  const transcriptFile = preferredTranscriptFile(files);
-  if (!videoFile) {
+    const files = fs.readdirSync(stageDir)
+      .filter((file) => file.startsWith(prefix) && !file.endsWith(".part") && !file.endsWith(".ytdl"))
+      .map((file) => path.join(stageDir, file));
+    const videoFile = files.find((file) => /\.(mp4|m4v|mov|webm|mkv)$/i.test(file));
+    const transcriptFile = preferredTranscriptFile(files);
+    if (!transcriptFile) {
+      throw new Error("YouTube transcript is required before saving this clip. yt-dlp completed but no subtitle file was produced.");
+    }
+    if (!videoFile) {
+      throw new Error("YouTube video download is required for this option, but yt-dlp completed without producing a merged video file.");
+    }
+    const finalTranscript = finalizeTranscriptAsset(vaultPath, rawAssetDir, transcriptFile);
+    const finalVideo = copyClipFile(videoFile, videoDir);
     return {
       label,
       kind: "video-download",
-      status: "failed",
+      status: "downloaded",
+      path: handling === "raw-copy" ? relativeVaultPath(vaultPath, finalVideo) : "",
+      externalPath: handling === "temp-copy" ? finalVideo : "",
       handling,
       sourceUrl,
-      transcriptPath: transcriptFile ? relativeVaultPath(vaultPath, transcriptFile) : "",
-      transcriptText: transcriptFile ? readTranscriptText(transcriptFile) : "",
-      error: "yt-dlp completed but no merged video file was produced."
+      transcriptPath: finalTranscript.path,
+      transcriptText: finalTranscript.text
     };
+  } catch (error) {
+    if (handling === "transcript-only") throw error;
+    throw new Error(`YouTube video + transcript download failed. ${cleanText(error.message, 500)}`);
+  } finally {
+    fs.rmSync(stageDir, { recursive: true, force: true });
   }
-  return {
-    label,
-    kind: "video-download",
-    status: "downloaded",
-    path: handling === "raw-copy" ? relativeVaultPath(vaultPath, videoFile) : "",
-    externalPath: handling === "temp-copy" ? videoFile : "",
-    handling,
-    transcriptPath: transcriptFile ? relativeVaultPath(vaultPath, transcriptFile) : "",
-    transcriptText: transcriptFile ? readTranscriptText(transcriptFile) : "",
-    sourceUrl
-  };
 }
 
 async function saveYoutubeTranscript(vaultPath, dir, prefix, sourceUrl, ytDlp) {
   await runCommand(ytDlp.command, [
     ...ytDlp.argsPrefix,
+    ...ytDlpNetworkArgs(),
     "--no-playlist",
     "--skip-download",
     "--write-auto-subs",
@@ -355,13 +405,14 @@ async function saveYoutubeTranscript(vaultPath, dir, prefix, sourceUrl, ytDlp) {
     "-o",
     path.join(dir, `${prefix}.%(ext)s`),
     sourceUrl
-  ], { timeoutMs: 5 * 60 * 1000 });
+  ], { timeoutMs: youtubeTranscriptTimeoutMs });
   const files = fs.readdirSync(dir)
     .filter((file) => file.startsWith(prefix) && !file.endsWith(".part") && !file.endsWith(".ytdl"))
     .map((file) => path.join(dir, file));
   const transcriptFile = preferredTranscriptFile(files);
   if (!transcriptFile) return null;
   return {
+    file: transcriptFile,
     path: transcriptFile.startsWith(vaultPath) ? relativeVaultPath(vaultPath, transcriptFile) : "",
     externalPath: transcriptFile.startsWith(vaultPath) ? "" : transcriptFile,
     text: readTranscriptText(transcriptFile)
@@ -372,13 +423,14 @@ async function estimateSinglePageVideo(sourceUrl) {
   const ytDlp = ytDlpInvocation();
   const output = await runCommand(ytDlp.command, [
     ...ytDlp.argsPrefix,
+    ...ytDlpNetworkArgs(),
     "--no-playlist",
     "--simulate",
     "--dump-single-json",
     "-f",
     youtubeVideoFormat,
     sourceUrl
-  ], { timeoutMs: 90 * 1000, maxOutputChars: 3 * 1024 * 1024 });
+  ], { timeoutMs: youtubePreflightTimeoutMs, maxOutputChars: 3 * 1024 * 1024 });
   const data = JSON.parse(output);
   const requested = Array.isArray(data.requested_formats) ? data.requested_formats : [];
   const requestedBytes = requested.reduce((sum, item) => sum + Number(item.filesize || item.filesize_approx || 0), 0);
@@ -388,8 +440,46 @@ async function estimateSinglePageVideo(sourceUrl) {
     title: cleanText(data.title || "", 200),
     duration: Number(data.duration || 0),
     format: cleanText(data.format_id || data.format || "", 160),
-    estimatedBytes
+    estimatedBytes,
+    transcriptCandidates: youtubeTranscriptCandidates(data)
   };
+}
+
+function finalizeTranscriptAsset(vaultPath, rawAssetDir, transcriptFile) {
+  const final = copyClipFile(transcriptFile, rawAssetDir);
+  return {
+    path: relativeVaultPath(vaultPath, final),
+    text: readTranscriptText(final)
+  };
+}
+
+function copyClipFile(source, dir) {
+  ensureDir(dir);
+  const target = uniquePath(path.join(dir, path.basename(source)));
+  fs.copyFileSync(source, target);
+  return target;
+}
+
+function youtubeTranscriptCandidates(data) {
+  const candidates = [];
+  for (const [source, group] of [
+    ["subtitles", data?.subtitles],
+    ["automatic_captions", data?.automatic_captions]
+  ]) {
+    for (const language of Object.keys(group || {})) {
+      const entries = Array.isArray(group[language]) ? group[language] : [];
+      if (entries.length) candidates.push({ language, source });
+    }
+  }
+  return candidates.sort((a, b) => transcriptLanguageRank(a.language) - transcriptLanguageRank(b.language));
+}
+
+function transcriptLanguageRank(language) {
+  const text = String(language || "").toLowerCase();
+  if (text === "ar-orig") return 0;
+  if (text === "ar" || text.startsWith("ar-")) return 1;
+  if (text === "en" || text.startsWith("en-")) return 2;
+  return 10;
 }
 
 function preferredTranscriptFile(files) {
@@ -444,7 +534,7 @@ function normalizeVideoHandling(value) {
 
 function externalClipDir() {
   const home = process.env.HOME || process.cwd();
-  return path.join(home, "Downloads", "LLM Wiki Agent Temporary Clips");
+  return path.join(home, "Downloads", "LLM Agent Learning Boost Temporary Clips");
 }
 
 function formatBytes(value) {
@@ -477,6 +567,20 @@ function ytDlpInvocation() {
   return { command: "yt-dlp", argsPrefix };
 }
 
+function ytDlpNetworkArgs() {
+  const socketTimeout = String(Math.max(5, Number(process.env.YT_DLP_SOCKET_TIMEOUT_SECONDS || 20)));
+  return [
+    "--socket-timeout",
+    socketTimeout,
+    "--retries",
+    "2",
+    "--fragment-retries",
+    "2",
+    "--retry-sleep",
+    "linear=1::3"
+  ];
+}
+
 function nodeRuntimePath() {
   if (process.env.YT_DLP_JS_RUNTIME) return process.env.YT_DLP_JS_RUNTIME;
   const home = process.env.HOME || "";
@@ -495,21 +599,64 @@ function nodeRuntimePath() {
 function readTranscriptText(file) {
   try {
     const raw = fs.readFileSync(file, "utf8");
-    const text = raw
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line &&
-        line !== "WEBVTT" &&
-        !/^\d+$/.test(line) &&
-        !/^\d{1,2}:\d{2}:\d{2}[,.]\d{3}\s+-->\s+\d{1,2}:\d{2}:\d{2}[,.]\d{3}/.test(line))
-      .join("\n")
-      .replace(/<[^>]+>/g, "")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
+    const cues = transcriptCueTexts(raw);
+    const deduped = [];
+    let previous = "";
+    for (const cue of cues) {
+      const normalized = normalizeTranscriptCue(cue);
+      if (!normalized || normalized === previous) continue;
+      deduped.push(cue);
+      previous = normalized;
+    }
+    const text = deduped.join("\n").replace(/\n{3,}/g, "\n\n").trim();
     return cleanText(text, maxTranscriptChars);
   } catch {
     return "";
   }
+}
+
+function transcriptCueTexts(raw) {
+  const blocks = String(raw || "")
+    .replace(/^\uFEFF/, "")
+    .replace(/\r/g, "")
+    .split(/\n{2,}/);
+  const cues = [];
+  for (const block of blocks) {
+    const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (!lines.length) continue;
+    const first = lines[0].toUpperCase();
+    if (first === "WEBVTT" || first.startsWith("NOTE") || first.startsWith("STYLE") || first.startsWith("REGION")) continue;
+    if (/^\d+$/.test(lines[0])) lines.shift();
+    const timeIndex = lines.findIndex((line) => line.includes("-->"));
+    const textLines = timeIndex >= 0 ? lines.slice(timeIndex + 1) : lines;
+    const text = textLines
+      .map(cleanTranscriptLine)
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (text) cues.push(text);
+  }
+  return cues;
+}
+
+function cleanTranscriptLine(line) {
+  return String(line || "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\{\\[^}]+\}/g, "")
+    .replace(/\[[^\]]*(?:music|applause|laughter|noise)[^\]]*\]/gi, "")
+    .replace(/\s+(?:align|position|line|size|vertical):\S+/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeTranscriptCue(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/[،,.;:!?؟"'`()[\]{}]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 async function downloadUrlAsset(vaultPath, sourceUrl, stamp, index, label) {
@@ -517,12 +664,12 @@ async function downloadUrlAsset(vaultPath, sourceUrl, stamp, index, label) {
 }
 
 async function downloadUrlAssetInDir(dir, vaultPath, sourceUrl, stamp, index, label) {
-  const response = await fetch(sourceUrl, {
+  const response = await fetchWithTimeout(sourceUrl, {
     redirect: "follow",
     headers: {
-      "user-agent": "LLM Wiki Agent Browser Clipper/0.1"
+      "user-agent": "LLM Agent Learning Boost Browser Clipper/0.1"
     }
-  });
+  }, serverMediaFetchTimeoutMs);
   if (!response.ok) throw new Error(`Media download failed: HTTP ${response.status}`);
   const contentLength = Number(response.headers.get("content-length") || 0);
   if (contentLength > maxAssetBytes) throw new Error("Media asset is too large.");
@@ -539,6 +686,24 @@ async function downloadUrlAssetInDir(dir, vaultPath, sourceUrl, stamp, index, la
     url: "",
     sourceUrl
   };
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: options.signal || controller.signal
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`Media download timed out after ${Math.round(timeoutMs / 1000)}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function saveDataUrlAsset(vaultPath, dataUrl, stamp, index, label, sourceUrl) {

@@ -3,23 +3,36 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build/macos"
-APP="$BUILD/LLM Wiki Agent.app"
-CONTENTS="$APP/Contents"
+APP="$BUILD/LLM Agent Learning Boost.app"
+NEW_APP="$BUILD/.LLM Agent Learning Boost.app.new"
+STAGING_ROOT="${TMPDIR:-/tmp}/llm-agent-learning-boost-build.$$"
+STAGING_APP="$STAGING_ROOT/LLM Agent Learning Boost.app"
+CONTENTS="$STAGING_APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 AGENT="$RESOURCES/agent"
 APP_ICON="$ROOT/native/macos/LLMWikiAgent/Resources/AppIcon.icns"
+SWIFT_SOURCE="$ROOT/native/macos/LLMWikiAgent/Sources/LLMWikiAgent/main.swift"
+STAGING_SWIFT="$STAGING_ROOT/main.swift"
 MACOS_ARCH="${MACOS_ARCH:-}"
 
-rm -rf "$APP"
+cleanup() {
+  rm -rf "$STAGING_ROOT"
+  rm -rf "$NEW_APP"
+}
+trap cleanup EXIT
+
+rm -rf "$STAGING_ROOT"
 mkdir -p "$MACOS" "$RESOURCES" "$AGENT"
 
 if [ ! -f "$APP_ICON" ]; then
   "$ROOT/scripts/generate_app_icon.sh"
 fi
 
+cp "$SWIFT_SOURCE" "$STAGING_SWIFT"
+
 SWIFTC_ARGS=(
-  "$ROOT/native/macos/LLMWikiAgent/Sources/LLMWikiAgent/main.swift"
+  "$STAGING_SWIFT"
   -o "$MACOS/LLMWikiAgent"
   -framework AppKit
   -framework WebKit
@@ -36,9 +49,9 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key><string>LLMWikiAgent</string>
-  <key>CFBundleIdentifier</key><string>local.llmwiki.agent</string>
-  <key>CFBundleName</key><string>LLM Wiki Agent</string>
-  <key>CFBundleDisplayName</key><string>LLM Wiki Agent</string>
+  <key>CFBundleIdentifier</key><string>local.llmagent.learningboost</string>
+  <key>CFBundleName</key><string>LLM Agent Learning Boost</string>
+  <key>CFBundleDisplayName</key><string>LLM Agent Learning Boost</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.1</string>
@@ -58,5 +71,19 @@ if [ -d "$ROOT/media" ]; then
   cp -R "$ROOT/media" "$AGENT/media"
 fi
 find "$AGENT" -name '.DS_Store' -delete
+
+test -f "$AGENT/src/server.mjs"
+test -f "$AGENT/package.json"
+
+mkdir -p "$BUILD"
+rm -rf "$NEW_APP"
+cp -R "$STAGING_APP" "$NEW_APP"
+test -f "$NEW_APP/Contents/Resources/agent/src/server.mjs"
+rm -rf "$APP.previous"
+if [ -d "$APP" ]; then
+  mv "$APP" "$APP.previous"
+fi
+mv "$NEW_APP" "$APP"
+rm -rf "$APP.previous"
 
 echo "Built: $APP"

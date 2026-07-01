@@ -3,13 +3,27 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { getConfig, hasRealKey } from "./config.mjs";
+import {
+  cloudFallbackProviders,
+  isCloudFallbackConfigured,
+  localProviderTip,
+  resolveLocalProvider
+} from "./local-ai.mjs";
 
 export class ProviderError extends Error {}
 
 export function createProvider(config = getConfig()) {
   const provider = config.provider;
+  if (provider === "local_auto") return localAutoProvider(config);
+  return createDirectProvider(config, provider);
+}
+
+function createDirectProvider(config, provider) {
+  if (["ollama", "mlx_lm_server", "mlx_lm_cli"].includes(provider)) {
+    return providerForResolvedLocal(config, { provider });
+  }
   if (provider === "openai") return openAiProvider(config.openai, config.model);
-  if (provider === "openai_compat") return openAiProvider(config.openaiCompat, config.model);
+  if (provider === "openai_compat") return openAiProvider(config.openaiCompat, config.model, { apiKeyOptional: isLocalish(config.openaiCompat.baseUrl) });
   if (provider === "anthropic") return anthropicProvider(config.anthropic, config.model);
   if (provider === "gemini") return geminiProvider(config.gemini, config.model);
   if (["openai_subscription", "openai_oauth", "chatgpt"].includes(provider)) {
@@ -19,6 +33,61 @@ export function createProvider(config = getConfig()) {
     return unsupportedAccountProvider("Anthropic API calls require API keys. Claude subscriptions cannot be used as API credentials.");
   }
   throw new ProviderError(`Unsupported DEFAULT_AI_PROVIDER: ${provider}`);
+}
+
+function localAutoProvider(config) {
+  return {
+    name: "local-auto",
+    async complete(messages, options = {}) {
+      const resolved = await resolveLocalProvider(config);
+      if (resolved) {
+        return providerForResolvedLocal(config, resolved).complete(messages, options);
+      }
+      const tips = (config.localAI.priority || [])
+        .filter((provider) => ["mlx_lm_server", "ollama", "mlx_lm_cli", "openai_compat"].includes(provider))
+        .map(localProviderTip);
+      const fallback = cloudFallbackProviders(config).find((provider) => isCloudFallbackConfigured(config, provider));
+      if (!fallback) {
+        throw new ProviderError([
+          "No local AI provider is reachable.",
+          ...tips
+        ].join("\n"));
+      }
+      if (config.localAI.requireConfirmCloudFallback && !options.allowCloudFallback) {
+        throw new ProviderError([
+          "No local AI provider is reachable. Cloud fallback is available, but requires confirmation.",
+          `Available fallback: ${fallback}.`,
+          ...tips
+        ].join("\n"));
+      }
+      return createDirectProvider(config, fallback).complete(messages, options);
+    }
+  };
+}
+
+function providerForResolvedLocal(config, resolved) {
+  if (resolved.provider === "mlx_lm_server") {
+    return openAiProvider({
+      authMethod: config.mlxLmServer.apiKey ? "api_key" : "none",
+      apiKey: config.mlxLmServer.apiKey,
+      baseUrl: `${config.mlxLmServer.baseUrl.replace(/\/$/, "")}/v1`
+    }, config.mlxLmServer.model, { apiKeyOptional: true });
+  }
+  if (resolved.provider === "ollama") {
+    if (config.ollama.openAiCompat) {
+      return openAiProvider({
+        authMethod: "none",
+        apiKey: "",
+        baseUrl: `${config.ollama.baseUrl.replace(/\/$/, "")}/v1`
+      }, config.ollama.model, { apiKeyOptional: true });
+    }
+    return ollamaNativeProvider(config.ollama);
+  }
+  if (resolved.provider === "mlx_lm_cli") return mlxLmCliProvider(config.mlxLmCli);
+  if (resolved.provider === "openai_compat") {
+    return openAiProvider(config.openaiCompat, config.model, { apiKeyOptional: isLocalish(config.openaiCompat.baseUrl) });
+  }
+  throw new ProviderError(`Unsupported resolved local provider: ${resolved.provider}`);
 }
 
 function assertKey(apiKey, provider) {
@@ -53,11 +122,11 @@ function codexCliProvider(options, model) {
   };
 }
 
-function openAiProvider(options, model) {
+function openAiProvider(options, model, { apiKeyOptional = false } = {}) {
   return {
     name: "openai-compatible",
     async complete(messages, { temperature = 0.2 } = {}) {
-      const headers = openAiHeaders(options);
+      const headers = openAiHeaders(options, { apiKeyOptional });
       const response = await fetch(`${options.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers: {
@@ -73,6 +142,51 @@ function openAiProvider(options, model) {
       if (!response.ok) throw new ProviderError(await response.text());
       const data = await response.json();
       return data.choices?.[0]?.message?.content || "";
+    }
+  };
+}
+
+function ollamaNativeProvider(options) {
+  return {
+    name: "ollama-native",
+    async complete(messages, { temperature = 0.2 } = {}) {
+      const simplePrompt = messages.length === 1 && messages[0]?.role === "user";
+      const endpoint = simplePrompt ? "/api/generate" : "/api/chat";
+      const body = simplePrompt
+        ? {
+            model: options.model,
+            prompt: messages[0].content,
+            stream: false,
+            options: { temperature }
+          }
+        : {
+            model: options.model,
+            messages,
+            stream: false,
+            options: { temperature }
+          };
+      const response = await fetch(`${options.baseUrl.replace(/\/$/, "")}${endpoint}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      if (!response.ok) throw new ProviderError(await response.text());
+      const data = await response.json();
+      return data.message?.content || data.response || "";
+    }
+  };
+}
+
+function mlxLmCliProvider(options) {
+  return {
+    name: "mlx-lm-cli",
+    async complete(messages) {
+      return runMlxLmGenerate({
+        command: options.command,
+        model: options.model,
+        timeoutMs: options.timeoutMs,
+        prompt: localPrompt(messages)
+      });
     }
   };
 }
@@ -217,20 +331,78 @@ function geminiProvider(options, model) {
   };
 }
 
-function openAiHeaders(options) {
+function openAiHeaders(options, { apiKeyOptional = false } = {}) {
   const authMethod = options.authMethod || "api_key";
   if (authMethod === "oauth") {
     throw new ProviderError("OpenAI API calls require API keys. ChatGPT Plus/Pro/Team subscription login cannot be used as OAuth for this local API client.");
   }
+  if (authMethod === "none") return {};
   if (authMethod === "bearer") {
+    if (apiKeyOptional && !hasRealKey(options.bearerToken)) return {};
     assertKey(options.bearerToken, "OpenAI-compatible bearer token");
     return { authorization: `Bearer ${options.bearerToken}` };
   }
+  if (apiKeyOptional && !hasRealKey(options.apiKey)) return {};
   assertKey(options.apiKey, "OpenAI/OpenAI-compatible");
   const headers = { authorization: `Bearer ${options.apiKey}` };
   if (options.organization) headers["OpenAI-Organization"] = options.organization;
   if (options.project) headers["OpenAI-Project"] = options.project;
   return headers;
+}
+
+function runMlxLmGenerate({ command, model, timeoutMs, prompt }) {
+  return new Promise((resolve, reject) => {
+    const [bin, ...prefixArgs] = splitCommand(command || "mlx_lm.generate");
+    const args = [
+      ...prefixArgs,
+      "--model", model,
+      "--prompt", prompt
+    ];
+    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    let stdout = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new ProviderError(`MLX-LM CLI timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(new ProviderError(`Failed to start MLX-LM CLI: ${error.message}`));
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new ProviderError(`MLX-LM CLI exited with code ${code}: ${(stderr || stdout).trim()}`));
+        return;
+      }
+      resolve(cleanMlxOutput(stdout));
+    });
+  });
+}
+
+function localPrompt(messages) {
+  return messages.map((message) => `${message.role.toUpperCase()}:\n${message.content}`).join("\n\n");
+}
+
+function cleanMlxOutput(value) {
+  return String(value || "").trim();
+}
+
+function isLocalish(value) {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === "localhost" || host === "::1" || host.endsWith(".localhost") || host.endsWith(".local") ||
+      /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
+  } catch {
+    return false;
+  }
 }
 
 function geminiAuth(options, endpoint) {

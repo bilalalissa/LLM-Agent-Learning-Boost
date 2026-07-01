@@ -8,7 +8,9 @@ export function defaultSharedSettings(config) {
     schemaVersion: 1,
     provider: {
       mode: config.provider || "openai_subscription",
-      transport: ["openai_subscription", "openai_oauth", "chatgpt"].includes(config.provider) ? "mac_bridge" : "direct_api",
+      transport: config.provider === "local_auto"
+        ? "local_auto"
+        : (["openai_subscription", "openai_oauth", "chatgpt"].includes(config.provider) ? "mac_bridge" : "direct_api"),
       defaultModel: config.model || "gpt-5.4",
       credentialStatus: "local_only",
       bridgeURL: ""

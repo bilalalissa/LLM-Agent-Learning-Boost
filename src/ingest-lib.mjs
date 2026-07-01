@@ -3,6 +3,14 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createProvider } from "./provider.mjs";
 import {
+  appendLearningOutputs,
+  fallbackLearningBoost,
+  learningBoostJsonShape,
+  normalizeLearningBoost,
+  renderLearningBoostSection
+} from "./learning-extraction.mjs";
+import { processSourceFile } from "./source-processors/index.mjs";
+import {
   ensureDir,
   isMediaRawFile,
   listRawCandidates,
@@ -29,15 +37,17 @@ export async function ingestVault(vaultPath, config, provider = createProvider(c
 export async function ingestFile(vaultPath, sourcePath, config, provider = createProvider(config)) {
   const receivedAt = new Date();
   if (isMediaRawFile(sourcePath)) {
-    return ingestMediaFile(vaultPath, sourcePath, receivedAt, provider);
+    return ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, config);
   }
-  const sourceText = fs.readFileSync(sourcePath, "utf8").slice(0, config.ingestMaxChars);
+  const processedSource = processSourceFile(sourcePath, { ingestMaxChars: config.ingestMaxChars });
+  const sourceText = String(processedSource.text || "").slice(0, config.ingestMaxChars);
   const contract = readVaultContract(vaultPath);
   const index = readVaultIndex(vaultPath);
-  const sourceTitle = extractTitle(sourceText, sourcePath);
+  const sourceTitle = processedSource.title || extractTitle(sourceText, sourcePath);
   const date = today();
   const slug = slugify(sourceTitle);
-  const processedRel = `raw/processed/${date}--${slug}.md`;
+  const processedExt = path.extname(sourcePath).toLowerCase() || ".md";
+  const processedRel = uniqueRel(vaultPath, `raw/processed/${date}--${slug}${processedExt}`);
   const sourceRel = `wiki/sources/${date}--${slug}.md`;
 
   const analysis = await analyzeSource(provider, {
@@ -45,7 +55,9 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
     index,
     sourceTitle,
     sourcePath: path.relative(vaultPath, sourcePath),
-    sourceText
+    sourceText,
+    processedSource,
+    vault: vaultName(vaultPath)
   });
 
   ensureDir(path.join(vaultPath, "wiki/sources"));
@@ -53,7 +65,7 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
   ensureDir(path.join(vaultPath, "raw/processed"));
 
   const sourcePagePath = path.join(vaultPath, sourceRel);
-  fs.writeFileSync(sourcePagePath, renderSourcePage({ date, sourceTitle, processedRel, analysis }));
+  fs.writeFileSync(sourcePagePath, renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource }));
 
   const conceptPages = [];
   for (const concept of analysis.concepts.slice(0, 8)) {
@@ -67,6 +79,14 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
 
   updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages });
   appendLog(vaultPath, { date, sourceRel, sourcePath, processedRel, sourceTitle, conceptPages, receivedAt });
+  const learningResult = appendLearningOutputs(vaultPath, {
+    sourceRel,
+    sourceTitle,
+    processedRel,
+    boost: analysis.learning_boost,
+    sourceKind: processedSource.kind || "text",
+    processingNotes: [...(processedSource.processingNotes || []), ...(analysis.processing_notes || [])]
+  }, config);
 
   const processedPath = path.join(vaultPath, processedRel);
   if (path.resolve(sourcePath) !== path.resolve(processedPath)) {
@@ -78,11 +98,12 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
     source: path.relative(vaultPath, sourcePath),
     sourcePage: sourceRel,
     processed: processedRel,
-    conceptPages
+    conceptPages,
+    learning: learningResult
   };
 }
 
-async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider) {
+async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, config = {}) {
   const date = today();
   const ext = path.extname(sourcePath).toLowerCase();
   const sourceTitle = path.basename(sourcePath, ext);
@@ -98,10 +119,13 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider) {
   fs.renameSync(sourcePath, assetPath);
 
   const media = mediaMetadata(assetPath, assetRel, mediaKind, ext);
+  const processedSource = processSourceFile(assetPath, { ingestMaxChars: config.ingestMaxChars, assetRel });
   const analysis = await analyzeMediaSource(provider, {
     sourceTitle,
     media,
-    assetPath
+    assetPath,
+    processedSource,
+    vault: vaultName(vaultPath)
   });
 
   fs.writeFileSync(sourcePagePath, renderMediaSourcePage({
@@ -111,12 +135,21 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider) {
     mediaKind,
     ext,
     media,
-    analysis
+    analysis,
+    processedSource
   }));
 
   const conceptPages = createConceptPages(vaultPath, { date, analysis, sourceRel });
 
   updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages });
+  const learningResult = appendLearningOutputs(vaultPath, {
+    sourceRel,
+    sourceTitle,
+    processedRel: assetRel,
+    boost: analysis.learning_boost,
+    sourceKind: mediaKind,
+    processingNotes: [...(processedSource.processingNotes || []), ...(analysis.processing_notes || [])]
+  }, config);
   appendLog(vaultPath, {
     date,
     sourceRel,
@@ -133,7 +166,8 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider) {
     source: path.relative(vaultPath, sourcePath),
     sourcePage: sourceRel,
     processed: assetRel,
-    conceptPages
+    conceptPages,
+    learning: learningResult
   };
 }
 
@@ -158,7 +192,8 @@ async function reprocessPendingMediaPages(vaultPath, provider) {
     const sourceTitle = text.match(/^#\s+(.+)$/m)?.[1]?.trim() || path.basename(assetPath, path.extname(assetPath));
     const ext = path.extname(assetPath).toLowerCase();
     const media = mediaMetadata(assetPath, assetRel, mediaKind, ext);
-    const analysis = await analyzeMediaSource(provider, { sourceTitle, media, assetPath });
+    const processedSource = processSourceFile(assetPath, { assetRel });
+    const analysis = await analyzeMediaSource(provider, { sourceTitle, media, assetPath, processedSource, vault: vaultName(vaultPath) });
     const userNotes = text.match(/\n## User Notes[\s\S]*$/m)?.[0] || "";
     const sourceRel = path.relative(vaultPath, sourcePagePath).replace(/\\/g, "/");
 
@@ -169,7 +204,8 @@ async function reprocessPendingMediaPages(vaultPath, provider) {
       mediaKind,
       ext,
       media,
-      analysis
+      analysis,
+      processedSource
     }) + userNotes);
 
     const conceptPages = createConceptPages(vaultPath, { date, analysis, sourceRel });
@@ -232,6 +268,12 @@ Media file path: ${input.assetPath}
 Media metadata:
 ${JSON.stringify(input.media, null, 2)}
 
+Extracted local text, transcript, or manual description if available:
+${input.processedSource?.text || ""}
+
+Processor notes:
+${(input.processedSource?.processingNotes || []).join("\n")}
+
 If you can inspect the local media file, extract visible/audible/document insights. If you cannot inspect the file content, use only metadata and clearly say that the content was not visually/audibly analyzed.
 
 Return strict JSON with this shape:
@@ -245,7 +287,8 @@ Return strict JSON with this shape:
   "contradictions": ["contradiction or empty"],
   "source_learning_questions": [{"question": "learning question grounded in this media source", "answer": "source-grounded answer"}],
   "open_learning_questions": [{"question": "broader learning question that expands context, transfer, or global awareness", "answer": "careful answer using source-grounded connections and noting uncertainty"}],
-  "processing_notes": ["what was inspected and any limitations"]
+  "processing_notes": ["what was inspected and any limitations"],
+  ${learningBoostJsonShape().slice(2, -2)}
 }`;
 
   try {
@@ -253,13 +296,13 @@ Return strict JSON with this shape:
       { role: "system", content: "Return only valid JSON. Preserve source traceability. Do not invent visual, audio, or document facts. Write generated content in the source's primary language when the content is known. Open questions must include current answers or state why they remain unresolved." },
       { role: "user", content: prompt }
     ], { allowTools: true });
-    return parseMediaJson(text, input.media);
+    return parseMediaJson(text, input.media, input);
   } catch (error) {
-    return fallbackMediaAnalysis(input.media, error);
+    return fallbackMediaAnalysis(input.media, error, input);
   }
 }
 
-function parseMediaJson(text, media) {
+function parseMediaJson(text, media, input = {}) {
   const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
   const raw = JSON.parse(cleaned);
   const parsed = {
@@ -273,16 +316,25 @@ function parseMediaJson(text, media) {
     source_learning_questions: asLearningItems(raw.source_learning_questions),
     open_learning_questions: asLearningItems(raw.open_learning_questions)
   };
+  const context = analysisContext(input, {
+    sourceRel: "",
+    processedRel: media.assetRel,
+    sourceTitle: input.sourceTitle,
+    sourceText: input.processedSource?.text || "",
+    evidence: input.processedSource?.evidence || [media.assetRel],
+    mediaRefs: [media.assetRel]
+  });
   return {
     ...parsed,
     processing_notes: asArray(raw.processing_notes),
+    learning_boost: normalizeLearningBoost(raw.learning_boost || {}, { ...context, summary: parsed.summary, language: parsed.language }),
     analyzed: true,
     status: "analyzed"
   };
 }
 
-function fallbackMediaAnalysis(media, error) {
-  return {
+function fallbackMediaAnalysis(media, error, input = {}) {
+  const parsed = {
     summary: `${media.kind} source preserved as a local asset. The configured provider did not return a media analysis, so this page records metadata and keeps the source available for later review.`,
     language: "unknown",
     key_points: [
@@ -309,6 +361,13 @@ function fallbackMediaAnalysis(media, error) {
     analyzed: false,
     status: "fallback"
   };
+  parsed.learning_boost = fallbackLearningBoost(parsed, analysisContext(input, {
+    sourceTitle: input.sourceTitle,
+    processedRel: media.assetRel,
+    evidence: input.processedSource?.evidence || [media.assetRel],
+    mediaRefs: [media.assetRel]
+  }));
+  return parsed;
 }
 
 function mediaMetadata(assetPath, assetRel, kind, ext) {
@@ -365,9 +424,9 @@ function uniqueRel(vaultPath, initialRel) {
 }
 
 function mediaKindFor(ext) {
-  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"].includes(ext)) return "image";
-  if ([".mp4", ".mov", ".m4v"].includes(ext)) return "video";
-  if ([".mp3", ".wav", ".m4a", ".aiff"].includes(ext)) return "audio";
+  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".heic"].includes(ext)) return "image";
+  if ([".mp4", ".mov", ".m4v", ".webm"].includes(ext)) return "video";
+  if ([".mp3", ".wav", ".m4a", ".aiff", ".aac"].includes(ext)) return "audio";
   if (ext === ".pdf") return "PDF";
   return "media";
 }
@@ -399,9 +458,21 @@ Return strict JSON with this shape:
   "entities": [{"name": "Entity Name", "summary": "one sentence"}],
   "open_questions": [{"question": "unresolved source or wiki question", "answer": "current source-grounded answer, partial answer, or why it remains unresolved"}],
   "contradictions": ["contradiction or empty"],
-  "source_learning_questions": [{"question": "learning question grounded in this source", "answer": "source-grounded answer"}],
-  "open_learning_questions": [{"question": "broader learning question that expands context, transfer, or global awareness", "answer": "careful answer using source-grounded connections and noting uncertainty"}]
+    "source_learning_questions": [{"question": "learning question grounded in this source", "answer": "source-grounded answer"}],
+  "open_learning_questions": [{"question": "broader learning question that expands context, transfer, or global awareness", "answer": "careful answer using source-grounded connections and noting uncertainty"}],
+  "processing_notes": ["what was inspected and any limitations"],
+  ${learningBoostJsonShape().slice(2, -2)}
 }
+
+Extracted source kind: ${input.processedSource?.kind || "text"}
+Extracted source metadata:
+${JSON.stringify(input.processedSource?.metadata || {}, null, 2)}
+
+Evidence hints:
+${(input.processedSource?.evidence || [input.sourcePath]).join("\n")}
+
+Processor notes:
+${(input.processedSource?.processingNotes || []).join("\n")}
 
 Source text:
 ${input.sourceText}`;
@@ -410,13 +481,13 @@ ${input.sourceText}`;
     { role: "system", content: "Return only valid JSON. Preserve source traceability. Do not invent facts. Write generated content in the source's primary language unless the source is meaningfully multilingual. Open questions must include current answers or state why they remain unresolved." },
     { role: "user", content: prompt }
   ]);
-  return parseJson(text);
+  return parseJson(text, input);
 }
 
-function parseJson(text) {
+function parseJson(text, input = {}) {
   const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
   const data = JSON.parse(cleaned);
-  return {
+  const parsed = {
     summary: String(data.summary || ""),
     language: String(data.language || ""),
     key_points: asArray(data.key_points),
@@ -425,7 +496,29 @@ function parseJson(text) {
     open_questions: asLearningItems(data.open_questions),
     contradictions: asArray(data.contradictions),
     source_learning_questions: asLearningItems(data.source_learning_questions),
-    open_learning_questions: asLearningItems(data.open_learning_questions)
+    open_learning_questions: asLearningItems(data.open_learning_questions),
+    processing_notes: asArray(data.processing_notes)
+  };
+  parsed.learning_boost = data.learning_boost
+    ? normalizeLearningBoost(data.learning_boost, { ...analysisContext(input), summary: parsed.summary, language: parsed.language })
+    : fallbackLearningBoost(parsed, analysisContext(input));
+  return parsed;
+}
+
+function analysisContext(input = {}, extra = {}) {
+  return {
+    vault: input.vault || "",
+    sourceRel: extra.sourceRel || "",
+    sourceTitle: extra.sourceTitle || input.sourceTitle || "",
+    processedRel: extra.processedRel || input.sourcePath || "",
+    sourceLocation: input.sourcePath || extra.processedRel || "",
+    summary: extra.summary || "",
+    language: extra.language || "",
+    targetLanguages: ["AUTO"],
+    mediaRefs: extra.mediaRefs || input.processedSource?.mediaRefs || [],
+    evidence: extra.evidence || input.processedSource?.evidence || [input.sourcePath].filter(Boolean),
+    learningProfile: {},
+    ...extra
   };
 }
 
@@ -456,7 +549,7 @@ function extractTitle(text, sourcePath) {
   return path.basename(sourcePath, path.extname(sourcePath));
 }
 
-function renderSourcePage({ date, sourceTitle, processedRel, analysis }) {
+function renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource = {} }) {
   return `---
 type: source
 status: active
@@ -479,6 +572,16 @@ ${analysis.summary}
 ## Key Points
 
 ${bulletList(analysis.key_points)}
+
+${renderLearningBoostSection(analysis.learning_boost)}
+
+## Source Processing
+
+- Processor: ${processedSource.kind || "text"}
+- Original/extracted extension: \`${processedSource.extension || path.extname(processedRel)}\`
+- Evidence hints: ${(processedSource.evidence || [processedRel]).join(", ")}
+${processedSource.mediaRefs?.length ? `- Media refs: ${processedSource.mediaRefs.join(", ")}` : "- Media refs: none"}
+${processedSource.processingNotes?.length ? `- Processor notes: ${processedSource.processingNotes.join("; ")}` : "- Processor notes: none"}
 
 ## Source's Related Learning Questions
 
@@ -506,7 +609,7 @@ ${bulletList(analysis.contradictions.length ? analysis.contradictions : ["None y
 `;
 }
 
-function renderMediaSourcePage({ date, sourceTitle, assetRel, mediaKind, ext, media, analysis }) {
+function renderMediaSourcePage({ date, sourceTitle, assetRel, mediaKind, ext, media, analysis, processedSource = {} }) {
   const preview = mediaKind === "image" ? `\n![[${assetRel}]]\n` : "";
   return `---
 type: source
@@ -543,6 +646,8 @@ ${media.width && media.height ? `- Dimensions: ${media.width} x ${media.height}`
 ## Key Points
 
 ${bulletList(analysis.key_points)}
+
+${renderLearningBoostSection(analysis.learning_boost)}
 
 ## Source's Related Learning Questions
 

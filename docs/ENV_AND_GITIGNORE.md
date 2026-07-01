@@ -84,5 +84,5 @@ For this project, the safer path is:
 Then upload:
 
 ```text
-release-template/llm-wiki-agent/
+release-template/llm-agent-learning-boost/
 ```

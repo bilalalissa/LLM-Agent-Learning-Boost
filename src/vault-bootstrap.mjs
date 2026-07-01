@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { today } from "./vaults.mjs";
 import { ensureSharedSettings } from "./shared-settings.mjs";
+import { ensureLearningScaffold } from "./learning-store.mjs";
 
 export function bootstrapVault(vaultPath, config = {}) {
   const created = [];
@@ -20,9 +21,11 @@ export function bootstrapVault(vaultPath, config = {}) {
     "wiki/questions",
     "wiki/synthesis",
     "wiki/maps",
+    "wiki/learning",
     "wiki/archive",
     "templates",
-    ".llm-wiki"
+    ".llm-wiki",
+    ".llm-wiki/learning"
   ]) {
     const full = path.join(vaultPath, dir);
     if (!fs.existsSync(full)) {
@@ -38,6 +41,7 @@ export function bootstrapVault(vaultPath, config = {}) {
   ensureFile(vaultPath, "index.md", indexTemplate(), created);
   ensureFile(vaultPath, "log.md", logTemplate(), created);
   ensureSharedSettings(vaultPath, config);
+  created.push(...ensureLearningScaffold(vaultPath, config));
   return created;
 }
 
@@ -95,7 +99,7 @@ Sources:
 - none
 
 Notes:
-- Generated automatically by LLM Wiki Agent.
+- Generated automatically by LLM Agent Learning Boost.
 
 Next:
 - Add markdown or text sources to \`raw/inbox/\` or \`raw/input/\`.
@@ -103,7 +107,7 @@ Next:
 }
 
 function agentsTemplate() {
-  return `# LLM Wiki Agent Schema
+  return `# LLM Agent Learning Boost Schema
 
 This vault is an LLM-maintained second brain. The human curates sources, asks questions, and directs emphasis. The agent maintains the wiki.
 
@@ -144,7 +148,7 @@ wiki/
 
 templates/      Reusable page templates.
 .llm-wiki/settings.json
-               Shared non-secret agent settings for macOS, iPad, iPhone, and future agents.
+               Shared non-secret agent settings for local macOS agents.
 index.md        Content-oriented catalog of the wiki.
 log.md          Append-only chronological maintenance record.
 AGENTS.md       This schema.
@@ -215,7 +219,7 @@ Learning questions must be phrased as questions, not claims. Answers must remain
 function sharedAgentStateTemplate() {
   return `## Shared Agent State
 
-All agents that operate on this vault must read \`.llm-wiki/settings.json\` before ingest, chat, search, or maintenance. The file stores only non-secret settings so macOS, iPad, iPhone, and future agents can display the same provider mode, model label, ingest/search preferences, display preferences, enabled wiki sections, and last-known agent metadata.
+All agents that operate on this vault must read \`.llm-wiki/settings.json\` before ingest, chat, search, or maintenance. The file stores only non-secret settings so local macOS agents can display the same provider mode, model label, ingest/search preferences, display preferences, enabled wiki sections, and last-known agent metadata.
 
 Secrets such as API keys, OAuth tokens, local absolute paths, bridge tokens, and subscription credentials must remain in local app storage or Keychain. The shared manifest may only record safe labels such as \`provider: openai_subscription\`, \`provider_transport: mac_bridge\`, and \`credential_status: local_only\`.
 

@@ -20,6 +20,7 @@ for (const vault of vaults) {
 }
 
 function providerAuthMethod(config) {
+  if (config.provider === "local_auto") return "local_auto";
   if (config.provider === "openai") return config.openai.authMethod;
   if (config.provider === "anthropic") return config.anthropic.authMethod;
   if (config.provider === "openai_compat") return config.openaiCompat.authMethod;
@@ -30,6 +31,7 @@ function providerAuthMethod(config) {
 }
 
 function credentialConfigured(config) {
+  if (config.provider === "local_auto") return true;
   if (config.provider === "openai") return hasRealKey(config.openai.apiKey);
   if (config.provider === "anthropic") return hasRealKey(config.anthropic.apiKey);
   if (config.provider === "openai_compat") {

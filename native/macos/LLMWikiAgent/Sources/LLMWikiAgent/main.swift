@@ -26,7 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let port = "8789"
     private var appSupport: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("LLM Wiki Agent", isDirectory: true)
+            .appendingPathComponent("LLM Agent Learning Boost", isDirectory: true)
     }
     private var defaultConfigURL: URL { appSupport.appendingPathComponent("config.env") }
     private var configPointerURL: URL { appSupport.appendingPathComponent("config-path.txt") }
@@ -55,14 +55,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        webView.loadHTMLString(statusHTML("Starting LLM Wiki Agent", "Starting the local wiki server..."), baseURL: nil)
+        webView.loadHTMLString(statusHTML("Starting LLM Agent Learning Boost", "Starting the local wiki server..."), baseURL: nil)
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1360, height: 860),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "LLM Wiki Agent"
+        window.title = "LLM Agent Learning Boost"
         window.delegate = self
         window.isReleasedWhenClosed = false
         window.center()
@@ -82,7 +82,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func installStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "text.book.closed", accessibilityDescription: "LLM Wiki Agent")
+        statusItem.button?.image = makeStatusItemIcon()
+        statusItem.button?.toolTip = "LLM Agent Learning Boost"
         let menu = NSMenu()
         menu.addItem(menuItem("Show App", #selector(showApp), "s"))
         menu.addItem(menuItem("Open Config", #selector(openConfig), ","))
@@ -104,6 +105,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         installMainMenu()
     }
 
+    private func makeStatusItemIcon() -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18))
+        image.lockFocus()
+
+        NSColor.black.setStroke()
+        NSColor.black.setFill()
+
+        let card = NSBezierPath(roundedRect: NSRect(x: 4.0, y: 3.0, width: 9.5, height: 12.0), xRadius: 2.0, yRadius: 2.0)
+        card.lineWidth = 1.5
+        card.stroke()
+
+        let topLine = NSBezierPath()
+        topLine.lineWidth = 1.2
+        topLine.lineCapStyle = .round
+        topLine.move(to: NSPoint(x: 6.2, y: 11.8))
+        topLine.line(to: NSPoint(x: 10.6, y: 11.8))
+        topLine.stroke()
+
+        let boost = NSBezierPath()
+        boost.lineWidth = 1.6
+        boost.lineCapStyle = .round
+        boost.lineJoinStyle = .round
+        boost.move(to: NSPoint(x: 6.0, y: 6.0))
+        boost.curve(to: NSPoint(x: 13.6, y: 9.5), controlPoint1: NSPoint(x: 8.0, y: 8.7), controlPoint2: NSPoint(x: 10.6, y: 9.6))
+        boost.line(to: NSPoint(x: 12.1, y: 10.9))
+        boost.move(to: NSPoint(x: 13.6, y: 9.5))
+        boost.line(to: NSPoint(x: 12.1, y: 8.1))
+        boost.stroke()
+
+        let marker = NSBezierPath(ovalIn: NSRect(x: 3.0, y: 2.4, width: 3.4, height: 3.4))
+        marker.fill()
+
+        image.unlockFocus()
+        image.isTemplate = true
+        image.accessibilityDescription = "LLM Agent Learning Boost"
+        return image
+    }
+
     private func menuItem(_ title: String, _ action: Selector, _ key: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
@@ -115,7 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let mainMenu = NSMenu()
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(menuItem("Quit LLM Wiki Agent", #selector(quit), "q"))
+        appMenu.addItem(menuItem("Quit LLM Agent Learning Boost", #selector(quit), "q"))
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
@@ -181,7 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func chooseConfigFile() {
         let panel = NSOpenPanel()
-        panel.title = "Choose LLM Wiki Agent Config"
+        panel.title = "Choose LLM Agent Learning Boost Config"
         panel.prompt = "Use Config"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -251,7 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let secondaryWebView = WKWebView(frame: .zero, configuration: configuration)
         secondaryWebView.navigationDelegate = self
         secondaryWebView.uiDelegate = self
-        secondaryWebView.loadHTMLString(statusHTML("Opening LLM Wiki Agent", "Loading the local wiki server..."), baseURL: nil)
+        secondaryWebView.loadHTMLString(statusHTML("Opening LLM Agent Learning Boost", "Loading the local wiki server..."), baseURL: nil)
 
         let secondaryWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1360, height: 860),
@@ -259,7 +298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             backing: .buffered,
             defer: false
         )
-        secondaryWindow.title = "LLM Wiki Agent"
+        secondaryWindow.title = "LLM Agent Learning Boost"
         secondaryWindow.isReleasedWhenClosed = false
         secondaryWindow.center()
         secondaryWindow.contentView = secondaryWebView
@@ -533,7 +572,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         do {
             try process.run()
         } catch {
-            showAlert("Node.js required", "Install Node.js, then restart LLM Wiki Agent.\n\nThe app checks /opt/homebrew/bin/node, /usr/local/bin/node, and PATH.\n\nError: \(error.localizedDescription)")
+            showAlert("Node.js required", "Install Node.js, then restart LLM Agent Learning Boost.\n\nThe app checks /opt/homebrew/bin/node, /usr/local/bin/node, and PATH.\n\nError: \(error.localizedDescription)")
         }
     }
 
@@ -563,7 +602,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.navigationRetryCounts[ObjectIdentifier(targetWebView)] = 0
                     targetWebView.load(appRequest)
                 } else if attempt < 90 {
-                    targetWebView.loadHTMLString(self.statusHTML("Starting LLM Wiki Agent", "Waiting for the local server... attempt \(attempt)/90"), baseURL: nil)
+                    targetWebView.loadHTMLString(self.statusHTML("Starting LLM Agent Learning Boost", "Waiting for the local server... attempt \(attempt)/90"), baseURL: nil)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                         self.loadAppWhenReady(in: targetWebView, attempt: attempt + 1)
                     }
@@ -594,7 +633,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let retryCount = navigationRetryCounts[key] ?? 0
         if nsError.domain == NSURLErrorDomain && retryableCodes.contains(nsError.code) && retryCount < 8 {
             navigationRetryCounts[key] = retryCount + 1
-            webView.loadHTMLString(statusHTML("Reconnecting LLM Wiki Agent", "\(error.localizedDescription)<br><br>Retrying..."), baseURL: nil)
+            webView.loadHTMLString(statusHTML("Reconnecting LLM Agent Learning Boost", "\(error.localizedDescription)<br><br>Retrying..."), baseURL: nil)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 self.loadAppWhenReady(in: webView)
             }
@@ -613,7 +652,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             backing: .buffered,
             defer: false
         )
-        childWindow.title = "LLM Wiki Agent"
+        childWindow.title = "LLM Agent Learning Boost"
         childWindow.isReleasedWhenClosed = false
         childWindow.center()
         childWindow.contentView = childWebView
@@ -624,7 +663,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
         let alert = NSAlert()
-        alert.messageText = "LLM Wiki Agent"
+        alert.messageText = "LLM Agent Learning Boost"
         alert.informativeText = message
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
@@ -633,7 +672,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
         let alert = NSAlert()
-        alert.messageText = "LLM Wiki Agent"
+        alert.messageText = "LLM Agent Learning Boost"
         alert.informativeText = message
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
@@ -995,6 +1034,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func providerConfigured() -> Bool {
         let provider = readConfigValue("DEFAULT_AI_PROVIDER") ?? ""
+        if provider == "local_auto" {
+            return true
+        }
         if provider == "openai_subscription" {
             return runQuick(["codex", "login", "status"]).lowercased().contains("logged in")
         }

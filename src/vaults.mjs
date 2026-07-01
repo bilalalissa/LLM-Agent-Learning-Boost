@@ -128,20 +128,38 @@ const ingestibleExtensions = new Set([
   ".md",
   ".txt",
   ".markdown",
+  ".html",
+  ".htm",
+  ".rtf",
+  ".csv",
+  ".tsv",
+  ".json",
+  ".jsonl",
+  ".docx",
+  ".odt",
+  ".pptx",
+  ".odp",
+  ".epub",
   ".png",
   ".jpg",
   ".jpeg",
   ".gif",
   ".webp",
   ".svg",
+  ".heic",
   ".pdf",
   ".mp3",
   ".wav",
   ".m4a",
   ".aiff",
+  ".aac",
   ".mp4",
   ".mov",
-  ".m4v"
+  ".m4v",
+  ".webm",
+  ".vtt",
+  ".srt",
+  ".url"
 ]);
 
 export function isIngestibleRawFile(file) {
@@ -149,7 +167,27 @@ export function isIngestibleRawFile(file) {
 }
 
 export function isTextRawFile(file) {
-  return new Set([".md", ".txt", ".markdown"]).has(path.extname(file).toLowerCase());
+  return new Set([
+    ".md",
+    ".txt",
+    ".markdown",
+    ".html",
+    ".htm",
+    ".rtf",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".jsonl",
+    ".docx",
+    ".odt",
+    ".pptx",
+    ".odp",
+    ".epub",
+    ".pdf",
+    ".vtt",
+    ".srt",
+    ".url"
+  ]).has(path.extname(file).toLowerCase());
 }
 
 export function isMediaRawFile(file) {

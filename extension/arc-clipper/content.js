@@ -8,9 +8,11 @@ function collectClip(captureType) {
 }
 
 function collectPage() {
+  const title = pageTitle();
   return {
     captureType: "page",
-    title: document.title || location.hostname,
+    title,
+    mediaTitle: title,
     url: location.href,
     text: document.body?.innerText || "",
     html: document.documentElement?.outerHTML?.slice(0, 150000) || "",
@@ -24,6 +26,7 @@ function collectSelection() {
   return {
     captureType: "selection",
     title: selectionTitle(text),
+    mediaTitle: pageTitle(),
     url: location.href,
     text,
     html: selectedHtml(selection),
@@ -32,9 +35,11 @@ function collectSelection() {
 }
 
 function collectPageMedia() {
+  const title = pageTitle();
   return {
     captureType: "media",
-    title: `Media from ${document.title || location.hostname}`,
+    title,
+    mediaTitle: title,
     url: location.href,
     text: `Media exported from ${location.href}`,
     html: "",
@@ -140,7 +145,29 @@ function selectedHtml(selection) {
 
 function selectionTitle(text) {
   const cleaned = String(text || "").replace(/\s+/g, " ").trim();
-  return cleaned ? cleaned.slice(0, 90) : (document.title || location.hostname);
+  return cleaned ? cleaned.slice(0, 90) : pageTitle();
+}
+
+function pageTitle() {
+  return cleanTitle(
+    metaContent('meta[property="og:title"]') ||
+      metaContent('meta[name="title"]') ||
+      document.querySelector("h1")?.textContent ||
+      document.title ||
+      location.hostname
+  );
+}
+
+function metaContent(selector) {
+  return document.querySelector(selector)?.getAttribute("content") || "";
+}
+
+function cleanTitle(value) {
+  return String(value || "")
+    .replace(/\s*[-|]\s*YouTube\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160) || location.hostname;
 }
 
 function looksLikeMedia(url) {

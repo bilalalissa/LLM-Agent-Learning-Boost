@@ -1,4 +1,6 @@
 const defaultServerUrl = "http://127.0.0.1:8789";
+const vaultFetchTimeoutMs = 5000;
+const preflightTimeoutMs = 120000;
 
 const serverUrlInput = document.querySelector("#server-url");
 const vaultSelect = document.querySelector("#vaults");
@@ -18,6 +20,7 @@ const videoPreflightMessage = document.querySelector("#video-preflight-message")
 
 let activeRequestId = "";
 let statePoll = 0;
+let previewTitleTouched = false;
 
 document.querySelector("#refresh").addEventListener("click", refreshVaults);
 document.querySelector("#clip-selection").addEventListener("click", () => prepare("selection"));
@@ -27,6 +30,9 @@ submitButton.addEventListener("click", submitPrepared);
 dismissStateButton.addEventListener("click", clearClipState);
 serverUrlInput.addEventListener("change", saveSettings);
 vaultSelect.addEventListener("change", saveSettings);
+previewTitleInput.addEventListener("input", () => {
+  previewTitleTouched = true;
+});
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === "clipState") {
@@ -61,7 +67,7 @@ async function saveSettings() {
 async function refreshVaults() {
   setStatus("Loading vaults...");
   try {
-    const response = await fetch(`${serverUrl()}/api/vaults`);
+    const response = await fetchWithTimeout(`${serverUrl()}/api/vaults`, {}, vaultFetchTimeoutMs);
     const data = await response.json();
     const vaults = Array.isArray(data.vaults) ? data.vaults : [];
     vaultSelect.innerHTML = "";
@@ -77,7 +83,7 @@ async function refreshVaults() {
     await saveSettings();
     setStatus(vaults.length ? `Ready. ${vaults.length} vault${vaults.length === 1 ? "" : "s"} detected.` : "No vaults were detected by the agent.");
   } catch {
-    setStatus(`Could not reach LLM Wiki Agent at ${serverUrl()}.`);
+    setStatus(`Could not reach LLM Agent Learning Boost at ${serverUrl()}.`);
   }
 }
 
@@ -117,7 +123,8 @@ function submitPrepared() {
     updates: {
       title: previewTitleInput.value,
       tags: previewTagsInput.value,
-      videoHandling: selectedVideoHandling()
+      videoHandling: selectedVideoHandling(),
+      selectedMediaIds: selectedMediaIds()
     }
   }, (response) => {
     if (chrome.runtime.lastError) {
@@ -140,6 +147,7 @@ function submitPrepared() {
 function renderPreview(result) {
   document.querySelector("#preview-type").textContent = result.captureType || "";
   previewTitleInput.value = result.title || "";
+  previewTitleTouched = false;
   previewTagsInput.value = Array.isArray(result.tags) ? result.tags.join(", ") : "";
   document.querySelector("#preview-text").textContent = `${result.textLength || 0} characters`;
   videoPreflight.hidden = true;
@@ -178,11 +186,19 @@ function renderPreview(result) {
   for (const media of visibleItems) {
     const item = document.createElement("li");
     item.className = media.dataUrl ? "downloaded" : "url-only";
+    const checked = media.selected === false ? "" : " checked";
+    const disabled = media.selectable === false ? " disabled" : "";
+    const clipId = escapeHtml(media.clipId || media.id || media.url || "");
     item.innerHTML = `
-      <strong>${escapeHtml(mediaLabel(media))}</strong>
-      <span>${escapeHtml(media.type || "media")} · ${escapeHtml(statusText(media))}</span>
-      <small>${escapeHtml(media.url || "")}</small>
-      ${media.downloadError ? `<em>${escapeHtml(media.downloadError)}</em>` : ""}
+      <label class="media-choice">
+        <input type="checkbox" name="media-item" value="${clipId}"${checked}${disabled}>
+        <span>
+          <strong>${escapeHtml(mediaLabel(media))}</strong>
+          <span>${escapeHtml(media.type || "media")} · ${escapeHtml(statusText(media))}</span>
+          <small>${escapeHtml(media.url || "")}</small>
+          ${media.downloadError ? `<em>${escapeHtml(media.downloadError)}</em>` : ""}
+        </span>
+      </label>
     `;
     mediaList.append(item);
   }
@@ -202,7 +218,7 @@ async function loadVideoPreflight(result) {
   videoPreflight.hidden = false;
   videoPreflightMessage.textContent = "Estimating video size before submit...";
   try {
-    const response = await fetch(`${serverUrl()}/api/clip-preflight`, {
+    const response = await fetchWithTimeout(`${serverUrl()}/api/clip-preflight`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -210,24 +226,34 @@ async function loadVideoPreflight(result) {
         url: result.url,
         singleVideoRequest: result.singleVideoRequest
       })
-    });
+    }, preflightTimeoutMs);
     const data = await response.json();
     if (!response.ok || data.error) throw new Error(data.error || "Video preflight failed.");
+    if (data.title && !previewTitleTouched) {
+      previewTitleInput.value = data.title;
+    }
     const recommended = data.recommendedHandling || "transcript-only";
     videoPreflightMessage.textContent = [
       data.title ? `Title: ${data.title}` : "",
+      data.hasTranscriptCandidates ? `Transcript available: ${transcriptCandidateLabel(data.transcriptCandidates)}.` : "Transcript unavailable.",
       `Estimated size: ${data.estimatedLabel || "unknown"}.`,
-      data.warning || "Choose how the agent should handle this video before processing.",
+      data.warning || "Transcript is required for every YouTube save. Choose transcript-only, vault video + transcript, or temporary video + transcript.",
       data.error ? `Preflight note: ${data.error}` : ""
     ].filter(Boolean).join(" ");
     const radio = videoPreflight.querySelector(`input[value="${recommended}"]`);
     if (radio) radio.checked = true;
+    if (!data.hasTranscriptCandidates) {
+      submitButton.disabled = true;
+      setStatus("Transcript is required before this YouTube clip can be saved.");
+      return;
+    }
+    submitButton.disabled = false;
   } catch (error) {
-    videoPreflightMessage.textContent = `${error.message} Choose transcript-only unless you explicitly want to try a video download.`;
+    videoPreflightMessage.textContent = `${error.message} Transcript is required before this YouTube clip can be saved.`;
     const radio = videoPreflight.querySelector('input[value="transcript-only"]');
     if (radio) radio.checked = true;
-  } finally {
-    submitButton.disabled = false;
+    submitButton.disabled = true;
+    setStatus("Transcript preflight failed. The clip cannot be submitted yet.");
   }
 }
 
@@ -312,6 +338,19 @@ function selectedVideoHandling() {
   return videoPreflight.querySelector('input[name="video-handling"]:checked')?.value || "transcript-only";
 }
 
+function selectedMediaIds() {
+  return Array.from(document.querySelectorAll('input[name="media-item"]:checked'))
+    .map((input) => input.value)
+    .filter(Boolean);
+}
+
+function transcriptCandidateLabel(candidates) {
+  const values = Array.isArray(candidates) ? candidates : [];
+  return values.length
+    ? values.map((item) => `${item.language || "unknown"} ${item.source || ""}`.trim()).slice(0, 4).join(", ")
+    : "none";
+}
+
 function isStreamChunkMedia(media) {
   const value = `${media?.url || media?.src || ""} ${media?.filename || ""} ${media?.alt || ""}`.toLowerCase();
   return /\.(m4s|mpd|m3u8)(\?|#|\s|$)/.test(value) ||
@@ -365,6 +404,24 @@ function sendRuntimeMessage(message) {
 
 function serverUrl() {
   return String(serverUrlInput.value || defaultServerUrl).replace(/\/+$/, "");
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: options.signal || controller.signal
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function setStatus(message) {

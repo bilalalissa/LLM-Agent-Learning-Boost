@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { trackBehaviorEvent } from "./behavior-tracker.mjs";
+import { collectManualImport } from "./source-collectors/manual-import-collector.mjs";
 import { ensureDir, listVaults, slugify, vaultName } from "./vaults.mjs";
 
 export function saveChatAsRawSource(config, payload) {
@@ -17,6 +19,24 @@ export function saveChatAsRawSource(config, payload) {
   const fullPath = uniquePath(path.join(vaultPath, rel));
   ensureDir(path.dirname(fullPath));
   fs.writeFileSync(fullPath, renderSource({ title, question, answer, now }));
+  trackBehaviorEvent(vaultPath, {
+    type: "source_added",
+    sourcePath: path.relative(vaultPath, fullPath).replace(/\\/g, "/"),
+    sourceKind: "chat-capture",
+    metadata: {
+      questionLength: question.length,
+      answerLength: answer.length
+    }
+  });
+  collectManualImport(vaultPath, {
+    title,
+    file: path.relative(vaultPath, fullPath).replace(/\\/g, "/"),
+    sourceType: "manual_import",
+    topic: "AI",
+    processingStatus: "ready_for_ingest",
+    recommendedNextAction: "Review the saved answer and ingest it as a learning source.",
+    evidenceQuality: "medium"
+  });
 
   return {
     vault: vaultName(vaultPath),

@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="860" viewBox="0 0 1280 860" role="img" aria-labelledby="title desc">
+  <title id="title">Annotated Learning tab</title>
+  <desc id="desc">A simplified map of the Learning tab with numbered callouts for vault selection, overview cards, plan actions, learner profile, source capture, and add resource controls.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f4ecd8; }
+      .panel { fill: #fffaf0; stroke: #d8c7a3; stroke-width: 2; }
+      .soft { fill: #eadfca; stroke: #d8c7a3; stroke-width: 1.5; }
+      .field { fill: #fffaf0; stroke: #d8c7a3; stroke-width: 1.5; }
+      .text { fill: #2f271f; font: 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .muted { fill: #75664f; font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .small { fill: #75664f; font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .heading { fill: #2f271f; font: 700 22px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .section { fill: #2f271f; font: 800 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .tab { fill: #75664f; font: 700 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .active { fill: #8a5a19; font: 800 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .button { fill: #9a6518; }
+      .buttonText { fill: #ffffff; font: 700 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; }
+      .callout { fill: #1f5eff; stroke: #ffffff; stroke-width: 3; }
+      .calloutText { fill: #ffffff; font: 800 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; dominant-baseline: central; }
+      .line { stroke: #1f5eff; stroke-width: 3; fill: none; stroke-linecap: round; }
+    </style>
+  </defs>
+  <rect class="bg" width="1280" height="860"/>
+  <rect class="panel" x="28" y="32" width="1224" height="790" rx="8"/>
+  <text class="heading" x="58" y="76">LLM Agent Learning Boost</text>
+  <text class="tab" x="58" y="120">Chat</text>
+  <text class="tab" x="126" y="120">Local</text>
+  <text class="tab" x="194" y="120">Files</text>
+  <text class="tab" x="262" y="120">Archive</text>
+  <text class="tab" x="352" y="120">Topics</text>
+  <text class="active" x="438" y="120">Learning</text>
+  <rect class="button" x="438" y="134" width="78" height="4" rx="2"/>
+  <text class="tab" x="548" y="120">Provider</text>
+  <text class="tab" x="658" y="120">Notes</text>
+
+  <text class="muted" x="58" y="176">Local profile, onboarding, and working-memory settings for the selected vault.</text>
+  <rect class="panel" x="58" y="198" width="1166" height="54" rx="6"/>
+  <text class="text" x="78" y="232">Vault</text>
+  <rect class="field" x="130" y="211" width="260" height="28" rx="5"/>
+  <text class="muted" x="146" y="231">Eng-vault</text>
+  <rect class="field" x="404" y="211" width="86" height="28" rx="5"/>
+  <text class="muted" x="424" y="231">Refresh</text>
+
+  <rect class="panel" x="58" y="274" width="1166" height="150" rx="8"/>
+  <text class="section" x="82" y="310">Overview</text>
+  <rect class="soft" x="82" y="330" width="242" height="70" rx="6"/>
+  <text class="text" x="100" y="358">Today</text>
+  <text class="small" x="100" y="382">Due cards, next actions</text>
+  <rect class="soft" x="344" y="330" width="242" height="70" rx="6"/>
+  <text class="text" x="362" y="358">Sources</text>
+  <text class="small" x="362" y="382">ResourceInbox status</text>
+  <rect class="soft" x="606" y="330" width="242" height="70" rx="6"/>
+  <text class="text" x="624" y="358">Plans</text>
+  <text class="small" x="624" y="382">Latest staged plan</text>
+  <rect class="soft" x="868" y="330" width="242" height="70" rx="6"/>
+  <text class="text" x="886" y="358">Provider health</text>
+  <text class="small" x="886" y="382">Local AI status</text>
+
+  <rect class="panel" x="58" y="446" width="1166" height="118" rx="8"/>
+  <text class="section" x="82" y="482">Plan Actions</text>
+  <rect class="field" x="82" y="502" width="300" height="34" rx="5"/>
+  <text class="muted" x="100" y="525">Plan ID for approval/export</text>
+  <rect class="button" x="400" y="502" width="110" height="34" rx="5"/><text class="buttonText" x="455" y="524">Draft</text>
+  <rect class="button" x="522" y="502" width="120" height="34" rx="5"/><text class="buttonText" x="582" y="524">Approve</text>
+  <rect class="button" x="654" y="502" width="120" height="34" rx="5"/><text class="buttonText" x="714" y="524">Activate</text>
+  <rect class="button" x="786" y="502" width="132" height="34" rx="5"/><text class="buttonText" x="852" y="524">Calendar</text>
+  <rect class="button" x="930" y="502" width="132" height="34" rx="5"/><text class="buttonText" x="996" y="524">Reminders</text>
+
+  <rect class="panel" x="58" y="586" width="560" height="170" rx="8"/>
+  <text class="section" x="82" y="622">Learner Profile</text>
+  <rect class="field" x="82" y="642" width="230" height="30" rx="5"/><text class="small" x="96" y="662">Profile name</text>
+  <rect class="field" x="328" y="642" width="230" height="30" rx="5"/><text class="small" x="342" y="662">Target languages</text>
+  <rect class="field" x="82" y="686" width="230" height="30" rx="5"/><text class="small" x="96" y="706">Working memory</text>
+  <rect class="field" x="328" y="686" width="230" height="30" rx="5"/><text class="small" x="342" y="706">Coaching style</text>
+  <rect class="button" x="418" y="728" width="140" height="30" rx="5"/><text class="buttonText" x="488" y="748">Save profile</text>
+
+  <rect class="panel" x="642" y="586" width="582" height="170" rx="8"/>
+  <text class="section" x="666" y="622">Source Capture</text>
+  <rect class="soft" x="666" y="642" width="150" height="30" rx="5"/><text class="small" x="682" y="662">Manual import</text>
+  <rect class="soft" x="830" y="642" width="150" height="30" rx="5"/><text class="small" x="846" y="662">Browser clipper</text>
+  <rect class="soft" x="994" y="642" width="150" height="30" rx="5"/><text class="small" x="1010" y="662">Screenshots</text>
+  <rect class="field" x="666" y="686" width="250" height="30" rx="5"/><text class="small" x="682" y="706">Cloud policy</text>
+  <rect class="field" x="934" y="686" width="210" height="30" rx="5"/><text class="small" x="950" y="706">Retention days</text>
+  <rect class="button" x="986" y="728" width="158" height="30" rx="5"/><text class="buttonText" x="1065" y="748">Save capture</text>
+
+  <circle class="callout" cx="372" cy="226" r="18"/><text class="calloutText" x="372" y="226">1</text><path class="line" d="M354 226 L244 240"/>
+  <circle class="callout" cx="1110" cy="352" r="18"/><text class="calloutText" x="1110" y="352">2</text><path class="line" d="M1090 352 L1000 352"/>
+  <circle class="callout" cx="1062" cy="520" r="18"/><text class="calloutText" x="1062" y="520">3</text><path class="line" d="M1042 520 L932 520"/>
+  <circle class="callout" cx="560" cy="622" r="18"/><text class="calloutText" x="560" y="622">4</text><path class="line" d="M540 626 L470 642"/>
+  <circle class="callout" cx="1144" cy="642" r="18"/><text class="calloutText" x="1144" y="642">5</text><path class="line" d="M1126 642 L1050 642"/>
+
+  <rect class="panel" x="58" y="778" width="1166" height="38" rx="6"/>
+  <text class="small" x="76" y="802">Callouts: 1 vault selector, 2 overview cards, 3 plan actions, 4 learner profile, 5 source capture and Add Resource section below the fold.</text>
+</svg>

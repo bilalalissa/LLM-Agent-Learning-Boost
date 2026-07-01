@@ -1,4 +1,4 @@
-# LLM Wiki Agent Checklist
+# LLM Agent Learning Boost Checklist
 
 ## Completed
 

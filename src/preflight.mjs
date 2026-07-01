@@ -60,7 +60,10 @@ function vaultsCheck(config) {
 function providerCheck(config) {
   let ok = false;
   let detail = "";
-  if (config.provider === "openai_subscription") {
+  if (config.provider === "local_auto") {
+    ok = true;
+    detail = "Local auto provider mode is configured. Use Provider to inspect MLX-LM, Ollama, MLX-LM CLI, and local endpoint health.";
+  } else if (config.provider === "openai_subscription") {
     detail = runCodexStatus();
     ok = /logged in/i.test(detail);
   } else if (config.provider === "openai") {

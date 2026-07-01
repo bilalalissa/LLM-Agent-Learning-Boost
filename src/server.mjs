@@ -6,28 +6,62 @@ import { fileURLToPath } from "node:url";
 import { deleteArchivedItems } from "./archive-delete.mjs";
 import { restoreArchivedItems } from "./archive-restore.mjs";
 import { backfillLearningSections } from "./backfill-learning-sections.mjs";
-import { getConfig, setConfigFilePath } from "./config.mjs";
+import { clearBehaviorData, exportBehaviorData, trackBehaviorEvent, updateBehaviorSettings } from "./behavior-tracker.mjs";
+import { createCalendarEvents, exportPlanIcs } from "./calendar-integration.mjs";
+import { getConfig, readProviderConfigForUi, setConfigFilePath, updateProviderConfig } from "./config.mjs";
 import { answerQuestion } from "./chat-lib.mjs";
 import { saveChatAsRawSource } from "./chat-source.mjs";
 import { preflightBrowserClip, saveBrowserClip } from "./clip.mjs";
 import { ingestVault } from "./ingest-lib.mjs";
+import { coachingSummary, writeBehaviorPages } from "./learning-coach.mjs";
+import {
+  activateLearningPlan,
+  approveLearningPlan,
+  draftLearningPlans,
+  learningPlanningState
+} from "./learning-planner.mjs";
+import { readLearningState, updateVaultProfiles } from "./learning-store.mjs";
 import { answerLocally } from "./local-answer.mjs";
+import { createLocalAiRouterSupervisor } from "./local-ai-router-supervisor.mjs";
 import { addHighlight, addNote, deleteNote, listHighlights, listNotes, saveNoteMedia, updateNote } from "./notes.mjs";
 import { createProvider } from "./provider.mjs";
 import { providerStatus } from "./provider-status.mjs";
+import { readPlanUpdateSuggestions, recordPlanUpdateChoice, suggestPlanUpdates } from "./plan-update-suggester.mjs";
 import { preflightStatus } from "./preflight.mjs";
+import {
+  readRemoteResearchSettings,
+  remoteResearch,
+  saveRemoteSourcesToResourceInbox,
+  updateRemoteResearchSettings
+} from "./remote-research.mjs";
+import { createReminders, exportPlanRemindersMarkdown } from "./reminders-integration.mjs";
+import { exportRemnoteForVault } from "./remnote-export.mjs";
 import { listBridgeVaults, sharedSettingsForVault, sharedSettingsSummary, updateSharedSettingsForVault } from "./shared-settings.mjs";
 import { deleteSources } from "./source-delete.mjs";
 import { mergeSources } from "./source-merge.mjs";
 import { renameSource } from "./source-rename.mjs";
+import {
+  captureResource,
+  deleteResource,
+  exportResources,
+  groupedResourceInbox,
+  purgeExpiredResources,
+  readSourceCaptureSettings,
+  updateSourceCaptureSettings
+} from "./source-capture.mjs";
 import { topicContent } from "./topic-content.mjs";
 import { listRawCandidates, listVaults, vaultName } from "./vaults.mjs";
 import { bootstrapVault } from "./vault-bootstrap.mjs";
 
 let config = getConfig();
 let provider = createProvider(config);
+const localAiRouterSupervisor = createLocalAiRouterSupervisor({
+  getConfig: () => config,
+  applyProviderConfig: (patch) => updateProviderConfig(config.configFile, patch),
+  reloadRuntimeConfig
+});
 let ingestRunning = false;
-let lastIngestMessage = "Auto-ingest has not run yet.";
+let lastIngestMessage = compactStatusMessage("Auto-ingest has not run yet.");
 let ingestProgress = {
   percent: 0,
   completed: 0,
@@ -66,6 +100,21 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && url.pathname === "/help") {
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     response.end(renderHelp());
+    return;
+  }
+
+  if (request.method === "GET" && (url.pathname === "/help-doc" || url.pathname.startsWith("/help-doc/"))) {
+    try {
+      const file = url.pathname.startsWith("/help-doc/")
+        ? decodeURIComponent(url.pathname.slice("/help-doc/".length))
+        : (url.searchParams.get("file") || "");
+      const doc = resolveHelpDoc(file);
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(renderHelp(doc.markdown, { title: `${doc.title} - LLM Agent Learning Boost Help`, backLabel: "Back to Help", backHref: "/help" }));
+    } catch {
+      response.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+      response.end(renderNotFound("That help document could not be found."));
+    }
     return;
   }
 
@@ -222,8 +271,356 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname === "/api/provider-status") {
+    const status = await providerStatus(config);
+    recordProviderFallbackIfNeeded(status);
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify(await providerStatus(config)));
+    response.end(JSON.stringify(status));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/local-ai-router-status") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(localAiRouterSupervisor.status()));
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/local-ai-router-refresh") {
+    const status = await localAiRouterSupervisor.start();
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(status));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/learning") {
+    try {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(enrichedLearningState()));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/behavior-settings") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const settings = updateBehaviorSettings(vaultPath, payload.settings || {});
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), settings }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/behavior-clear") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = clearBehaviorData(vaultPath);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/behavior-export") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = exportBehaviorData(vaultPath);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/behavior-event") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = trackBehaviorEvent(vaultPath, payload.event || {});
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/source-capture-settings") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const settings = updateSourceCaptureSettings(vaultPath, payload.settings || {});
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), settings }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/resource-capture") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = captureResource(vaultPath, payload.resource || {}, { previewApproved: payload.previewApproved === true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/resource-export") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = exportResources(vaultPath);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/resource-purge") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = purgeExpiredResources(vaultPath);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/resource-delete") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = deleteResource(vaultPath, payload.id);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/plan-draft") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = draftLearningPlans(vaultPath, payload.options || {});
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/plan-approve") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = approveLearningPlan(vaultPath, payload.planId, { confirmed: payload.confirmed === true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/plan-activate") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = activateLearningPlan(vaultPath, payload.planId, { confirmed: payload.confirmed === true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/calendar-export") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = payload.method === "apple_calendar"
+        ? createCalendarEvents(vaultPath, payload.planId, { confirmed: payload.confirmed === true, start: payload.start })
+        : exportPlanIcs(vaultPath, payload.planId, { confirmed: payload.confirmed === true, start: payload.start });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/reminders-export") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = payload.method === "apple_reminders"
+        ? createReminders(vaultPath, payload.planId, { confirmed: payload.confirmed === true })
+        : exportPlanRemindersMarkdown(vaultPath, payload.planId, { confirmed: payload.confirmed === true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/plan-update-suggest") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = suggestPlanUpdates(vaultPath, payload.signals || {});
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/plan-update-choice") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = recordPlanUpdateChoice(vaultPath, payload.suggestionId, payload.choice, { confirmed: payload.confirmed === true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/remote-research-settings") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const settings = updateRemoteResearchSettings(vaultPath, payload.settings || {});
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), settings }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/remote-research") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = await remoteResearch(vaultPath, payload.request || {}, {
+        confirmed: payload.confirmed === true
+      });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/remote-source-save") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = saveRemoteSourcesToResourceInbox(vaultPath, payload.remoteResult || {}, {
+        confirmed: payload.confirmed === true,
+        topic: payload.topic || "Remote research"
+      });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/profile") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const result = updateVaultProfiles(config, payload.vault, payload);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(result));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/remnote-export") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const result = exportRemnoteForVault(config, payload.vault, { confirmLarge: payload.confirmLarge === true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(result));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
     return;
   }
 
@@ -291,6 +688,36 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && url.pathname === "/api/config-path") {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ configFile: config.configFile }));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/provider-config") {
+    try {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(readProviderConfigForUi(config.configFile)));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/provider-config") {
+    try {
+      const body = await readBody(request);
+      updateProviderConfig(config.configFile, JSON.parse(body || "{}"));
+      reloadRuntimeConfig();
+      const status = await providerStatus(config);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        status: "Provider settings saved.",
+        config: readProviderConfigForUi(config.configFile),
+        providerStatus: status
+      }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
     return;
   }
 
@@ -475,7 +902,7 @@ const server = http.createServer(async (request, response) => {
       const body = await readBody(request);
       const { prompt } = JSON.parse(body || "{}");
       const text = await provider.complete([
-        { role: "system", content: "You are the Mac Bridge provider for LLM Wiki Agent. Return a useful, concise answer for the native iPhone/iPad client. Do not reveal secrets." },
+        { role: "system", content: "You are the local app provider for LLM Agent Learning Boost. Return a useful, concise answer for the local client. Do not reveal secrets." },
         { role: "user", content: String(prompt || "") }
       ]);
       response.writeHead(200, { "content-type": "application/json" });
@@ -519,7 +946,8 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(config.chatPort, config.bridgeHost, () => {
-  console.log(`LLM Wiki chat UI: http://${config.bridgeHost}:${config.chatPort}`);
+  console.log(`LLM Agent Learning Boost UI: http://${config.bridgeHost}:${config.chatPort}`);
+  void localAiRouterSupervisor.start();
   setTimeout(() => {
     void startAutoIngest();
   }, 1500);
@@ -681,7 +1109,7 @@ function refreshTabData(kind = "all") {
 
 function chooseConfigFile() {
   return runOsascript([
-    "set chosenFile to choose file with prompt \"Choose LLM Wiki Agent config file\"",
+    "set chosenFile to choose file with prompt \"Choose LLM Agent Learning Boost config file\"",
     "POSIX path of chosenFile"
   ]);
 }
@@ -789,7 +1217,7 @@ function safeVaultPath(vaultPath, input) {
 
 function renderFilesExportMarkdown(entries) {
   const chunks = [
-    "# LLM Wiki Agent File Export",
+    "# LLM Agent Learning Boost File Export",
     "",
     `Exported: ${new Date().toISOString()}`,
     `Files: ${entries.length}`,
@@ -811,7 +1239,7 @@ function renderFilesExportMarkdown(entries) {
 
 function renderFilesExportText(entries) {
   const chunks = [
-    "LLM Wiki Agent File Export",
+    "LLM Agent Learning Boost File Export",
     `Exported: ${new Date().toISOString()}`,
     `Files: ${entries.length}`,
     ""
@@ -895,6 +1323,41 @@ function resolveHelpMedia(file) {
     }
   }
   throw new Error("Media file not found.");
+}
+
+function resolveHelpDoc(file) {
+  const normalized = decodeURIComponent(String(file || ""))
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "");
+  if (!normalized || normalized.includes("\0") || normalized.split("/").includes("..")) {
+    throw new Error("Invalid help document path.");
+  }
+  const rel = normalized.startsWith("docs/") ? normalized.slice("docs/".length) : normalized;
+  if (!rel || !rel.endsWith(".md")) {
+    throw new Error("Invalid help document type.");
+  }
+  const roots = [
+    path.join(agentRoot, "docs"),
+    path.resolve("docs"),
+    path.resolve("../docs")
+  ];
+  for (const root of roots) {
+    const full = path.resolve(root, rel);
+    if ((full === root || full.startsWith(root + path.sep)) && fs.existsSync(full)) {
+      const markdown = fs.readFileSync(full, "utf8");
+      return {
+        file: full,
+        markdown,
+        title: titleFromMarkdown(markdown) || path.basename(full, ".md")
+      };
+    }
+  }
+  throw new Error("Help document not found.");
+}
+
+function titleFromMarkdown(markdown) {
+  const match = String(markdown || "").match(/^#\s+(.+)$/m);
+  return match ? decodeHtmlEntities(match[1]).replace(/`/g, "") : "";
 }
 
 function serveMediaFile(request, response, media) {
@@ -1032,7 +1495,7 @@ async function runAutoIngest() {
       detail: lastIngestMessage
     });
   } catch (error) {
-    lastIngestMessage = reportStatus(`Operation progress: ${ingestProgress.percent || 0}%. Auto-ingest error at ${formatLocal(new Date())}: ${error.message}`);
+    lastIngestMessage = reportStatus(`Operation progress: ${ingestProgress.percent || 0}%. Auto-ingest error at ${formatLocal(new Date())}: ${summarizeStatusError(error)}`);
     ingestProgress = {
       ...ingestProgress,
       detail: lastIngestMessage
@@ -1050,7 +1513,25 @@ function progressState({ completed, total, vault, detail }) {
 }
 
 function reportStatus(detail) {
-  return `General completion: ${generalCompletion.percent}%. ${detail}`;
+  return compactStatusMessage(`General completion: ${generalCompletion.percent}%. ${detail}`);
+}
+
+function compactStatusMessage(value, maxChars = 320) {
+  const normalized = String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/```[\s\S]*?```/g, "[details omitted]")
+    .trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars - 1).trim()}...`;
+}
+
+function summarizeStatusError(error) {
+  const text = String(error?.message || error || "Unknown error.").replace(/\s+/g, " ").trim();
+  const codexExit = text.match(/Codex CLI exited with code \d+/i)?.[0];
+  if (codexExit) return `${codexExit}. Open logs for full diagnostics.`;
+  const unsupportedModel = text.match(/model [^.;]+ is not supported[^.;]*/i)?.[0];
+  if (unsupportedModel) return `${unsupportedModel}. Check Provider settings.`;
+  return compactStatusMessage(text, 180);
 }
 
 function readBody(request, maxBytes = 64 * 1024 * 1024) {
@@ -1069,6 +1550,57 @@ function readBody(request, maxBytes = 64 * 1024 * 1024) {
     request.on("end", () => resolve(body));
     request.on("error", reject);
   });
+}
+
+function enrichedLearningState() {
+  const state = readLearningState(config);
+  const vaultPaths = listVaults(config.vaultsRoot);
+  state.vaults = (state.vaults || []).map((item) => {
+    const vaultPath = vaultPaths.find((candidate) => vaultName(candidate) === item.vault);
+    if (!vaultPath) return item;
+    const behaviorCoach = coachingSummary(vaultPath, { learningProfile: item.learningProfile });
+    writeBehaviorPages(vaultPath, behaviorCoach);
+    return {
+      ...item,
+      behaviorCoach,
+      sourceCapture: {
+        settings: readSourceCaptureSettings(vaultPath),
+        groups: groupedResourceInbox(vaultPath)
+      },
+      remoteResearch: {
+        settings: readRemoteResearchSettings(vaultPath)
+      },
+      planning: {
+        ...learningPlanningState(vaultPath),
+        updateSuggestions: readPlanUpdateSuggestions(vaultPath)
+      }
+    };
+  });
+  return state;
+}
+
+function resolveLearningVaultPath(name) {
+  const vaults = listVaults(config.vaultsRoot);
+  const requested = String(name || "").trim();
+  const vaultPath = vaults.find((item) => vaultName(item) === requested) || vaults[0];
+  if (!vaultPath) throw new Error("No Obsidian vault is available.");
+  return vaultPath;
+}
+
+function recordProviderFallbackIfNeeded(status) {
+  if (config.provider !== "local_auto") return;
+  if (!["red", "orange"].includes(status.statusColor)) return;
+  for (const vaultPath of listVaults(config.vaultsRoot)) {
+    trackBehaviorEvent(vaultPath, {
+      type: "local_ai_unavailable",
+      provider: status.activeProvider || status.provider || "local_auto",
+      metadata: {
+        status: status.status,
+        statusColor: status.statusColor,
+        fallbackSuggestions: Array.isArray(status.fallbackSuggestions) ? status.fallbackSuggestions.length : 0
+      }
+    });
+  }
 }
 
 function yieldToServer() {
@@ -1091,7 +1623,7 @@ function authorizedBridgeRequest(request, response) {
   const token = String(value).replace(/^Bearer\s+/i, "");
   if (token === config.bridgeToken) return true;
   response.writeHead(401, { "content-type": "application/json" });
-  response.end(JSON.stringify({ error: "Unauthorized Mac Bridge request." }));
+  response.end(JSON.stringify({ error: "Unauthorized local app request." }));
   return false;
 }
 
@@ -1107,7 +1639,7 @@ function renderHtml() {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LLM Wiki Agent</title>
+  <title>LLM Agent Learning Boost</title>
   <style>
     :root { --bg: #f6f7f9; --text: #18202b; --panel: #ffffff; --line: #dce1e8; --soft: #eef2f7; --muted: #697386; --accent: #1f5eff; --accent-text: #ffffff; --shadow: rgba(20, 32, 50, 0.08); --mark: #fff2a8; }
     body[data-theme="dark"] { --bg: #111827; --text: #e5e7eb; --panel: #1f2937; --line: #374151; --soft: #273449; --muted: #9ca3af; --accent: #60a5fa; --accent-text: #07111f; --shadow: rgba(0, 0, 0, 0.28); --mark: #725f12; }
@@ -1265,7 +1797,7 @@ function renderHtml() {
     #topic-list button.side-topic-recent-2 { background: color-mix(in srgb, var(--accent) 15%, var(--panel)); }
     #topic-list button.side-topic-recent-3 { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
     .side-topics button:hover { background: var(--soft); }
-    .status { font-size: 13px; color: var(--muted); margin: -6px 0 16px; }
+    .status { font-size: 13px; color: var(--muted); margin: -6px 0 16px; max-height: 38px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
     .provider-state { display: inline-flex; align-items: center; gap: 8px; margin: 0 0 12px; font-weight: 700; }
     .status-dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; background: var(--muted); box-shadow: 0 0 0 3px var(--soft); }
     .status-dot.green { background: #16a34a; }
@@ -1320,18 +1852,76 @@ function renderHtml() {
     .source-ref { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; }
     .config-path-row { display: flex; gap: 8px; align-items: center; margin: 12px 0; }
     .config-path-row input { min-width: 0; }
+    .provider-config-form { display: grid; gap: 14px; margin: 14px 0; }
+    .provider-config-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .provider-grid { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 10px; margin-top: 10px; }
+    .provider-group { border: 1px solid var(--line); border-radius: 6px; padding: 12px; background: color-mix(in srgb, var(--panel) 92%, var(--soft)); }
+    .provider-group[hidden] { display: none; }
+    .provider-group h3 { margin-top: 0; }
+    .provider-secret-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+    .provider-secret-status { color: var(--muted); font-size: 12px; font-weight: 700; }
+    .profile-form { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 10px; margin-top: 12px; }
+    .profile-form input, .profile-form select, .profile-form button { width: 100%; box-sizing: border-box; }
+    .profile-form .inline-toggle { align-self: center; white-space: normal; }
+    .learning-panel { display: none; }
+    .learning-panel.active { display: block; }
+    .learning-panel > .muted { max-width: 920px; }
+    .learning-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+    .learning-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+    .learning-toolbar select { min-width: 220px; }
+    .learning-toolbar .copy-feedback { margin-left: auto; }
+    .learning-section { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 14px; }
+    .learning-section > summary { cursor: pointer; font-weight: 750; font-size: 15px; }
+    .learning-section > summary + * { margin-top: 12px; }
+    .learning-section h3 { margin: 0 0 10px; font-size: 16px; }
+    .learning-actions { display: grid; gap: 12px; }
+    .learning-action-group { display: grid; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+    .learning-action-group:first-child { padding-top: 0; border-top: 0; }
+    .learning-action-group h4 { margin: 0; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0; }
+    .learning-button-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .learning-plan-row { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto auto auto auto; gap: 8px; align-items: end; }
+    .learning-plan-row input { width: 100%; min-width: 0; box-sizing: border-box; }
+    .learning-form { display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 12px; margin: 12px 0 0; }
+    .learning-form input, .learning-form select { width: 100%; min-width: 0; box-sizing: border-box; }
+    .learning-field { display: grid; gap: 5px; min-width: 0; }
+    .learning-field > span { color: var(--muted); font-size: 12px; font-weight: 700; }
+    .learning-field.full { grid-column: 1 / -1; }
+    .learning-toggle-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); gap: 8px; }
+    .learning-toggle-grid .inline-toggle { align-items: flex-start; white-space: normal; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); color: var(--text); line-height: 1.25; }
+    .learning-form .inline-toggle { min-width: 0; white-space: normal; }
+    .learning-form .primary { grid-column: 1 / -1; justify-self: end; min-width: 220px; }
+    .learning-overview { min-height: 160px; }
+    .learning-boost-grid { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 12px; margin: 12px 0; }
+    .learning-card { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 12px; min-width: 0; }
+    .learning-card h3 { margin: 0 0 8px; font-size: 15px; }
+    .learning-card h4 { margin: 10px 0 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0; }
+    .learning-card ul { margin: 0; padding-inline-start: 1.2em; }
+    .learning-card li { margin: 0 0 4px; overflow-wrap: anywhere; }
+    .learning-card details { margin-top: 8px; }
+    .learning-card summary { cursor: pointer; color: var(--accent); font-weight: 700; }
+    .learning-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .learning-chip { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font-size: 12px; color: var(--muted); background: var(--soft); }
+    .learning-action-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .learning-action-row button { min-width: 0; }
+    .learning-card.danger { border-color: color-mix(in srgb, #dc2626 45%, var(--line)); }
+    .learning-card.warning { border-color: color-mix(in srgb, #f59e0b 55%, var(--line)); }
     @media (max-width: 1240px) {
       main { margin-right: 0; padding-right: 20px; }
       .side-topics { position: relative; width: auto; max-height: 220px; margin: 0 20px 20px; border-top: 1px solid var(--line); border-radius: 6px; overflow: visible; }
       .side-topic-toggle { top: 5px; left: auto; right: 20px; border-radius: 6px; }
       .side-topic-restore { top: 5px; bottom: auto; right: 20px; }
+      .learning-boost-grid { grid-template-columns: 1fr; }
+      .learning-plan-row { grid-template-columns: 1fr; }
+      .learning-form { grid-template-columns: 1fr; }
+      .learning-toggle-grid { grid-template-columns: 1fr; }
+      .learning-toolbar .copy-feedback { margin-left: 0; flex-basis: 100%; }
     }
   </style>
 </head>
 <body>
   <main>
     <header>
-      <h1>LLM Wiki Agent</h1>
+      <h1>LLM Agent Learning Boost</h1>
       <div class="header-actions">
         <label class="muted" for="theme-select">Theme</label>
         <select id="theme-select">
@@ -1352,6 +1942,7 @@ function renderHtml() {
       <button class="tab" data-tab="files" type="button">Files</button>
       <button class="tab" data-tab="archives" type="button">Archive</button>
       <button class="tab" data-tab="topics" type="button">Topics</button>
+      <button class="tab" data-tab="learning" type="button">Learning</button>
       <button class="tab" data-tab="provider" type="button"><span id="provider-tab-dot" class="status-dot grey"></span>Provider</button>
       <button class="tab" data-tab="notes" type="button">Notes</button>
     </nav>
@@ -1367,6 +1958,8 @@ function renderHtml() {
           <label class="muted" for="chat-save-vault">Save to</label>
           <select id="chat-save-vault">${vaultOptions}</select>
           <button id="save-chat-source" class="secondary" type="button">Save as raw source</button>
+          <button id="use-internet-answer" class="secondary" type="button">Use internet for this answer</button>
+          <button id="save-remote-sources" class="secondary" type="button">Save remote sources to resource inbox</button>
           <span id="save-chat-feedback" class="copy-feedback"></span>
           <select id="chat-copy-format">
             <option value="text">Pure text</option>
@@ -1375,6 +1968,12 @@ function renderHtml() {
           </select>
           <button id="copy-chat" class="secondary" type="button">Copy</button>
           <span id="chat-copy-feedback" class="copy-feedback"></span>
+        </div>
+        <div class="result-tools">
+          <label class="inline-toggle"><input id="chat-ask-before-remote" type="checkbox" checked> Ask before each remote request</label>
+          <label class="inline-toggle"><input id="chat-never-send-local-cloud" type="checkbox" checked> Never send my local notes to cloud when browsing</label>
+          <label class="inline-toggle"><input id="chat-allow-internet-needed" type="checkbox"> Allow internet research when needed</label>
+          <input id="remote-source-url" autocomplete="off" placeholder="Remote URL to fetch">
         </div>
       </div>
       <div id="answer" class="answer">Ready.</div>
@@ -1526,9 +2125,11 @@ function renderHtml() {
       </table>
     </section>
     <section id="provider-panel" class="panel">
-      <p class="muted">Current AI provider configuration. Secret values are hidden.</p>
+      <p class="muted">Edit AI provider settings stored in the active config file. Existing secret values are hidden.</p>
       <div class="result-tools">
-        <button id="refresh-provider" class="secondary" type="button">Refresh</button>
+        <button id="refresh-provider" class="secondary" type="button">Refresh health</button>
+        <button id="refresh-local-ai-router" class="secondary" type="button">Run router handshake</button>
+        <button id="reload-provider-config" class="secondary" type="button">Reload from config</button>
         <button id="open-config-file" class="secondary" type="button">Open config</button>
         <button id="choose-config-file" class="secondary" type="button">Choose config file</button>
         <span id="config-path-feedback" class="copy-feedback"></span>
@@ -1537,7 +2138,297 @@ function renderHtml() {
         <input id="config-path-input" autocomplete="off" placeholder="Config file path">
         <button id="save-config-path" class="secondary" type="button">Use path</button>
       </div>
+      <form id="provider-config-form" class="provider-config-form">
+        <section class="provider-group" data-provider-group="all">
+          <h3>Default Provider</h3>
+          <div class="provider-grid">
+            <label class="learning-field"><span>Default provider</span><input id="provider-default-provider" data-config-key="DEFAULT_AI_PROVIDER" list="provider-options" autocomplete="off" placeholder="local_auto"></label>
+            <label class="learning-field"><span>Default model</span><input id="provider-default-model" data-config-key="DEFAULT_AI_MODEL" list="provider-model-options" autocomplete="off" placeholder="qwen3:8b"></label>
+            <label class="learning-field"><span>Access method</span><input data-config-key="AI_ACCESS_METHOD" list="provider-access-options" autocomplete="off" placeholder="local_first"></label>
+          </div>
+        </section>
+        <section class="provider-group" data-provider-group="local_auto">
+          <h3>Local Auto</h3>
+          <div class="provider-grid">
+            <label class="learning-field full"><span>Provider priority</span><input data-config-key="LOCAL_AI_PROVIDER_PRIORITY" list="provider-priority-options" autocomplete="off" placeholder="mlx_lm_server,ollama,mlx_lm_cli,openai_compat"></label>
+            <label class="inline-toggle"><input data-config-key="LOCAL_AI_ALLOW_LAN" type="checkbox"> Allow LAN endpoints</label>
+            <label class="inline-toggle"><input data-config-key="LOCAL_AI_REQUIRE_CONFIRM_CLOUD_FALLBACK" type="checkbox"> Require cloud fallback confirmation</label>
+            <label class="learning-field"><span>Health timeout ms</span><input data-config-key="LOCAL_AI_HEALTH_TIMEOUT_MS" type="number" min="100" step="100" placeholder="2500"></label>
+          </div>
+        </section>
+        <section class="provider-group" data-provider-group="all">
+          <h3>Local AI Router Startup</h3>
+          <div class="provider-grid">
+            <label class="learning-field"><span>Router URL</span><input data-config-key="LOCAL_AI_ROUTER_BASE_URL" list="provider-endpoint-options" autocomplete="off" placeholder="http://127.0.0.1:17640"></label>
+            <label class="learning-field"><span>Router app path</span><input data-config-key="LOCAL_AI_ROUTER_APP_PATH" autocomplete="off" placeholder="/Applications/Local AI Router.app"></label>
+            <label class="learning-field"><span>Router command</span><input data-config-key="LOCAL_AI_ROUTER_COMMAND" autocomplete="off" placeholder="Optional launch command"></label>
+            <label class="learning-field"><span>Startup timeout ms</span><input data-config-key="LOCAL_AI_ROUTER_TIMEOUT_MS" type="number" min="500" step="500" placeholder="12000"></label>
+            <label class="inline-toggle"><input data-config-key="LOCAL_AI_ROUTER_AUTOSTART" type="checkbox"> Start Local AI Router when this app starts</label>
+            <label class="inline-toggle"><input data-config-key="LOCAL_AI_ROUTER_AUTO_APPLY" type="checkbox"> Apply router recommendation automatically</label>
+            <label class="inline-toggle"><input data-config-key="LOCAL_AI_ROUTER_AUTO_START_PROVIDER" type="checkbox"> Ask router to start stopped providers</label>
+            <label class="inline-toggle"><input data-config-key="LOCAL_AI_ROUTER_AUTO_INSTALL" type="checkbox"> Allow router live install when supported</label>
+            <div class="provider-secret-row">
+              <label class="learning-field"><span>Router bearer token</span><input data-secret-key="LOCAL_AI_ROUTER_BEARER_TOKEN" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"></label>
+              <label class="inline-toggle"><input data-secret-clear="LOCAL_AI_ROUTER_BEARER_TOKEN" type="checkbox"> Clear</label>
+            </div>
+            <span id="secret-status-LOCAL_AI_ROUTER_BEARER_TOKEN" class="provider-secret-status"></span>
+          </div>
+        </section>
+        <section class="provider-group" data-provider-group="local_auto ollama">
+          <h3>Ollama</h3>
+          <div class="provider-grid">
+            <label class="learning-field"><span>Base URL</span><input data-config-key="OLLAMA_BASE_URL" list="provider-endpoint-options" autocomplete="off" placeholder="http://127.0.0.1:11434"></label>
+            <label class="learning-field"><span>Model</span><input data-config-key="OLLAMA_MODEL" list="ollama-model-options" autocomplete="off" placeholder="qwen3:8b"></label>
+            <label class="learning-field"><span>Embed model</span><input data-config-key="OLLAMA_EMBED_MODEL" list="embed-model-options" autocomplete="off" placeholder="all-minilm"></label>
+            <label class="inline-toggle"><input data-config-key="OLLAMA_OPENAI_COMPAT" type="checkbox"> Use OpenAI-compatible Ollama endpoint</label>
+          </div>
+        </section>
+        <section class="provider-group" data-provider-group="local_auto mlx_lm_server">
+          <h3>MLX-LM Server</h3>
+          <div class="provider-grid">
+            <label class="learning-field"><span>Base URL</span><input data-config-key="MLX_LM_SERVER_BASE_URL" list="provider-endpoint-options" autocomplete="off" placeholder="http://127.0.0.1:8080"></label>
+            <label class="learning-field"><span>Model</span><input data-config-key="MLX_LM_SERVER_MODEL" list="mlx-model-options" autocomplete="off" placeholder="default_model"></label>
+            <div class="provider-secret-row">
+              <label class="learning-field"><span>API key</span><input data-secret-key="MLX_LM_SERVER_API_KEY" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"></label>
+              <label class="inline-toggle"><input data-secret-clear="MLX_LM_SERVER_API_KEY" type="checkbox"> Clear</label>
+            </div>
+            <span id="secret-status-MLX_LM_SERVER_API_KEY" class="provider-secret-status"></span>
+          </div>
+        </section>
+        <section class="provider-group" data-provider-group="local_auto mlx_lm_cli">
+          <h3>MLX-LM CLI</h3>
+          <div class="provider-grid">
+            <label class="learning-field"><span>Command</span><input data-config-key="MLX_LM_COMMAND" list="provider-command-options" autocomplete="off" placeholder="mlx_lm.generate"></label>
+            <label class="learning-field"><span>Model</span><input data-config-key="MLX_LM_MODEL" list="mlx-model-options" autocomplete="off" placeholder="mlx-community/Llama-3.2-3B-Instruct-4bit"></label>
+            <label class="learning-field"><span>Timeout ms</span><input data-config-key="MLX_LM_TIMEOUT_MS" type="number" min="1000" step="1000" placeholder="180000"></label>
+          </div>
+        </section>
+        <section class="provider-group" data-provider-group="local_auto openai_compat">
+          <h3>OpenAI-Compatible Endpoint</h3>
+          <div class="provider-grid">
+            <label class="learning-field"><span>Base URL</span><input data-config-key="OPENAI_COMPAT_BASE_URL" list="provider-endpoint-options" autocomplete="off" placeholder="http://localhost:1234/v1"></label>
+            <label class="learning-field"><span>Auth method</span><input data-config-key="OPENAI_COMPAT_AUTH_METHOD" list="provider-auth-options" autocomplete="off" placeholder="api_key"></label>
+            <div class="provider-secret-row">
+              <label class="learning-field"><span>API key</span><input data-secret-key="OPENAI_COMPAT_API_KEY" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"></label>
+              <label class="inline-toggle"><input data-secret-clear="OPENAI_COMPAT_API_KEY" type="checkbox"> Clear</label>
+            </div>
+            <div class="provider-secret-row">
+              <label class="learning-field"><span>Bearer token</span><input data-secret-key="OPENAI_COMPAT_BEARER_TOKEN" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"></label>
+              <label class="inline-toggle"><input data-secret-clear="OPENAI_COMPAT_BEARER_TOKEN" type="checkbox"> Clear</label>
+            </div>
+            <span id="secret-status-OPENAI_COMPAT_API_KEY" class="provider-secret-status"></span>
+            <span id="secret-status-OPENAI_COMPAT_BEARER_TOKEN" class="provider-secret-status"></span>
+          </div>
+        </section>
+        <section class="provider-group" data-provider-group="openai">
+          <h3>OpenAI API</h3>
+          <div class="provider-grid">
+            <label class="learning-field"><span>Base URL</span><input data-config-key="OPENAI_BASE_URL" list="provider-endpoint-options" autocomplete="off" placeholder="https://api.openai.com/v1"></label>
+            <label class="learning-field"><span>Auth method</span><input data-config-key="OPENAI_AUTH_METHOD" list="provider-auth-options" autocomplete="off" placeholder="api_key"></label>
+            <label class="learning-field"><span>Organization</span><input data-config-key="OPENAI_ORGANIZATION" autocomplete="off" placeholder="Optional"></label>
+            <label class="learning-field"><span>Project</span><input data-config-key="OPENAI_PROJECT" autocomplete="off" placeholder="Optional"></label>
+            <div class="provider-secret-row">
+              <label class="learning-field"><span>API key</span><input data-secret-key="OPENAI_API_KEY" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"></label>
+              <label class="inline-toggle"><input data-secret-clear="OPENAI_API_KEY" type="checkbox"> Clear</label>
+            </div>
+            <span id="secret-status-OPENAI_API_KEY" class="provider-secret-status"></span>
+          </div>
+        </section>
+        <section class="provider-group" data-provider-group="openai_subscription chatgpt">
+          <h3>OpenAI Subscription via Codex</h3>
+          <div class="provider-grid">
+            <label class="learning-field"><span>Subscription client</span><input data-config-key="OPENAI_SUBSCRIPTION_CLIENT" list="subscription-client-options" autocomplete="off" placeholder="codex"></label>
+            <label class="learning-field"><span>Codex command</span><input data-config-key="OPENAI_CODEX_COMMAND" list="provider-command-options" autocomplete="off" placeholder="codex"></label>
+            <label class="learning-field"><span>Timeout ms</span><input data-config-key="OPENAI_CODEX_TIMEOUT_MS" type="number" min="1000" step="1000" placeholder="180000"></label>
+          </div>
+        </section>
+        <section class="provider-group" data-provider-group="anthropic">
+          <h3>Anthropic</h3>
+          <div class="provider-grid">
+            <label class="learning-field"><span>Base URL</span><input data-config-key="ANTHROPIC_BASE_URL" list="provider-endpoint-options" autocomplete="off" placeholder="https://api.anthropic.com"></label>
+            <label class="learning-field"><span>Auth method</span><input data-config-key="ANTHROPIC_AUTH_METHOD" list="provider-auth-options" autocomplete="off" placeholder="api_key"></label>
+            <div class="provider-secret-row">
+              <label class="learning-field"><span>API key</span><input data-secret-key="ANTHROPIC_API_KEY" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"></label>
+              <label class="inline-toggle"><input data-secret-clear="ANTHROPIC_API_KEY" type="checkbox"> Clear</label>
+            </div>
+            <span id="secret-status-ANTHROPIC_API_KEY" class="provider-secret-status"></span>
+          </div>
+        </section>
+        <section class="provider-group" data-provider-group="gemini">
+          <h3>Gemini</h3>
+          <div class="provider-grid">
+            <label class="learning-field"><span>Base URL</span><input data-config-key="GEMINI_BASE_URL" list="provider-endpoint-options" autocomplete="off" placeholder="https://generativelanguage.googleapis.com"></label>
+            <label class="learning-field"><span>Auth method</span><input data-config-key="GEMINI_AUTH_METHOD" list="provider-auth-options" autocomplete="off" placeholder="api_key"></label>
+            <label class="learning-field"><span>OAuth token file</span><input data-config-key="GEMINI_OAUTH_TOKEN_FILE" autocomplete="off" placeholder="Optional local token file"></label>
+            <div class="provider-secret-row">
+              <label class="learning-field"><span>API key</span><input data-secret-key="GEMINI_API_KEY" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"></label>
+              <label class="inline-toggle"><input data-secret-clear="GEMINI_API_KEY" type="checkbox"> Clear</label>
+            </div>
+            <div class="provider-secret-row">
+              <label class="learning-field"><span>OAuth access token</span><input data-secret-key="GEMINI_OAUTH_ACCESS_TOKEN" type="password" autocomplete="new-password" placeholder="Leave blank to keep existing"></label>
+              <label class="inline-toggle"><input data-secret-clear="GEMINI_OAUTH_ACCESS_TOKEN" type="checkbox"> Clear</label>
+            </div>
+            <span id="secret-status-GEMINI_API_KEY" class="provider-secret-status"></span>
+            <span id="secret-status-GEMINI_OAUTH_ACCESS_TOKEN" class="provider-secret-status"></span>
+          </div>
+        </section>
+        <div class="provider-config-actions">
+          <button id="save-provider-config" class="primary" type="submit">Save provider settings</button>
+          <span id="provider-config-feedback" class="copy-feedback"></span>
+        </div>
+      </form>
+      <datalist id="provider-options"></datalist>
+      <datalist id="provider-model-options"></datalist>
+      <datalist id="provider-access-options"><option value="local_first"></option><option value="api_key"></option><option value="subscription"></option></datalist>
+      <datalist id="provider-auth-options"></datalist>
+      <datalist id="provider-endpoint-options"></datalist>
+      <datalist id="provider-command-options"></datalist>
+      <datalist id="provider-priority-options"></datalist>
+      <datalist id="ollama-model-options"><option value="qwen3:8b"></option><option value="llama3.2"></option><option value="mistral"></option><option value="phi4"></option></datalist>
+      <datalist id="mlx-model-options"><option value="default_model"></option><option value="mlx-community/Llama-3.2-3B-Instruct-4bit"></option><option value="mlx-community/Qwen2.5-7B-Instruct-4bit"></option></datalist>
+      <datalist id="embed-model-options"><option value="all-minilm"></option><option value="nomic-embed-text"></option></datalist>
+      <datalist id="subscription-client-options"><option value="codex"></option></datalist>
       <div id="provider-status-box" class="answer">Loading provider status...</div>
+    </section>
+    <section id="learning-panel" class="panel learning-panel">
+      <p class="muted">Local profile, onboarding, and working-memory settings. Profile data is stored in the selected vault under <code>.llm-wiki/learning/</code>.</p>
+      <div class="learning-workspace">
+        <div class="learning-toolbar">
+          <label class="muted" for="learning-vault">Vault</label>
+          <select id="learning-vault">${vaultOptions}</select>
+          <button id="refresh-learning" class="secondary" type="button">Refresh</button>
+          <span id="learning-feedback" class="copy-feedback"></span>
+        </div>
+
+        <section class="learning-section">
+          <h3>Overview</h3>
+          <div id="learning-status-box" class="answer learning-overview">Loading learning profile...</div>
+        </section>
+
+        <details class="learning-section" open>
+          <summary>Plan Actions</summary>
+          <div class="learning-actions">
+            <div class="learning-plan-row">
+              <label class="learning-field">
+                <span>Plan ID</span>
+                <input id="learning-plan-id" autocomplete="off" placeholder="Plan ID for approval/export">
+              </label>
+              <button id="draft-learning-plans" class="secondary" type="button">Draft plans</button>
+              <button id="approve-learning-plan" class="secondary" type="button">Approve plan</button>
+              <button id="activate-learning-plan" class="secondary" type="button">Activate plan</button>
+              <button id="export-plan-calendar" class="secondary" type="button">Export calendar</button>
+              <button id="export-plan-reminders" class="secondary" type="button">Export reminders</button>
+            </div>
+            <div class="learning-action-group">
+              <h4>Exports and maintenance</h4>
+              <div class="learning-button-row">
+                <button id="export-remnote" class="secondary" type="button">Export RemNote</button>
+                <button id="suggest-plan-updates" class="secondary" type="button">Suggest updates</button>
+                <button id="pause-behavior" class="secondary" type="button">Pause coaching</button>
+                <button id="export-behavior" class="secondary" type="button">Export behavior</button>
+                <button id="clear-behavior" class="secondary" type="button">Clear behavior</button>
+                <button id="enable-behavior-alerts" class="secondary" type="button">Enable alerts</button>
+                <button id="export-resources" class="secondary" type="button">Export resources</button>
+                <button id="purge-resources" class="secondary" type="button">Purge expired</button>
+                <button id="retake-interview" class="secondary" type="button">Retake interview</button>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <details class="learning-section" open>
+          <summary>Learner Profile</summary>
+          <form id="learning-profile-form" class="learning-form">
+            <label class="learning-field"><span>Profile ID</span><input id="profile-id" autocomplete="off" placeholder="default"></label>
+            <label class="learning-field"><span>Profile name</span><input id="profile-name" autocomplete="off" placeholder="Learner"></label>
+            <label class="learning-field"><span>First language</span><input id="first-language" autocomplete="off" placeholder="prefer_not_to_say"></label>
+            <label class="learning-field"><span>Target languages</span><input id="target-languages" autocomplete="off" placeholder="AUTO or comma-separated"></label>
+            <label class="learning-field"><span>Interface language</span><input id="interface-language" autocomplete="off" placeholder="auto"></label>
+            <label class="learning-field"><span>Gender</span><input id="gender" autocomplete="off" placeholder="prefer_not_to_say"></label>
+            <label class="learning-field"><span>Age range</span><input id="age-range" autocomplete="off" placeholder="prefer_not_to_say"></label>
+            <label class="learning-field"><span>Education level</span><input id="education-level" autocomplete="off" placeholder="prefer_not_to_say"></label>
+            <label class="learning-field"><span>Learning goals</span><input id="learning-goals" autocomplete="off" placeholder="Comma-separated goals"></label>
+            <label class="learning-field"><span>Topics/domains</span><input id="learning-domains" autocomplete="off" placeholder="Comma-separated topics"></label>
+            <label class="learning-field"><span>Working memory</span><select id="working-memory-mode">
+              <option value="friendly">Friendly</option>
+              <option value="compact">Compact</option>
+              <option value="advanced">Advanced</option>
+            </select></label>
+            <label class="learning-field"><span>Explanation level</span><select id="explanation-level">
+              <option value="simple">Simple</option>
+              <option value="standard">Standard</option>
+              <option value="advanced">Advanced</option>
+              <option value="expert">Expert</option>
+            </select></label>
+            <label class="learning-field"><span>Coaching style</span><select id="coaching-style">
+              <option value="gentle">Gentle</option>
+              <option value="direct">Direct</option>
+              <option value="minimal">Minimal</option>
+              <option value="detailed">Detailed</option>
+            </select></label>
+            <label class="learning-field"><span>Session minutes</span><input id="preferred-session-minutes" type="number" min="1" step="1" placeholder="25"></label>
+            <label class="inline-toggle"><input id="language-bridge-toggle" type="checkbox"> Use first language as bridge language</label>
+            <label class="inline-toggle"><input id="demographic-personalization-toggle" type="checkbox"> Do not use demographic answers for personalization</label>
+            <button class="primary" type="submit">Save profile</button>
+          </form>
+        </details>
+
+        <details class="learning-section">
+          <summary>Source Capture</summary>
+          <form id="source-capture-form" class="learning-form">
+            <div class="learning-toggle-grid">
+              <label class="inline-toggle"><input id="source-capture-enabled" type="checkbox"> Enable source capture</label>
+              <label class="inline-toggle"><input id="full-local-capture-mode" type="checkbox"> Full Local Capture Mode</label>
+              <label class="inline-toggle"><input id="manual-import-toggle" type="checkbox"> Manual import</label>
+              <label class="inline-toggle"><input id="browser-clipper-toggle" type="checkbox"> Browser clipper</label>
+              <label class="inline-toggle"><input id="browser-history-toggle" type="checkbox"> Browser history import</label>
+              <label class="inline-toggle"><input id="opened-documents-toggle" type="checkbox"> Opened-document detection</label>
+              <label class="inline-toggle"><input id="screenshots-toggle" type="checkbox"> Screenshots</label>
+              <label class="inline-toggle"><input id="meetings-toggle" type="checkbox"> Meetings</label>
+              <label class="inline-toggle"><input id="voice-memos-toggle" type="checkbox"> Voice memos</label>
+            </div>
+            <label class="learning-field full"><span>Watch folders</span><input id="watch-folders" autocomplete="off" placeholder="Comma-separated folders"></label>
+            <label class="learning-field"><span>Page content</span><select id="capture-page-content">
+              <option value="ask">Ask</option>
+              <option value="metadata_only">Metadata only</option>
+              <option value="full_text_when_clipped">Full text when clipped</option>
+              <option value="local_full_text">Local full text</option>
+            </select></label>
+            <label class="learning-field"><span>Cloud policy</span><select id="cloud-processing-policy">
+              <option value="ask_each_time">Ask each time</option>
+              <option value="never">Never</option>
+              <option value="allow_non_sensitive">Allow non-sensitive</option>
+            </select></label>
+            <label class="learning-field"><span>Retention days</span><input id="retention-days" type="number" min="1" step="1" placeholder="90"></label>
+            <button class="primary" type="submit">Save capture settings</button>
+          </form>
+        </details>
+
+        <details class="learning-section">
+          <summary>Add Resource</summary>
+          <form id="manual-resource-form" class="learning-form">
+            <label class="learning-field"><span>Resource title</span><input id="resource-title" autocomplete="off" placeholder="Resource title"></label>
+            <label class="learning-field"><span>URL or file path</span><input id="resource-url" autocomplete="off" placeholder="https://... or local path"></label>
+            <label class="learning-field"><span>Topic</span><input id="resource-topic" autocomplete="off" placeholder="Topic"></label>
+            <label class="learning-field"><span>Resource type</span><select id="resource-type">
+              <option value="manual_import">Manual import</option>
+              <option value="web_page">Web page</option>
+              <option value="document">Document</option>
+              <option value="screenshot">Screenshot</option>
+              <option value="meeting">Meeting</option>
+              <option value="voice_memo">Voice memo</option>
+            </select></label>
+            <label class="learning-field"><span>Sensitivity</span><select id="resource-sensitivity">
+              <option value="">Auto</option>
+              <option value="public">Public</option>
+              <option value="personal">Personal</option>
+              <option value="sensitive">Sensitive</option>
+              <option value="critical">Critical</option>
+            </select></label>
+            <button class="primary" type="submit">Add resource</button>
+          </form>
+        </details>
+      </div>
     </section>
     <section id="notes-panel" class="panel">
       <p class="muted">User notes added from highlighted answer text. Notes are also written into markdown files for Obsidian.</p>
@@ -1656,6 +2547,12 @@ function renderHtml() {
     const chatSaveVault = document.querySelector("#chat-save-vault");
     const saveChatSource = document.querySelector("#save-chat-source");
     const saveChatFeedback = document.querySelector("#save-chat-feedback");
+    const useInternetAnswer = document.querySelector("#use-internet-answer");
+    const saveRemoteSources = document.querySelector("#save-remote-sources");
+    const chatAskBeforeRemote = document.querySelector("#chat-ask-before-remote");
+    const chatNeverSendLocalCloud = document.querySelector("#chat-never-send-local-cloud");
+    const chatAllowInternetNeeded = document.querySelector("#chat-allow-internet-needed");
+    const remoteSourceUrl = document.querySelector("#remote-source-url");
     const localForm = document.querySelector("#local-form");
     const localInput = document.querySelector("#local-question");
     const localButton = document.querySelector("#local-ask");
@@ -1701,7 +2598,69 @@ function renderHtml() {
     const topicsClearFilter = document.querySelector("#topics-clear-filter");
     const providerStatusBox = document.querySelector("#provider-status-box");
     const refreshProvider = document.querySelector("#refresh-provider");
+    const refreshLocalAiRouter = document.querySelector("#refresh-local-ai-router");
+    const reloadProviderConfig = document.querySelector("#reload-provider-config");
+    const providerConfigForm = document.querySelector("#provider-config-form");
+    const providerConfigFeedback = document.querySelector("#provider-config-feedback");
+    const providerDefaultProvider = document.querySelector("#provider-default-provider");
+    const providerDefaultModel = document.querySelector("#provider-default-model");
     const providerTabDot = document.querySelector("#provider-tab-dot");
+    const learningVault = document.querySelector("#learning-vault");
+    const refreshLearning = document.querySelector("#refresh-learning");
+    const exportRemnote = document.querySelector("#export-remnote");
+    const pauseBehavior = document.querySelector("#pause-behavior");
+    const exportBehavior = document.querySelector("#export-behavior");
+    const clearBehavior = document.querySelector("#clear-behavior");
+    const enableBehaviorAlerts = document.querySelector("#enable-behavior-alerts");
+    const exportResources = document.querySelector("#export-resources");
+    const purgeResources = document.querySelector("#purge-resources");
+    const draftLearningPlans = document.querySelector("#draft-learning-plans");
+    const approveLearningPlanButton = document.querySelector("#approve-learning-plan");
+    const activateLearningPlanButton = document.querySelector("#activate-learning-plan");
+    const exportPlanCalendar = document.querySelector("#export-plan-calendar");
+    const exportPlanReminders = document.querySelector("#export-plan-reminders");
+    const suggestPlanUpdatesButton = document.querySelector("#suggest-plan-updates");
+    const learningPlanId = document.querySelector("#learning-plan-id");
+    const retakeInterview = document.querySelector("#retake-interview");
+    const learningStatusBox = document.querySelector("#learning-status-box");
+    const learningFeedback = document.querySelector("#learning-feedback");
+    const learningProfileForm = document.querySelector("#learning-profile-form");
+    const profileId = document.querySelector("#profile-id");
+    const profileName = document.querySelector("#profile-name");
+    const firstLanguage = document.querySelector("#first-language");
+    const targetLanguages = document.querySelector("#target-languages");
+    const interfaceLanguage = document.querySelector("#interface-language");
+    const gender = document.querySelector("#gender");
+    const ageRange = document.querySelector("#age-range");
+    const educationLevel = document.querySelector("#education-level");
+    const learningGoals = document.querySelector("#learning-goals");
+    const learningDomains = document.querySelector("#learning-domains");
+    const workingMemoryMode = document.querySelector("#working-memory-mode");
+    const explanationLevel = document.querySelector("#explanation-level");
+    const coachingStyle = document.querySelector("#coaching-style");
+    const preferredSessionMinutes = document.querySelector("#preferred-session-minutes");
+    const languageBridgeToggle = document.querySelector("#language-bridge-toggle");
+    const demographicPersonalizationToggle = document.querySelector("#demographic-personalization-toggle");
+    const sourceCaptureForm = document.querySelector("#source-capture-form");
+    const manualResourceForm = document.querySelector("#manual-resource-form");
+    const sourceCaptureEnabled = document.querySelector("#source-capture-enabled");
+    const fullLocalCaptureMode = document.querySelector("#full-local-capture-mode");
+    const manualImportToggle = document.querySelector("#manual-import-toggle");
+    const browserClipperToggle = document.querySelector("#browser-clipper-toggle");
+    const browserHistoryToggle = document.querySelector("#browser-history-toggle");
+    const openedDocumentsToggle = document.querySelector("#opened-documents-toggle");
+    const screenshotsToggle = document.querySelector("#screenshots-toggle");
+    const meetingsToggle = document.querySelector("#meetings-toggle");
+    const voiceMemosToggle = document.querySelector("#voice-memos-toggle");
+    const watchFolders = document.querySelector("#watch-folders");
+    const capturePageContent = document.querySelector("#capture-page-content");
+    const cloudProcessingPolicy = document.querySelector("#cloud-processing-policy");
+    const retentionDays = document.querySelector("#retention-days");
+    const resourceTitle = document.querySelector("#resource-title");
+    const resourceUrl = document.querySelector("#resource-url");
+    const resourceTopic = document.querySelector("#resource-topic");
+    const resourceType = document.querySelector("#resource-type");
+    const resourceSensitivity = document.querySelector("#resource-sensitivity");
     const configPathInput = document.querySelector("#config-path-input");
     const saveConfigPath = document.querySelector("#save-config-path");
     const chooseConfigFile = document.querySelector("#choose-config-file");
@@ -1745,6 +2704,7 @@ function renderHtml() {
     const noteDisplayMode = document.querySelector("#note-display-mode");
     const tagStyleButtons = document.querySelectorAll(".tag-style-button");
     let lastChatMarkdown = "";
+    let lastRemoteResearchResult = null;
     let lastLocalMarkdown = "";
     let selectedInfo = null;
     let selectedRange = null;
@@ -1757,6 +2717,9 @@ function renderHtml() {
     let filesCache = [];
     let archivesCache = [];
     let topicsCache = [];
+    let learningCache = null;
+    let providerStatusCache = null;
+    let providerConfigOptions = {};
     let sideTopicsLoaded = false;
     let sideTopicsLoading = false;
     let sideTopicsUpdatedAt = "";
@@ -1852,6 +2815,7 @@ function renderHtml() {
           ensureSideTopicsLoaded();
         }
         if (tab.dataset.tab === "provider") loadProviderStatus();
+        if (tab.dataset.tab === "learning") loadLearning();
         if (tab.dataset.tab === "notes") loadNotes();
         updateAllStickySectionTitles();
       });
@@ -1881,6 +2845,16 @@ function renderHtml() {
         button.disabled = false;
       }
     });
+    useInternetAnswer.addEventListener("click", useInternetForAnswer);
+    saveRemoteSources.addEventListener("click", saveRemoteResearchSources);
+    chatAllowInternetNeeded.addEventListener("change", async () => {
+      if (chatAllowInternetNeeded.checked && !window.confirm("Allow chat to access the internet automatically when needed?")) {
+        chatAllowInternetNeeded.checked = false;
+      }
+      await saveRemoteResearchSettings();
+    });
+    chatAskBeforeRemote.addEventListener("change", saveRemoteResearchSettings);
+    chatNeverSendLocalCloud.addEventListener("change", saveRemoteResearchSettings);
 
     localForm.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -1967,10 +2941,45 @@ function renderHtml() {
       renderSideTopics();
       sideTopicSearch.focus();
     });
-    refreshProvider.addEventListener("click", loadProviderStatus);
+    refreshProvider.addEventListener("click", () => loadProviderStatus({ reloadConfig: false }));
+    refreshLocalAiRouter.addEventListener("click", runLocalAiRouterHandshake);
+    reloadProviderConfig.addEventListener("click", () => loadProviderStatus({ reloadConfig: true }));
+    providerConfigForm.addEventListener("submit", saveProviderConfig);
+    providerDefaultProvider.addEventListener("input", updateProviderFormVisibility);
+    providerConfigForm.querySelector('[data-config-key="LOCAL_AI_PROVIDER_PRIORITY"]')?.addEventListener("input", updateProviderFormVisibility);
     saveConfigPath.addEventListener("click", saveConfigPathValue);
     chooseConfigFile.addEventListener("click", chooseConfigPathValue);
     openConfigFile.addEventListener("click", openConfigPathValue);
+    refreshLearning.addEventListener("click", loadLearning);
+    exportRemnote.addEventListener("click", () => exportRemnoteBundle(false));
+    pauseBehavior.addEventListener("click", toggleBehaviorPause);
+    exportBehavior.addEventListener("click", exportBehaviorData);
+    clearBehavior.addEventListener("click", clearBehaviorData);
+    enableBehaviorAlerts.addEventListener("click", requestBehaviorNotifications);
+    exportResources.addEventListener("click", exportResourceInbox);
+    purgeResources.addEventListener("click", purgeResourceInbox);
+    draftLearningPlans.addEventListener("click", draftPlansFromResources);
+    approveLearningPlanButton.addEventListener("click", approveSelectedLearningPlan);
+    activateLearningPlanButton.addEventListener("click", activateSelectedLearningPlan);
+    exportPlanCalendar.addEventListener("click", exportSelectedPlanCalendar);
+    exportPlanReminders.addEventListener("click", exportSelectedPlanReminders);
+    suggestPlanUpdatesButton.addEventListener("click", suggestUpdatesForPlans);
+    learningStatusBox.addEventListener("click", (event) => {
+      const actionButton = event.target.closest("[data-learning-action]");
+      if (!actionButton) return;
+      const action = actionButton.dataset.learningAction;
+      if (action === "approve-plan") approveLearningPlanButton.click();
+      if (action === "schedule-plan") exportPlanCalendar.click();
+      if (action === "export-remnote") exportRemnote.click();
+    });
+    learningVault.addEventListener("change", renderLearningProfile);
+    retakeInterview.addEventListener("click", () => {
+      learningFeedback.textContent = "Interview fields ready";
+      profileName.focus();
+    });
+    learningProfileForm.addEventListener("submit", saveLearningProfile);
+    sourceCaptureForm.addEventListener("submit", saveSourceCaptureSettings);
+    manualResourceForm.addEventListener("submit", addManualResource);
     refreshNotes.addEventListener("click", loadNotes);
     setInterval(refreshSideTopicsIfStale, 7000);
     filesFilter.addEventListener("input", renderFilesTable);
@@ -2674,22 +3683,32 @@ function renderHtml() {
       '</tr>').join("");
     }
 
-    async function loadProviderStatus() {
+    async function loadProviderStatus({ reloadConfig = true } = {}) {
       providerStatusBox.textContent = "Loading provider status...";
       try {
-        const [providerResponse, sharedResponse] = await Promise.all([
+        const [configResponse, providerResponse, sharedResponse, routerResponse] = await Promise.all([
+          reloadConfig ? fetch("/api/provider-config") : Promise.resolve(null),
           fetch("/api/provider-status"),
-          fetch("/api/shared-settings")
+          fetch("/api/shared-settings"),
+          fetch("/api/local-ai-router-status")
         ]);
+        if (configResponse) {
+          const configData = await configResponse.json();
+          if (configData.error) throw new Error(configData.error);
+          fillProviderConfigForm(configData);
+        }
         const data = await providerResponse.json();
         const sharedData = await sharedResponse.json();
+        const routerData = await routerResponse.json();
+        providerStatusCache = data;
         updateProviderTabStatus(data.statusColor, data.status, data.statusDetail);
         configPathInput.value = data.configFile || "";
         const rows = [
           ["Config file", data.configFile],
           ["Provider", data.provider],
-          ["Model", data.model],
-          ["Bridge transport", data.transport],
+          ["Active provider", data.activeProvider || data.provider],
+          ["Model", data.activeModel || data.model],
+          ["Local transport", data.transport],
           ["Access method", data.accessMethod],
           ["Auth method", data.authMethod],
           ["Credential", data.credentialConfigured ? "configured" : "not configured"],
@@ -2721,10 +3740,930 @@ function renderHtml() {
           '<table><tbody>' + (data.details || []).map((item) =>
             '<tr><th>' + escapeHtml(item.label) + '</th><td>' + escapeHtml(item.value) + '</td></tr>'
           ).join("") + '</tbody></table>' +
+          renderLocalAiRouterStatus(routerData) +
+          renderLocalProviderHealth(data) +
           '<h3>Safety</h3><ul>' + (data.safety || []).map((item) => '<li>' + escapeHtml(item) + '</li>').join("") + '</ul>';
       } catch (error) {
         providerStatusBox.textContent = error.message;
       }
+    }
+
+    async function runLocalAiRouterHandshake() {
+      refreshLocalAiRouter.disabled = true;
+      providerStatusBox.textContent = "Running Local AI Router handshake...";
+      try {
+        const response = await fetch("/api/local-ai-router-refresh", { method: "POST" });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        await loadProviderStatus({ reloadConfig: true });
+      } catch (error) {
+        providerStatusBox.textContent = error.message;
+      } finally {
+        refreshLocalAiRouter.disabled = false;
+      }
+    }
+
+    function fillProviderConfigForm(data) {
+      providerConfigOptions = data.options || {};
+      configPathInput.value = data.configFile || "";
+      populateDatalist("provider-options", providerConfigOptions.providers || []);
+      populateDatalist("provider-auth-options", providerConfigOptions.authMethods || []);
+      populateDatalist("provider-endpoint-options", providerConfigOptions.endpoints || []);
+      populateDatalist("provider-command-options", providerConfigOptions.commands || []);
+      populateDatalist("provider-priority-options", providerConfigOptions.priorities || []);
+      const values = data.values || {};
+      providerConfigForm.querySelectorAll("[data-config-key]").forEach((field) => {
+        const key = field.dataset.configKey;
+        const value = values[key] ?? "";
+        if (field.type === "checkbox") {
+          field.checked = String(value) !== "false";
+        } else {
+          field.value = value;
+        }
+      });
+      providerConfigForm.querySelectorAll("[data-secret-key]").forEach((field) => {
+        field.value = "";
+      });
+      providerConfigForm.querySelectorAll("[data-secret-clear]").forEach((field) => {
+        field.checked = false;
+      });
+      for (const [key, secret] of Object.entries(data.secrets || {})) {
+        const status = document.querySelector("#secret-status-" + cssEscape(key));
+        if (status) status.textContent = secret.configured ? "Current value: configured" : "Current value: not configured";
+      }
+      updateProviderFormVisibility();
+    }
+
+    function updateProviderFormVisibility() {
+      const provider = (providerDefaultProvider.value || "local_auto").trim() || "local_auto";
+      const visibleProviders = new Set(["all", provider]);
+      if (provider === "local_auto") {
+        visibleProviders.add("local_auto");
+        listFromInput(providerConfigForm.querySelector('[data-config-key="LOCAL_AI_PROVIDER_PRIORITY"]')?.value || "")
+          .forEach((item) => visibleProviders.add(item));
+      }
+      const groups = providerConfigForm.querySelectorAll("[data-provider-group]");
+      groups.forEach((group) => {
+        const names = String(group.dataset.providerGroup || "").split(/\s+/).filter(Boolean);
+        group.hidden = !names.some((name) => visibleProviders.has(name));
+      });
+      const modelsByProvider = providerConfigOptions.modelsByProvider || {};
+      const modelOptions = modelsByProvider[provider] || providerConfigOptions.models || [];
+      populateDatalist("provider-model-options", modelOptions);
+    }
+
+    async function saveProviderConfig(event) {
+      event.preventDefault();
+      providerConfigFeedback.textContent = "Saving...";
+      const saveButton = document.querySelector("#save-provider-config");
+      saveButton.disabled = true;
+      try {
+        const values = {};
+        providerConfigForm.querySelectorAll("[data-config-key]").forEach((field) => {
+          const key = field.dataset.configKey;
+          values[key] = field.type === "checkbox" ? String(field.checked) : field.value.trim();
+        });
+        const secrets = {};
+        providerConfigForm.querySelectorAll("[data-secret-key]").forEach((field) => {
+          const key = field.dataset.secretKey;
+          const clear = providerConfigForm.querySelector('[data-secret-clear="' + cssEscape(key) + '"]')?.checked === true;
+          const value = field.value.trim();
+          if (clear || value) secrets[key] = { clear, value };
+        });
+        const response = await fetch("/api/provider-config", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ values, secrets })
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        fillProviderConfigForm(data.config || {});
+        if (data.providerStatus) {
+          providerStatusCache = data.providerStatus;
+          updateProviderTabStatus(data.providerStatus.statusColor, data.providerStatus.status, data.providerStatus.statusDetail);
+        }
+        providerConfigFeedback.textContent = data.status || "Provider settings saved";
+        await loadProviderStatus({ reloadConfig: false });
+      } catch (error) {
+        providerConfigFeedback.textContent = error.message;
+      } finally {
+        saveButton.disabled = false;
+        setTimeout(() => { providerConfigFeedback.textContent = ""; }, 3600);
+      }
+    }
+
+    function populateDatalist(id, values) {
+      const list = document.querySelector("#" + id);
+      if (!list) return;
+      list.innerHTML = [...new Set((values || []).filter(Boolean).map(String))]
+        .map((value) => '<option value="' + escapeHtml(value) + '"></option>')
+        .join("");
+    }
+
+    function cssEscape(value) {
+      return String(value || "").replace(/[^A-Za-z0-9_-]/g, "\\\\$&");
+    }
+
+    function renderLocalProviderHealth(data) {
+      const health = data.localHealth || [];
+      const warnings = data.warnings || [];
+      const suggestions = data.fallbackSuggestions || [];
+      if (!health.length && !warnings.length && !suggestions.length) return "";
+      const healthRows = health.length
+        ? '<h3>Local Provider Health</h3><table><tbody>' + health.map((item) =>
+            '<tr><th>' + escapeHtml(item.label || item.provider) + '</th><td>' +
+            '<strong>' + escapeHtml(item.ok ? "reachable" : "not reachable") + '</strong>' +
+            (item.model ? '<div class="muted">Model: ' + escapeHtml(item.model) + '</div>' : '') +
+            (item.host ? '<div class="muted">Host: ' + escapeHtml(item.host) + '</div>' : '') +
+            (item.command ? '<div class="muted">Command: ' + escapeHtml(item.command) + '</div>' : '') +
+            '<div class="muted">' + escapeHtml(item.detail || '') + '</div>' +
+            '</td></tr>'
+          ).join("") + '</tbody></table>'
+        : "";
+      const warningList = warnings.length
+        ? '<h3>LAN / Privacy Warnings</h3><ul>' + warnings.map((item) => '<li>' + escapeHtml(item) + '</li>').join("") + '</ul>'
+        : "";
+      const suggestionList = suggestions.length
+        ? '<h3>Fallback Suggestions</h3><ul>' + suggestions.map((item) => '<li>' + escapeHtml(item) + '</li>').join("") + '</ul>'
+        : "";
+      return healthRows + warningList + suggestionList;
+    }
+
+    function renderLocalAiRouterStatus(data) {
+      if (!data) return "";
+      const rows = [
+        ["Status", data.status],
+        ["Detail", data.detail],
+        ["Router URL", data.baseUrl],
+        ["Autostart", data.autostart ? "enabled" : "disabled"],
+        ["Auto apply", data.autoApply ? "enabled" : "disabled"],
+        ["Auto-start provider", data.autoStartProvider ? "enabled" : "disabled"],
+        ["Auto install", data.autoInstall ? "enabled" : "disabled"],
+        ["Bearer token", data.tokenConfigured ? "configured" : "not configured"]
+      ];
+      const recommendation = data.recommendation
+        ? '<div class="muted">Recommendation: ' + escapeHtml(data.recommendation.provider || data.recommendation.providerId || "provider") +
+          ' / ' + escapeHtml(data.recommendation.model || "model") + '</div>'
+        : "";
+      return '<h3>Local AI Router Startup</h3>' +
+        '<div class="provider-state"><span class="status-dot ' + escapeHtml(routerStatusColor(data.status)) + '"></span><span>' + escapeHtml(data.detail || data.status || "Unknown") + '</span></div>' +
+        recommendation +
+        '<table><tbody>' + rows.map(([label, value]) =>
+          '<tr><th>' + escapeHtml(label) + '</th><td>' + escapeHtml(value || "") + '</td></tr>'
+        ).join("") + '</tbody></table>';
+    }
+
+    function routerStatusColor(status) {
+      if (status === "applied" || status === "ready") return "green";
+      if (status === "launching" || status === "connecting" || status === "idle") return "orange";
+      if (status === "disabled") return "grey";
+      return "red";
+    }
+
+    async function loadLearning() {
+      learningStatusBox.textContent = "Loading learning profile...";
+      try {
+        const response = await fetch("/api/learning");
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        learningCache = data;
+        populateSelect(learningVault, (data.vaults || []).map((item) => item.vault), "Choose vault");
+        renderLearningProfile();
+      } catch (error) {
+        learningStatusBox.textContent = error.message;
+      }
+    }
+
+    function selectedLearningVault() {
+      const vaults = learningCache?.vaults || [];
+      return vaults.find((item) => item.vault === learningVault.value) || vaults[0] || null;
+    }
+
+    function renderLearningProfile() {
+      const state = selectedLearningVault();
+      if (!state) {
+        learningStatusBox.textContent = "No vault learning profile is available.";
+        return;
+      }
+      const user = state.userProfile || {};
+      const profile = state.learningProfile || {};
+      const stats = state.learningStats || {};
+      const coach = state.behaviorCoach || {};
+      const coachSettings = coach.settings || {};
+      const coachAlerts = coach.alerts || [];
+      const sourceCapture = state.sourceCapture || {};
+      const sourceSettings = sourceCapture.settings || {};
+      const resourceGroups = sourceCapture.groups || [];
+      const remoteSettings = state.remoteResearch?.settings || {};
+      const planning = state.planning || {};
+      const plans = planning.plans || [];
+      const goals = planning.goals || [];
+      const updateSuggestions = planning.updateSuggestions || [];
+      learningVault.value = state.vault;
+      pauseBehavior.textContent = coachSettings.paused ? "Resume coaching" : "Pause coaching";
+      enableBehaviorAlerts.textContent = coachSettings.notificationPermission === "granted" ? "Alerts enabled" : "Enable alerts";
+      sourceCaptureEnabled.checked = sourceSettings.enabled === true;
+      fullLocalCaptureMode.checked = sourceSettings.fullLocalCaptureMode === true;
+      manualImportToggle.checked = sourceSettings.manualImport !== false;
+      browserClipperToggle.checked = sourceSettings.browserClipper !== false;
+      browserHistoryToggle.checked = sourceSettings.browserHistoryImport === true;
+      openedDocumentsToggle.checked = sourceSettings.openedDocuments === true;
+      screenshotsToggle.checked = sourceSettings.screenshots === true;
+      meetingsToggle.checked = sourceSettings.meetings === true;
+      voiceMemosToggle.checked = sourceSettings.voiceMemos === true;
+      watchFolders.value = (sourceSettings.watchFolders || []).join(", ");
+      capturePageContent.value = sourceSettings.capturePageContent || "ask";
+      cloudProcessingPolicy.value = sourceSettings.cloudProcessingPolicy || "ask_each_time";
+      retentionDays.value = sourceSettings.retentionDays || 90;
+      chatAskBeforeRemote.checked = remoteSettings.askBeforeEachRemoteRequest !== false;
+      chatNeverSendLocalCloud.checked = remoteSettings.neverSendLocalNotesToCloudWhenBrowsing !== false;
+      chatAllowInternetNeeded.checked = remoteSettings.allowInternetWhenNeeded === true;
+      if (!learningPlanId.value && plans.length) learningPlanId.value = plans[plans.length - 1].id || "";
+      profileId.value = user.profileId || profile.activeProfileId || "default";
+      profileName.value = user.displayName || "";
+      firstLanguage.value = user.firstLanguage || "";
+      targetLanguages.value = (user.targetLanguages || []).join(", ");
+      interfaceLanguage.value = user.interfaceLanguage || "";
+      gender.value = user.gender || "";
+      ageRange.value = user.ageRange || "";
+      educationLevel.value = user.educationLevel || "";
+      learningGoals.value = (user.learningGoals || []).join(", ");
+      learningDomains.value = (user.learningDomains || []).join(", ");
+      workingMemoryMode.value = user.workingMemoryMode || profile.workingMemoryMode || "friendly";
+      explanationLevel.value = user.explanationLevel || "standard";
+      coachingStyle.value = user.coachingStyle || "gentle";
+      preferredSessionMinutes.value = user.preferredSessionMinutes || profile.preferredSessionMinutes || 25;
+      languageBridgeToggle.checked = user.useFirstLanguageBridge !== false;
+      demographicPersonalizationToggle.checked = user.demographicPersonalizationEnabled !== true;
+      const rows = [
+        ["Vault", state.vault],
+        ["Profile ID", user.profileId],
+        ["Profile", user.displayName],
+        ["First language", user.firstLanguage],
+        ["Target languages", (profile.targetLanguages || []).join(", ")],
+        ["Working-memory mode", profile.workingMemoryMode],
+        ["Max visible actions", profile.maxVisibleActions],
+        ["Max new concepts/session", profile.maxNewConceptsPerSession],
+        ["Scheduler", profile.scheduler],
+        ["Learning bits", stats.bits],
+        ["Active recall cards", stats.cards],
+        ["Suggested plans", stats.plans],
+        ["Due cards", (stats.dueCards || []).length],
+        ["Behavior events", coach.counts?.events || 0],
+        ["Fallback alerts", coachAlerts.length],
+        ["Behavior capture", coachSettings.captureEnabled === false ? "off" : (coachSettings.paused ? "paused" : "on")],
+        ["Resources", resourceGroups.reduce((sum, group) => sum + (group.resources || []).length, 0)],
+        ["Source capture", sourceSettings.enabled ? (sourceSettings.fullLocalCaptureMode ? "full local" : "normal") : "manual/clipper only"],
+        ["Goals", goals.length],
+        ["Plans", plans.length],
+        ["Plan update suggestions", updateSuggestions.length],
+        ["External write logs", (planning.externalWriteLog || []).length],
+        ["Learning dir", state.paths?.learningDir],
+        ["Dashboard", state.paths?.dashboard],
+        ["RemNote export", state.paths?.remnoteExport]
+      ];
+      learningStatusBox.innerHTML = '<h2>Learning Boost</h2>' +
+        renderLearningBoostGrid(state, { rows, resourceGroups, plans, goals, updateSuggestions, coachAlerts, coachSettings, sourceSettings, remoteSettings, stats, user, profile }) +
+        '<h2>Learning Profile</h2>' +
+        '<table><tbody>' + rows.map(([label, value]) =>
+          '<tr><th>' + escapeHtml(label) + '</th><td>' + escapeHtml(value || "") + '</td></tr>'
+        ).join("") + '</tbody></table>' +
+        '<h3>Due Reviews</h3><ul>' + (stats.dueCards || []).slice(0, 10).map((card) =>
+          '<li>' + escapeHtml(card.front || card.cloze || card.type || "Card") +
+          (card.sourcePage ? ' <span class="muted">' + escapeHtml(card.sourcePage) + '</span>' : '') +
+          '</li>'
+        ).join("") + ((stats.dueCards || []).length ? '' : '<li>No due cards yet.</li>') + '</ul>' +
+        '<h3>Recent Source-to-Card Trace</h3><ul>' + (stats.recentCards || []).slice(0, 10).map((card) =>
+          '<li>' + escapeHtml(card.front || card.cloze || card.type || "Card") +
+          (card.sourcePage ? ' <span class="muted">' + escapeHtml(card.sourcePage) + '</span>' : '') +
+          '</li>'
+        ).join("") + ((stats.recentCards || []).length ? '' : '<li>No cards generated yet.</li>') + '</ul>' +
+        '<h3>Fallback Alerts</h3><ul>' + coachAlerts.slice(0, 6).map((alert) =>
+          '<li><strong>' + escapeHtml(alert.title || "Alert") + '</strong>: ' + escapeHtml(alert.message || "") +
+          '<ul>' + (alert.actions || []).slice(0, 3).map((action) => '<li>' + escapeHtml(action) + '</li>').join("") + '</ul></li>'
+        ).join("") + (coachAlerts.length ? '' : '<li>No fallback alerts right now.</li>') + '</ul>' +
+        '<h3>Resource Inbox</h3>' + resourceGroups.slice(0, 8).map((group) =>
+          '<h4>' + escapeHtml(group.topic || "Unsorted") + '</h4><ul>' + (group.resources || []).slice(0, 8).map((resource) =>
+            '<li><strong>' + escapeHtml(resource.title || "Resource") + '</strong> ' +
+            '<span class="muted">' + escapeHtml([resource.sourceType, resource.sensitivity, resource.processingStatus].filter(Boolean).join(" / ")) + '</span>' +
+            '<br><span class="muted">' + escapeHtml(resource.recommendedNextAction || "") + '</span></li>'
+          ).join("") + '</ul>'
+        ).join("") + (resourceGroups.length ? '' : '<ul><li>No captured resources yet.</li></ul>') +
+        '<h3>Learning Plans</h3><ul>' + plans.slice(-8).reverse().map((plan) =>
+          '<li><strong>' + escapeHtml(plan.title || "Plan") + '</strong> ' +
+          '<span class="muted">' + escapeHtml([plan.id, plan.status, (plan.stages || []).length + " stages"].join(" / ")) + '</span></li>'
+        ).join("") + (plans.length ? '' : '<li>No learning plans drafted yet.</li>') + '</ul>' +
+        '<h3>Plan Update Suggestions</h3><ul>' + updateSuggestions.slice(-6).reverse().map((suggestion) =>
+          '<li><strong>' + escapeHtml(suggestion.whatChanged || "Suggested update") + '</strong> ' +
+          '<span class="muted">' + escapeHtml([suggestion.id, suggestion.status].join(" / ")) + '</span>' +
+          '<br><span class="muted">' + escapeHtml(suggestion.whyItHelps || "") + '</span></li>'
+        ).join("") + (updateSuggestions.length ? '' : '<li>No plan update suggestions yet.</li>') + '</ul>' +
+        '<h3>Next Actions</h3><ul>' + (state.nextActions || []).slice(0, 3).map((item) => '<li>' + escapeHtml(item) + '</li>').join("") + '</ul>' +
+        '<h3>Onboarding Interview</h3><ul>' + (state.onboardingQuestions || []).map((item) =>
+          '<li>' + escapeHtml(item.label) + (item.preferNotToSay ? ' <span class="muted">Prefer not to say available</span>' : '') + '</li>'
+        ).join("") + '</ul>';
+      maybeNotifyBehaviorAlerts(coachAlerts, coachSettings);
+    }
+
+    function renderLearningBoostGrid(state, context) {
+      const nextActions = (state.nextActions || []).slice(0, 3);
+      const resources = context.resourceGroups.reduce((sum, group) => sum + (group.resources || []).length, 0);
+      const due = (context.stats.dueCards || []).slice(0, 3).map((card) => card.front || card.cloze || card.type || "Card");
+      const plan = context.plans[context.plans.length - 1] || {};
+      const goal = context.goals[context.goals.length - 1] || {};
+      const providerStatus = providerStatusCache?.status || "Provider not checked";
+      const providerTips = (providerStatusCache?.fallbackSuggestions || providerStatusCache?.suggestions || []).slice(0, 3);
+      const cards = [
+        learningCard("Today", "Keeps the session small enough to finish.", nextActions, [
+          "Due cards: " + (context.stats.dueCards || []).length,
+          "Learning bits: " + (context.stats.bits || 0)
+        ]),
+        learningCard("Sources to process", "Unprocessed sources stay visible before they become cards.", [
+          resources ? "Review top ResourceInbox item" : "Add one source",
+          "Ingest one ready source",
+          "Defer low-priority sources"
+        ].slice(0, 3), context.resourceGroups.slice(0, 3).map((group) => (group.topic || "Unsorted") + ": " + (group.resources || []).length)),
+        learningCard("Learning plans", "Plans protect working memory by staging the work.", [
+          "Draft plans",
+          "Stage approved?",
+          "Schedule this?"
+        ], [
+          "Latest plan: " + (plan.title || "none"),
+          "Status: " + (plan.status || "n/a"),
+          "Stages: " + ((plan.stages || []).length || 0)
+        ], '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="approve-plan">Stage approved?</button><button class="secondary" type="button" data-learning-action="schedule-plan">Schedule this?</button></div>'),
+        learningCard("Goals", "A goal gives resources a concrete learning outcome.", [
+          goal.title ? "Review current goal" : "Draft one goal",
+          "Check success criteria",
+          "Update target date"
+        ], [
+          "Latest goal: " + (goal.title || "none"),
+          "Status: " + (goal.status || "n/a")
+        ]),
+        learningCard("Due reviews", "Recall work prevents passive rereading.", due.length ? due : ["No due cards right now"], [
+          "Due count: " + (context.stats.dueCards || []).length,
+          "Recent cards: " + (context.stats.recentCards || []).length
+        ]),
+        learningCard("RemNote export", "Exports keep review work portable without changing source notes.", [
+          "Export to RemNote",
+          "Review media bundle",
+          "Check large export prompt"
+        ], [
+          "Path: " + (state.paths?.remnoteExport || ""),
+          "Cards: " + (context.stats.cards || 0)
+        ], '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="export-remnote">Export to RemNote</button></div>'),
+        learningCard("Target languages", "Target languages keep practice cards aligned.", [
+          "Check language list",
+          "Use bridge language",
+          "Keep one focus language"
+        ], [
+          "Targets: " + ((context.profile.targetLanguages || []).join(", ") || "AUTO"),
+          "First language: " + (context.user.firstLanguage || "")
+        ]),
+        learningCard("Behavior insights", "Local signals catch fallback loops and overload early.", (context.coachAlerts || []).slice(0, 3).map((alert) => alert.title || "Alert").concat(["No alerts"]).slice(0, 3), [
+          "Capture: " + (context.coachSettings.captureEnabled === false ? "off" : "on"),
+          "Coaching: " + (context.coachSettings.coachingEnabled === false ? "off" : "on")
+        ]),
+        learningCard("Provider health", "Local AI status affects capture, processing, and cloud prompts.", providerTips.length ? providerTips : ["Local AI unavailable: open Provider for tips", "Check Ollama or MLX", "Confirm cloud fallback only when needed"], [
+          "Status: " + providerStatus,
+          "Active provider: " + (providerStatusCache?.activeProvider || providerStatusCache?.provider || "unknown")
+        ], "", providerStatusCache && ["red", "orange"].includes(providerStatusCache.statusColor) ? "warning" : ""),
+        learningCard("Profile/onboarding", "Profile settings tune explanations and session size.", [
+          "Review profile",
+          "Keep max actions small",
+          "Confirm sensitive profile changes"
+        ], [
+          "Profile: " + (context.user.displayName || ""),
+          "Working memory: " + (context.profile.workingMemoryMode || "")
+        ]),
+        learningCard("Internet research controls", "Remote sources are opt-in and citation-backed.", [
+          context.remoteSettings.allowInternetWhenNeeded ? "Internet allowed when needed" : "Ask before internet",
+          context.remoteSettings.neverSendLocalNotesToCloudWhenBrowsing !== false ? "Local notes stay out of cloud browsing" : "Review cloud browsing policy",
+          "Save remote sources only by choice"
+        ], [
+          "Ask each request: " + (context.remoteSettings.askBeforeEachRemoteRequest !== false),
+          "Allow internet when needed: " + (context.remoteSettings.allowInternetWhenNeeded === true)
+        ]),
+        learningCard("System/device alerts", "Alerts stay visible without expanding monitoring by default.", [
+          "Check provider health",
+          "Review notification permission",
+          "Keep expanded monitoring off unless needed"
+        ], [
+          "Notifications: " + (context.coachSettings.notificationPermission || "not_requested"),
+          "Expanded monitoring: " + (context.coachSettings.expandedMonitoringEnabled === true)
+        ])
+      ];
+      return '<div class="learning-boost-grid">' + cards.join("") + '</div>';
+    }
+
+    function learningCard(title, why, actions, details, extra = "", tone = "") {
+      const safeActions = (actions || []).filter(Boolean).slice(0, 3);
+      const safeDetails = (details || []).filter(Boolean);
+      return '<section class="learning-card ' + escapeHtml(tone || "") + '">' +
+        '<h3>' + escapeHtml(title) + '</h3>' +
+        '<h4>Why this matters</h4><p>' + escapeHtml(why) + '</p>' +
+        '<h4>Do now</h4><ul>' + safeActions.map((item) => '<li>' + escapeHtml(item) + '</li>').join("") + '</ul>' +
+        extra +
+        '<details><summary>More details</summary><ul>' + safeDetails.map((item) => '<li>' + escapeHtml(item) + '</li>').join("") + '</ul></details>' +
+        '</section>';
+    }
+
+    async function saveLearningProfile(event) {
+      event.preventDefault();
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      if (!confirmProfileLearningChanges(selectedLearningVault()?.userProfile || {})) return;
+      learningFeedback.textContent = "Saving...";
+      const payload = {
+        vault,
+        userProfile: {
+          profileId: profileId.value,
+          displayName: profileName.value,
+          firstLanguage: firstLanguage.value,
+          targetLanguages: listFromInput(targetLanguages.value),
+          interfaceLanguage: interfaceLanguage.value,
+          gender: gender.value,
+          ageRange: ageRange.value,
+          educationLevel: educationLevel.value,
+          learningGoals: listFromInput(learningGoals.value),
+          learningDomains: listFromInput(learningDomains.value),
+          workingMemoryMode: workingMemoryMode.value,
+          explanationLevel: explanationLevel.value,
+          coachingStyle: coachingStyle.value,
+          preferredSessionMinutes: Number(preferredSessionMinutes.value || 25),
+          useFirstLanguageBridge: languageBridgeToggle.checked,
+          demographicPersonalizationEnabled: !demographicPersonalizationToggle.checked
+        },
+        learningProfile: {
+          workingMemoryMode: workingMemoryMode.value,
+          preferredSessionMinutes: Number(preferredSessionMinutes.value || 25)
+        }
+      };
+      try {
+        const response = await fetch("/api/learning/profile", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        learningFeedback.textContent = "Saved";
+        await loadLearning();
+        setTimeout(() => { learningFeedback.textContent = ""; }, 1400);
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    function confirmProfileLearningChanges(current) {
+      const tracked = [
+        ["gender", gender.value],
+        ["ageRange", ageRange.value],
+        ["educationLevel", educationLevel.value],
+        ["workingMemoryMode", workingMemoryMode.value],
+        ["explanationLevel", explanationLevel.value],
+        ["coachingStyle", coachingStyle.value],
+        ["preferredSessionMinutes", String(Number(preferredSessionMinutes.value || 25))]
+      ];
+      const changed = tracked.filter(([key, next]) => {
+        const previous = current[key] == null ? "" : String(current[key]);
+        return previous && previous !== String(next || "");
+      });
+      if (!changed.length) return true;
+      return window.confirm("Change profile demographics or learning-level settings for this vault?");
+    }
+
+    async function exportRemnoteBundle(confirmLarge) {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      learningFeedback.textContent = "Exporting RemNote bundle...";
+      exportRemnote.disabled = true;
+      try {
+        const response = await fetch("/api/learning/remnote-export", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ vault, confirmLarge })
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        if (data.requiresConfirmation) {
+          const ok = window.confirm(data.reason || "Confirm large RemNote export?");
+          if (ok) return exportRemnoteBundle(true);
+          learningFeedback.textContent = "Export cancelled";
+          return;
+        }
+        learningFeedback.textContent = "RemNote export ready: " + (data.files?.markdown || "remnote-import.md");
+        await loadLearning();
+        setTimeout(() => { learningFeedback.textContent = ""; }, 2600);
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      } finally {
+        exportRemnote.disabled = false;
+      }
+    }
+
+    async function toggleBehaviorPause() {
+      const state = selectedLearningVault();
+      const vault = state?.vault || learningVault.value;
+      if (!vault) return;
+      const paused = !(state?.behaviorCoach?.settings?.paused === true);
+      await updateBehaviorSettings({ paused });
+      learningFeedback.textContent = paused ? "Behavior coaching paused" : "Behavior coaching resumed";
+    }
+
+    async function requestBehaviorNotifications() {
+      if (!("Notification" in window)) {
+        learningFeedback.textContent = "Notifications are not available in this view.";
+        return;
+      }
+      const permission = await Notification.requestPermission();
+      await updateBehaviorSettings({ notificationPermission: permission });
+      learningFeedback.textContent = permission === "granted" ? "Alerts enabled" : "Alerts not enabled";
+    }
+
+    async function updateBehaviorSettings(settings) {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      const response = await fetch("/api/learning/behavior-settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ vault, settings })
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      await loadLearning();
+      return data;
+    }
+
+    async function exportBehaviorData() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      learningFeedback.textContent = "Exporting behavior log...";
+      try {
+        const response = await fetch("/api/learning/behavior-export", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ vault })
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        learningFeedback.textContent = "Behavior export ready: " + data.file;
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function saveSourceCaptureSettings(event) {
+      event.preventDefault();
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      const current = selectedLearningVault()?.sourceCapture?.settings || {};
+      if (!confirmSourceCaptureChanges(current)) return;
+      learningFeedback.textContent = "Saving source capture settings...";
+      try {
+        const response = await fetch("/api/learning/source-capture-settings", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            vault,
+            settings: {
+              enabled: sourceCaptureEnabled.checked,
+              fullLocalCaptureMode: fullLocalCaptureMode.checked,
+              manualImport: manualImportToggle.checked,
+              browserClipper: browserClipperToggle.checked,
+              browserHistoryImport: browserHistoryToggle.checked,
+              openedDocuments: openedDocumentsToggle.checked,
+              screenshots: screenshotsToggle.checked,
+              meetings: meetingsToggle.checked,
+              voiceMemos: voiceMemosToggle.checked,
+              watchFolders: listFromInput(watchFolders.value),
+              capturePageContent: capturePageContent.value,
+              cloudProcessingPolicy: cloudProcessingPolicy.value,
+              retentionDays: Number(retentionDays.value || 90)
+            }
+          })
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        learningFeedback.textContent = "Source capture settings saved";
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    function confirmSourceCaptureChanges(current) {
+      const confirmations = [];
+      if (fullLocalCaptureMode.checked && current.fullLocalCaptureMode !== true) confirmations.push("Enable Full Local Capture Mode?");
+      if (browserHistoryToggle.checked && current.browserHistoryImport !== true) confirmations.push("Enable browser history import?");
+      if (openedDocumentsToggle.checked && current.openedDocuments !== true) confirmations.push("Enable opened-document detection?");
+      if (screenshotsToggle.checked && current.screenshots !== true) confirmations.push("Enable screenshot watch?");
+      if (meetingsToggle.checked && current.meetings !== true) confirmations.push("Enable meeting import?");
+      if (voiceMemosToggle.checked && current.voiceMemos !== true) confirmations.push("Enable voice memo import?");
+      if (cloudProcessingPolicy.value === "allow_non_sensitive" && current.cloudProcessingPolicy !== "allow_non_sensitive") {
+        confirmations.push("Allow non-sensitive captured sources to use cloud processing when policy permits?");
+      }
+      for (const message of confirmations) {
+        if (!window.confirm(message)) return false;
+      }
+      return true;
+    }
+
+    function isHttpUrl(value) {
+      const text = String(value || "").trim().toLowerCase();
+      return text.startsWith("http://") || text.startsWith("https://");
+    }
+
+    async function addManualResource(event) {
+      event.preventDefault();
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      learningFeedback.textContent = "Adding resource...";
+      const value = resourceUrl.value.trim();
+      const remoteUrl = isHttpUrl(value);
+      try {
+        const response = await fetch("/api/learning/resource-capture", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            vault,
+            previewApproved: true,
+            resource: {
+              title: resourceTitle.value,
+              sourceType: resourceType.value,
+              url: remoteUrl ? value : "",
+              file: remoteUrl ? "" : value,
+              topic: resourceTopic.value,
+              sensitivity: resourceSensitivity.value,
+              userApproved: true,
+              contentApproved: false
+            }
+          })
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        if (!data.captured) throw new Error(data.reason || "Resource was not captured.");
+        resourceTitle.value = "";
+        resourceUrl.value = "";
+        resourceTopic.value = "";
+        resourceSensitivity.value = "";
+        learningFeedback.textContent = "Resource added";
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function exportResourceInbox() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      learningFeedback.textContent = "Exporting resources...";
+      try {
+        const response = await fetch("/api/learning/resource-export", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ vault })
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        learningFeedback.textContent = "Resource export ready: " + data.file;
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function purgeResourceInbox() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault || !window.confirm("Purge expired resources based on the retention setting?")) return;
+      learningFeedback.textContent = "Purging expired resources...";
+      try {
+        const response = await fetch("/api/learning/resource-purge", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ vault })
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        learningFeedback.textContent = "Purged " + data.purged + " expired resources";
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function draftPlansFromResources() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      learningFeedback.textContent = "Drafting learning plans...";
+      try {
+        const data = await postLearningAction("/api/learning/plan-draft", { vault, options: {} });
+        const plan = (data.plans || [])[0] || {};
+        learningPlanId.value = plan.id || learningPlanId.value;
+        learningFeedback.textContent = "Drafted " + (data.plans || []).length + " plan(s)";
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function approveSelectedLearningPlan() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      const planId = selectedLearningPlanId();
+      if (!vault || !planId) return;
+      if (!window.confirm("Approve this learning plan? This does not create Calendar events or Reminders.")) return;
+      learningFeedback.textContent = "Approving plan...";
+      try {
+        const data = await postLearningAction("/api/learning/plan-approve", { vault, planId, confirmed: true });
+        learningFeedback.textContent = data.approved ? "Plan approved" : (data.message || "Plan not approved");
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function activateSelectedLearningPlan() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      const planId = selectedLearningPlanId();
+      if (!vault || !planId) return;
+      if (!window.confirm("Activate this learning plan now? Calendar and Reminders still require separate confirmation.")) return;
+      learningFeedback.textContent = "Activating plan...";
+      try {
+        const data = await postLearningAction("/api/learning/plan-activate", { vault, planId, confirmed: true });
+        learningFeedback.textContent = data.activated ? "Plan activated" : (data.message || "Plan not activated");
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function exportSelectedPlanCalendar() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      const planId = selectedLearningPlanId();
+      if (!vault || !planId) return;
+      if (!window.confirm("Export approved plan stages to an iCalendar file? This is separate from plan approval.")) return;
+      learningFeedback.textContent = "Exporting calendar...";
+      try {
+        const data = await postLearningAction("/api/learning/calendar-export", { vault, planId, confirmed: true, method: "ics" });
+        learningFeedback.textContent = data.exported ? "Calendar export ready: " + data.file : (data.message || "Calendar export skipped");
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function exportSelectedPlanReminders() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      const planId = selectedLearningPlanId();
+      if (!vault || !planId) return;
+      if (!window.confirm("Export approved plan reminders to a copyable Markdown file? This is separate from plan approval.")) return;
+      learningFeedback.textContent = "Exporting reminders...";
+      try {
+        const data = await postLearningAction("/api/learning/reminders-export", { vault, planId, confirmed: true, method: "markdown" });
+        learningFeedback.textContent = data.exported ? "Reminders export ready: " + data.file : (data.message || "Reminders export skipped");
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function suggestUpdatesForPlans() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      learningFeedback.textContent = "Checking for plan update suggestions...";
+      try {
+        const data = await postLearningAction("/api/learning/plan-update-suggest", { vault, signals: {} });
+        learningFeedback.textContent = "Added " + (data.suggestions || []).length + " suggestion(s)";
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    function selectedLearningPlanId() {
+      const planId = learningPlanId.value.trim();
+      if (planId) return planId;
+      const plans = selectedLearningVault()?.planning?.plans || [];
+      return plans.length ? plans[plans.length - 1].id : "";
+    }
+
+    async function postLearningAction(url, payload) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      return data;
+    }
+
+    async function saveRemoteResearchSettings() {
+      const vault = selectedLearningVault()?.vault || chatSaveVault.value || learningVault.value;
+      if (!vault) return null;
+      const data = await postLearningAction("/api/learning/remote-research-settings", {
+        vault,
+        settings: {
+          allowInternetWhenNeeded: chatAllowInternetNeeded.checked,
+          askBeforeEachRemoteRequest: chatAskBeforeRemote.checked,
+          neverSendLocalNotesToCloudWhenBrowsing: chatNeverSendLocalCloud.checked
+        }
+      });
+      if (learningCache) await loadLearning();
+      return data;
+    }
+
+    async function useInternetForAnswer() {
+      const vault = selectedLearningVault()?.vault || chatSaveVault.value || learningVault.value;
+      if (!vault) return;
+      const url = remoteSourceUrl.value.trim();
+      const query = input.value.trim();
+      if (!url && !query) {
+        saveChatFeedback.textContent = "Enter a URL or question first";
+        return;
+      }
+      if (chatAskBeforeRemote.checked && !window.confirm("Use internet for this answer? Remote sources will be fetched only after this confirmation.")) return;
+      saveChatFeedback.textContent = "Fetching remote source...";
+      try {
+        await saveRemoteResearchSettings();
+        const data = await postLearningAction("/api/learning/remote-research", {
+          vault,
+          confirmed: true,
+          request: {
+            url,
+            query: url ? "" : query,
+            explicitUserRequest: true
+          }
+        });
+        lastRemoteResearchResult = data.ok ? data : null;
+        if (!data.ok) {
+          saveChatFeedback.textContent = data.reason || data.message || "Remote research was not run";
+          return;
+        }
+        const citationLines = (data.citations || []).map((item, index) => (index + 1) + ". " + (item.title || item.url) + (item.url ? " - " + item.url : "")).join("\\n");
+        const fetchedText = (data.fetched || []).map((item) => "## " + (item.title || item.url) + "\\n\\n" + (item.readableText || "").slice(0, 2200)).join("\\n\\n");
+        lastChatMarkdown = "Remote sources fetched. Local processing is preferred.\\n\\n" + fetchedText + "\\n\\n## Citations\\n" + citationLines;
+        answer.innerHTML = renderMarkdown(lastChatMarkdown);
+        applyAutoDirection(answer);
+        saveChatFeedback.textContent = "Remote source ready";
+      } catch (error) {
+        saveChatFeedback.textContent = error.message;
+      }
+    }
+
+    async function saveRemoteResearchSources() {
+      const vault = selectedLearningVault()?.vault || chatSaveVault.value || learningVault.value;
+      if (!vault || !lastRemoteResearchResult) {
+        saveChatFeedback.textContent = "No remote sources to save";
+        return;
+      }
+      if (!window.confirm("Save remote sources to the ResourceInbox for this vault?")) return;
+      try {
+        const data = await postLearningAction("/api/learning/remote-source-save", {
+          vault,
+          confirmed: true,
+          remoteResult: lastRemoteResearchResult
+        });
+        saveChatFeedback.textContent = data.saved ? "Saved " + data.captured + " remote source(s)" : (data.message || "Remote sources not saved");
+        await loadLearning();
+      } catch (error) {
+        saveChatFeedback.textContent = error.message;
+      }
+    }
+
+    async function clearBehaviorData() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault || !window.confirm("Clear local behavior and fallback logs for this vault?")) return;
+      learningFeedback.textContent = "Clearing behavior log...";
+      try {
+        const response = await fetch("/api/learning/behavior-clear", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ vault })
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        learningFeedback.textContent = "Behavior logs cleared";
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    function maybeNotifyBehaviorAlerts(alerts, settings) {
+      if (!("Notification" in window) || settings?.notificationPermission !== "granted" || Notification.permission !== "granted") return;
+      for (const alert of (alerts || []).filter((item) => item.severity === "high").slice(0, 1)) {
+        const key = "behavior-alert-" + alert.type;
+        if (sessionStorage.getItem(key)) continue;
+        sessionStorage.setItem(key, "1");
+        new Notification("Learning Boost", {
+          body: settings.detailedNotifications ? alert.message : "A learning fallback needs attention.",
+          silent: false
+        });
+      }
+    }
+
+    function listFromInput(value) {
+      return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
     }
 
     async function saveConfigPathValue() {
@@ -3240,12 +5179,18 @@ function renderHtml() {
         const generalPercent = Number.isFinite(general.percent) ? general.percent : 99;
         const percent = Number.isFinite(progress.percent) ? progress.percent : (data.ingestRunning ? 0 : 100);
         const detail = data.lastIngestMessage || progress.detail || "Auto-ingest is running.";
-        statusEl.textContent = detail.includes("General completion:")
+        const message = detail.includes("General completion:")
           ? detail
           : "General completion: " + generalPercent + "%. Operation progress: " + percent + "%. " + detail;
+        statusEl.textContent = compactStatusMessage(message);
       } catch (error) {
-        statusEl.textContent = error.message;
+        statusEl.textContent = compactStatusMessage(error.message);
       }
+    }
+
+    function compactStatusMessage(value) {
+      const normalized = String(value || "").replace(/\\s+/g, " ").trim();
+      return normalized.length > 320 ? normalized.slice(0, 319).trim() + "..." : normalized;
     }
 
     function renderMarkdown(markdown) {
@@ -4885,6 +6830,7 @@ function renderHtml() {
     loadAnnotations({ annotateResults: false });
     loadStatus();
     loadProviderStatus();
+    loadLearning();
     setInterval(loadChatVaults, 10000);
     setInterval(loadStatus, 5000);
   </script>
@@ -4892,14 +6838,16 @@ function renderHtml() {
 </html>`;
 }
 
-function renderHelp() {
-  const markdown = readHelpMarkdown();
+function renderHelp(markdown = readHelpMarkdown(), options = {}) {
+  const title = options.title || "LLM Agent Learning Boost Help";
+  const backHref = options.backHref || "/";
+  const backLabel = options.backLabel || "Back to agent";
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LLM Wiki Agent Help</title>
+  <title>${serverEscapeHtml(title)}</title>
   <style>
     :root { --bg: #f6f7f9; --text: #18202b; --panel: #ffffff; --line: #dce1e8; --soft: #eef2f7; --muted: #697386; --accent: #1f5eff; --accent-text: #ffffff; --shadow: rgba(20, 32, 50, 0.08); --code-bg: #edf2f7; --pre-bg: #f8fafc; }
     body[data-theme="dark"] { --bg: #111827; --text: #e5e7eb; --panel: #1f2937; --line: #374151; --soft: #273449; --muted: #9ca3af; --accent: #60a5fa; --accent-text: #07111f; --shadow: rgba(0, 0, 0, 0.28); --code-bg: #111827; --pre-bg: #0f172a; }
@@ -4914,15 +6862,18 @@ function renderHelp() {
     code { background: var(--code-bg); color: var(--text); padding: 2px 5px; border-radius: 4px; }
     pre { background: var(--pre-bg); color: var(--text); border: 1px solid var(--line); padding: 14px; border-radius: 6px; overflow: auto; }
     pre code { background: transparent; color: inherit; padding: 0; }
+    figure { margin: 18px 0; }
+    figure img { display: block; width: 100%; max-height: 760px; object-fit: contain; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); }
+    figcaption { margin-top: 8px; color: var(--muted); font-size: 13px; }
     table { border-collapse: collapse; width: 100%; }
     th, td { border: 1px solid var(--line); padding: 8px; text-align: left; }
-    .back { display: inline-block; margin-bottom: 14px; font-weight: 650; text-decoration: none; }
+    .back { position: sticky; top: 0; z-index: 5; display: inline-block; margin-bottom: 14px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: 0 8px 18px var(--shadow); backdrop-filter: blur(12px); font-weight: 650; text-decoration: none; }
     .muted { color: var(--muted); }
   </style>
 </head>
 <body>
   <main>
-    <a class="back" href="/">Back to agent</a>
+    <a class="back" href="${serverEscapeHtml(backHref)}">${serverEscapeHtml(backLabel)}</a>
     <article>${markdownToHtml(markdown)}</article>
   </main>
   <script>
@@ -4952,7 +6903,7 @@ function renderHelpMedia(file, media) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${serverEscapeHtml(title)} - LLM Wiki Agent Help</title>
+  <title>${serverEscapeHtml(title)} - LLM Agent Learning Boost Help</title>
   <style>
     :root { --bg: #f6f7f9; --text: #18202b; --panel: #ffffff; --line: #dce1e8; --muted: #697386; --accent: #1f5eff; --shadow: rgba(20, 32, 50, 0.08); }
     body[data-theme="dark"] { --bg: #111827; --text: #e5e7eb; --panel: #1f2937; --line: #374151; --muted: #9ca3af; --accent: #60a5fa; --shadow: rgba(0, 0, 0, 0.28); }
@@ -4962,7 +6913,7 @@ function renderHelpMedia(file, media) {
     body[data-theme="megatron"] { --bg: #0b0d12; --text: #e8eef7; --panel: #161a23; --line: #3b4354; --muted: #9aa8bd; --accent: #39d5ff; --shadow: rgba(0, 0, 0, 0.36); }
     body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
     main { max-width: 1100px; margin: 0 auto; padding: 24px 20px 42px; }
-    nav { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+    nav { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: 0 8px 18px var(--shadow); backdrop-filter: blur(12px); }
     a { color: var(--accent); font-weight: 700; text-decoration: none; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px; box-shadow: 0 12px 30px var(--shadow); }
     h1 { margin: 0; font-size: 20px; word-break: break-word; }
@@ -4999,7 +6950,7 @@ function renderNotFound(message) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LLM Wiki Agent</title>
+  <title>LLM Agent Learning Boost</title>
   <style>
     :root { --bg: #f6f7f9; --text: #18202b; --panel: #ffffff; --line: #dce1e8; --muted: #697386; --accent: #1f5eff; --shadow: rgba(20, 32, 50, 0.08); }
     body[data-theme="dark"] { --bg: #111827; --text: #e5e7eb; --panel: #1f2937; --line: #374151; --muted: #9ca3af; --accent: #60a5fa; --shadow: rgba(0, 0, 0, 0.28); }
@@ -5046,7 +6997,7 @@ function readHelpMarkdown() {
     }
   }
   return [
-    "# LLM Wiki Agent Help",
+    "# LLM Agent Learning Boost Help",
     "",
     "The app help file could not be found in this installation.",
     "",
@@ -5145,16 +7096,29 @@ function helpHeadingSlug(text) {
 
 function inline(text) {
   return serverEscapeHtml(text)
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_match, alt, href) => `<span class="muted">${alt}</span>`)
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_match, alt, href) => renderHelpImage(alt, href))
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, href) => renderHelpLink(label, href))
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/`([^`]+)`/g, "<code>$1</code>");
 }
 
+function renderHelpImage(alt, href) {
+  const mediaFile = helpMediaFileFromHref(decodeHtmlEntities(href));
+  if (!mediaFile) return `<span class="muted">${alt}</span>`;
+  const src = `/media/${mediaFile.split("/").map(encodeURIComponent).join("/")}`;
+  const viewer = `/help-media?file=${encodeURIComponent(mediaFile)}`;
+  return `<figure><a href="${viewer}" target="_blank" rel="noopener"><img src="${src}" alt="${alt}"></a><figcaption>${alt}</figcaption></figure>`;
+}
+
 function renderHelpLink(label, href) {
   const mediaHref = decodeHtmlEntities(href);
-  if (isHelpMediaLink(mediaHref)) {
-    return `<a href="/help-media?file=${encodeURIComponent(mediaHref.replace(/^media\//, ""))}" target="_blank" rel="noopener">${label}</a>`;
+  const mediaFile = helpMediaFileFromHref(mediaHref);
+  if (mediaFile) {
+    return `<a href="/help-media?file=${encodeURIComponent(mediaFile)}" target="_blank" rel="noopener">${label}</a>`;
+  }
+  const docLink = helpDocLinkFromHref(mediaHref);
+  if (docLink) {
+    return `<a href="${helpDocHref(docLink.file, docLink.hash)}">${label}</a>`;
   }
   if (mediaHref.startsWith("#")) {
     return `<a href="${href}">${label}</a>`;
@@ -5165,9 +7129,34 @@ function renderHelpLink(label, href) {
   return `<a href="${href}" target="_blank" rel="noopener">${label}</a>`;
 }
 
-function isHelpMediaLink(href) {
-  const normalized = String(href || "").toLowerCase();
-  return normalized.startsWith("media/") && /\.(png|jpe?g|gif|webp|svg|mp3|wav|m4a|aiff|mp4|mov|m4v|pdf)$/.test(normalized);
+function helpMediaFileFromHref(href) {
+  const normalized = String(href || "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/^(\.\.\/)+/, "");
+  const lower = normalized.toLowerCase();
+  if (!lower.startsWith("media/")) return "";
+  if (!/\.(png|jpe?g|gif|webp|svg|mp3|wav|m4a|aiff|mp4|mov|m4v|pdf)$/.test(lower)) return "";
+  return normalized.slice("media/".length);
+}
+
+function helpDocLinkFromHref(href) {
+  const raw = String(href || "");
+  if (!raw || raw.startsWith("#") || raw.startsWith("/") || /^[a-z][a-z0-9+.-]*:/i.test(raw)) return null;
+  const [filePart, hashPart = ""] = raw.split("#");
+  const normalized = filePart.replace(/\\/g, "/").replace(/^\.\/+/, "");
+  if (!normalized.endsWith(".md") || normalized.includes("\0") || normalized.split("/").includes("..")) return null;
+  const file = normalized.startsWith("docs/") ? normalized : `docs/${normalized}`;
+  return { file, hash: hashPart ? `#${encodeURIComponent(hashPart)}` : "" };
+}
+
+function helpDocHref(file, hash = "") {
+  const encoded = String(file || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .map(encodeURIComponent)
+    .join("/");
+  return `/help-doc/${encoded}${hash}`;
 }
 
 function decodeHtmlEntities(value) {
