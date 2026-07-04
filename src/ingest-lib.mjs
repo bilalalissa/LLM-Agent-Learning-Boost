@@ -50,15 +50,17 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
   const processedRel = uniqueRel(vaultPath, `raw/processed/${date}--${slug}${processedExt}`);
   const sourceRel = `wiki/sources/${date}--${slug}.md`;
 
-  const analysis = await analyzeSource(provider, {
+  const analysisInput = {
     contract,
     index,
     sourceTitle,
     sourcePath: path.relative(vaultPath, sourcePath),
     sourceText,
     processedSource,
-    vault: vaultName(vaultPath)
-  });
+    vault: vaultName(vaultPath),
+    allowBaselineFallback: config.allowBaselineAnalysis === true || config.ingestAllowBaselineFallback === true
+  };
+  const analysis = await analyzeSource(provider, analysisInput);
 
   ensureDir(path.join(vaultPath, "wiki/sources"));
   ensureDir(path.join(vaultPath, "wiki/concepts"));
@@ -477,11 +479,61 @@ ${(input.processedSource?.processingNotes || []).join("\n")}
 Source text:
 ${input.sourceText}`;
 
-  const text = await provider.complete([
-    { role: "system", content: "Return only valid JSON. Preserve source traceability. Do not invent facts. Write generated content in the source's primary language unless the source is meaningfully multilingual. Open questions must include current answers or state why they remain unresolved." },
-    { role: "user", content: prompt }
-  ]);
-  return parseJson(text, input);
+  try {
+    const text = await provider.complete([
+      { role: "system", content: "Return only valid JSON. Preserve source traceability. Do not invent facts. Write generated content in the source's primary language unless the source is meaningfully multilingual. Open questions must include current answers or state why they remain unresolved." },
+      { role: "user", content: prompt }
+    ]);
+    return parseJson(text, input);
+  } catch (error) {
+    if (!input.allowBaselineFallback) {
+      throw error;
+    }
+    return fallbackSourceAnalysis(error, input);
+  }
+}
+
+function fallbackSourceAnalysis(error, input = {}) {
+  const sourceText = String(input.sourceText || "").trim();
+  const excerpt = sourceText.replace(/\s+/g, " ").slice(0, 360);
+  const parsed = {
+    summary: excerpt
+      ? `Manual baseline source page created from local extracted text because AI analysis was explicitly skipped or unavailable. Excerpt: ${excerpt}${sourceText.length > 360 ? "..." : ""}`
+      : "Manual baseline source page created because AI analysis was explicitly skipped or unavailable. The raw source was preserved for later review.",
+    language: "unknown",
+    key_points: [
+      `Source title: ${input.sourceTitle || "Untitled source"}.`,
+      `Original source path: ${input.sourcePath || "unknown"}.`,
+      "AI-generated analysis was deferred by explicit baseline processing."
+    ],
+    concepts: [{
+      name: input.sourceTitle || "Unreviewed source",
+      summary: "A locally processed source awaiting richer AI or human review."
+    }],
+    entities: [],
+    open_questions: [{
+      question: "What should be extracted from this source?",
+      answer: "This remains open until the AI provider is available or the user reviews the processed source page."
+    }],
+    contradictions: [],
+    source_learning_questions: [{
+      question: "What is the first useful review step for this source?",
+      answer: "Open the processed source page, read the summary/excerpt, and rerun or revise analysis when the provider is responsive."
+    }],
+    open_learning_questions: [{
+      question: "How should this source connect to broader learning goals?",
+      answer: "Connect it after its key concepts, claims, and evidence are reviewed."
+    }],
+    processing_notes: [`AI analysis fallback used: ${error?.message || error || "provider unavailable"}`]
+  };
+  parsed.learning_boost = fallbackLearningBoost(parsed, analysisContext(input, {
+    sourceTitle: input.sourceTitle,
+    processedRel: input.sourcePath,
+    sourceText,
+    evidence: input.processedSource?.evidence || [input.sourcePath].filter(Boolean),
+    mediaRefs: input.processedSource?.mediaRefs || []
+  }));
+  return parsed;
 }
 
 function parseJson(text, input = {}) {
@@ -582,6 +634,7 @@ ${renderLearningBoostSection(analysis.learning_boost)}
 - Evidence hints: ${(processedSource.evidence || [processedRel]).join(", ")}
 ${processedSource.mediaRefs?.length ? `- Media refs: ${processedSource.mediaRefs.join(", ")}` : "- Media refs: none"}
 ${processedSource.processingNotes?.length ? `- Processor notes: ${processedSource.processingNotes.join("; ")}` : "- Processor notes: none"}
+${analysis.processing_notes?.length ? `- Analysis notes: ${analysis.processing_notes.join("; ")}` : "- Analysis notes: none"}
 
 ## Source's Related Learning Questions
 

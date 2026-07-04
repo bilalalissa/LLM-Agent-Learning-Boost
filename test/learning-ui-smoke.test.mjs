@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -24,7 +25,15 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
     "Provider health",
     "Profile/onboarding",
     "Internet research controls",
-    "System/device alerts"
+    "System/device alerts",
+    "Learning Flow",
+    "Learning Autopilot",
+    "Cards And Bits",
+    "Plan And Goal Guide",
+    "Notification Center",
+    "Source-To-Plan Map",
+    "Groups And Notifications",
+    "Event Feed"
   ]) {
     assert.match(serverSource, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
@@ -36,11 +45,66 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /Schedule this\?/);
   assert.match(serverSource, /Export to RemNote/);
   assert.match(serverSource, /learning-workspace/);
+  assert.match(serverSource, /learning-stepper/);
+  assert.match(serverSource, /learning-card-deck/);
+  assert.match(serverSource, /learning-bit-explorer/);
+  assert.match(serverSource, /learning-notification-center/);
+  assert.match(serverSource, /prefers-reduced-motion/);
+  assert.match(serverSource, /api\/learning\/automation-status/);
+  assert.match(serverSource, /api\/learning\/automation-settings/);
+  assert.match(serverSource, /api\/learning\/process-pending/);
+  assert.match(serverSource, /api\/learning\/notifications/);
+  assert.match(serverSource, /api\/native\/notification-test/);
+  assert.match(serverSource, /learningNotification/);
+  assert.match(serverSource, /learning-native-notification-status/);
+  assert.match(serverSource, /notificationDeliveryLabel/);
+  assert.match(serverSource, /macOS delivered/);
+  assert.match(serverSource, /macOS notifications blocked/);
+  assert.match(serverSource, /pollNow/);
   assert.match(serverSource, /Plan Actions/);
   assert.match(serverSource, /Learner Profile/);
   assert.match(serverSource, /Source Capture/);
   assert.match(serverSource, /Add Resource/);
+  assert.match(serverSource, /Auto insights after capture/);
+  assert.match(serverSource, /Process captured sources now/);
+  assert.match(serverSource, /Enable learning notifications/);
+  assert.match(serverSource, /learning-notification-control/);
+  assert.match(serverSource, /Behavior And Notifications/);
+  assert.match(serverSource, /Learning event capture/);
+  assert.match(serverSource, /Coaching alerts/);
+  assert.match(serverSource, /Expanded monitoring/);
+  assert.match(serverSource, /Detailed notifications/);
+  assert.match(serverSource, /Clipboard/);
+  assert.match(serverSource, /Visited web pages/);
+  assert.match(serverSource, /Frontmost app metadata/);
+  assert.match(serverSource, /Auto-process raw\/inbox and raw\/input/);
+  assert.match(serverSource, /data-config-key="AUTO_INGEST_ON_START"/);
+  assert.match(serverSource, /data-config-key="WATCH_INTERVAL_MS"/);
+  assert.match(serverSource, /data-config-key="AI_PROVIDER_TIMEOUT_MS"/);
+  assert.match(serverSource, /Provider timeout ms/);
+  assert.match(serverSource, /main \{ max-width: none; margin: 0;/);
+  assert.match(serverSource, /setSideTopicHidden\(savedSideTopicHidden !== "0"\)/);
+  assert.doesNotMatch(serverSource, /main \{ max-width: none; margin: 0 392px/);
+  assert.doesNotMatch(serverSource, /providerForAutoIngest/);
+  assert.doesNotMatch(serverSource, /openAiCompatForAutoIngest/);
+  assert.doesNotMatch(serverSource, /Using Local AI Router .* for background ingest/);
+  assert.match(serverSource, /runLearningAutomationForVault\(vault, \{ config, provider \}\)/);
+  assert.match(serverSource, /Auto-ingest blocked/);
+  assert.match(serverSource, /\.provider-grid \.inline-toggle/);
+  assert.match(serverSource, /Revise Plans And Goals/);
+  assert.match(serverSource, /Save plan revision/);
+  assert.match(serverSource, /Save goal revision/);
+  assert.match(serverSource, /api\/learning\/plan-revise/);
+  assert.match(serverSource, /api\/learning\/goal-revise/);
   assert.match(serverSource, /learning-toggle-grid/);
+  assert.match(serverSource, /learning-flowchart/);
+  assert.match(serverSource, /learning-map-grid/);
+  assert.match(serverSource, /source_linked_to_learning/);
+  assert.match(serverSource, /Learning Boost source processed/);
+  assert.match(serverSource, /recentEvents/);
+  assert.match(serverSource, /sourceLinks/);
+  assert.match(serverSource, /sourceGroups/);
+  assert.match(serverSource, /Processed links/);
   assert.doesNotMatch(serverSource, /onclick="/);
   assert.match(serverSource, /Local AI unavailable/);
   assert.match(serverSource, /Save provider settings/);
@@ -58,6 +122,8 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /LOCAL_AI_ROUTER_AUTOSTART/);
   assert.match(serverSource, /LOCAL_AI_ROUTER_AUTO_START_PROVIDER/);
   assert.match(serverSource, /api\/local-ai-router-status/);
+  assert.match(serverSource, /provider-details-table/);
+  assert.match(serverSource, /table-layout: fixed/);
 });
 
 test("Chat tab exposes controlled remote research controls", () => {
@@ -74,6 +140,16 @@ test("Chat tab exposes controlled remote research controls", () => {
   assert.match(serverSource, /api\/learning\/remote-source-save/);
 });
 
+test("Learning saves preserve unrelated dirty fields and expose source insight processing", () => {
+  assert.match(serverSource, /snapshotDirtyLearningFields/);
+  assert.match(serverSource, /restoreDirtyLearningFields/);
+  assert.match(serverSource, /markLearningFieldDirty/);
+  assert.match(serverSource, /patchLearningCacheVault/);
+  assert.match(serverSource, /api\/learning\/process-resources/);
+  assert.match(serverSource, /autoProcessCapturedResources/);
+  assert.match(serverSource, /processingStatus: "ready_for_ingest"/);
+});
+
 test("Stage 8 confirmation gates are present in the app UI", () => {
   for (const message of [
     "Change profile demographics or learning-level settings",
@@ -83,6 +159,10 @@ test("Stage 8 confirmation gates are present in the app UI", () => {
     "Enable screenshot watch",
     "Enable meeting import",
     "Enable voice memo import",
+    "Enable clipboard capture",
+    "Enable visited web page capture",
+    "Enable frontmost app metadata capture",
+    "Enable expanded monitoring",
     "Allow non-sensitive captured sources to use cloud processing",
     "Allow chat to access the internet automatically",
     "Export approved plan stages to an iCalendar file",
@@ -125,7 +205,7 @@ test("rendered app client script parses", async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "llm-learning-ui-"));
   const vaultsRoot = path.join(tmp, "vaults");
   fs.mkdirSync(vaultsRoot, { recursive: true });
-  const port = 18000 + Math.floor(Math.random() * 20000);
+  const port = await freePort();
   const child = spawn(process.execPath, ["src/server.mjs"], {
     cwd: path.resolve("."),
     env: {
@@ -133,11 +213,12 @@ test("rendered app client script parses", async (t) => {
       CHAT_PORT: String(port),
       MAC_BRIDGE_HOST: "127.0.0.1",
       DEFAULT_AI_PROVIDER: "local_auto",
+      AUTO_INGEST_ON_START: "false",
       LOCAL_AI_ROUTER_AUTOSTART: "false",
       VAULTS_ROOT: vaultsRoot,
       LLM_WIKI_ENV_FILE: path.join(tmp, "config.env")
     },
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "inherit", "inherit"]
   });
   t.after(() => {
     child.kill();
@@ -212,27 +293,57 @@ test("rendered app client script parses", async (t) => {
   assert.match(await rawMediaResponse.text(), /Annotated Provider tab/);
 });
 
+function freePort() {
+  return stablePortFromRange(18790, 18840);
+}
+
+async function stablePortFromRange(start, end) {
+  for (let port = start; port <= end; port += 1) {
+    if (await canBindPort(port)) return port;
+  }
+  throw new Error(`no free test port in range ${start}-${end}`);
+}
+
+function canBindPort(port) {
+  return new Promise((resolve) => {
+    const socket = net.createServer();
+    socket.once("error", () => resolve(false));
+    socket.listen(port, "127.0.0.1", () => {
+      socket.close(() => resolve(true));
+    });
+  });
+}
+
 function waitForServer(child, port) {
   return new Promise((resolve, reject) => {
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      reject(new Error(`server did not start on ${port}: ${stderr || stdout}`));
-    }, 8000);
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-      if (stdout.includes(`http://127.0.0.1:${port}`)) {
-        clearTimeout(timer);
-        resolve();
+    let settled = false;
+    async function checkPort() {
+      if (settled) return;
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/`);
+        if (response.ok) {
+          settled = true;
+          clearTimeout(timer);
+          clearInterval(poll);
+          resolve();
+        }
+      } catch {
+        // Keep polling until the startup timeout expires.
       }
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
+    }
+    const timer = setTimeout(() => {
+      settled = true;
+      clearInterval(poll);
+      reject(new Error(`server did not start on ${port}`));
+    }, 20000);
+    const poll = setInterval(checkPort, 150);
+
     child.on("exit", (code) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      reject(new Error(`server exited before ready (${code}): ${stderr || stdout}`));
+      clearInterval(poll);
+      reject(new Error(`server exited before ready (${code})`));
     });
   });
 }

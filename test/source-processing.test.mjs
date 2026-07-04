@@ -101,6 +101,7 @@ test("learning_boost normalization preserves cards, evidence, media, and staging
   assert.equal(boost.source_language, "English");
   assert.equal(boost.learning_bits[0].sourcePage, "wiki/sources/source.md");
   assert.deepEqual(boost.learning_bits[0].mediaRefs, ["figure.png"]);
+  assert.equal(boost.learning_bits.length >= 3, true);
   assert.equal(boost.cards.length, 4);
   assert.equal(boost.staging.needed, true);
   assert.match(renderLearningBoostSection(boost), /## Learning Boost/);
@@ -117,18 +118,65 @@ test("ingestFile renders Learning Boost sections and writes learning JSONL outpu
   const cards = fs.readFileSync(path.join(paths.dir, "cards.jsonl"), "utf8");
   const bits = fs.readFileSync(path.join(paths.dir, "bits.jsonl"), "utf8");
   const plans = fs.readFileSync(path.join(paths.dir, "plans.jsonl"), "utf8");
+  const sourceLinks = fs.readFileSync(path.join(paths.dir, "source-links.jsonl"), "utf8");
   const behavior = fs.readFileSync(path.join(paths.dir, "behavior-log.jsonl"), "utf8");
   const remnote = fs.readFileSync(path.join(paths.exportsDir, "remnote-import.md"), "utf8");
+  const sourceMap = fs.readFileSync(path.join(vault, "wiki", "learning", "source-map.md"), "utf8");
 
   assert.match(page, /## Learning Boost/);
   assert.match(page, /### Working-Memory Friendly Gist/);
   assert.match(page, /### Evidence Map/);
   assert.match(cards, /What is retrieval practice/);
   assert.match(bits, /Retrieval practice/);
-  assert.match(plans, /first pass/);
+  assert.equal(plans.trim(), "");
+  assert.match(sourceLinks, /Retrieval Practice/);
   assert.match(behavior, /source_processed/);
+  assert.match(behavior, /source_linked_to_learning/);
   assert.match(remnote, /# RemNote Import/);
+  assert.match(sourceMap, /Retrieval Practice/);
   assert.doesNotMatch(remnote, /RemNote Import Draft/);
-  assert.equal(result.learning.cardsCreated, 2);
+  assert.equal(result.learning.cardsCreated >= 4, true);
+  assert.equal(result.learning.bitsCreated >= 3, true);
+  assert.equal(result.learning.sourceLink.cardsCreated >= 4, true);
   assert.equal(fs.existsSync(path.join(vault, result.processed)), true);
+});
+
+test("ingestFile leaves text sources pending when provider is unavailable", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "inbox", "provider-down.md");
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.writeFileSync(source, "# Provider Down\n\nThis source should stay pending until analysis can run.");
+
+  await assert.rejects(
+    ingestFile(vault, source, config(root), {
+      async complete() {
+        throw new Error("provider unavailable");
+      }
+    }),
+    /provider unavailable/
+  );
+
+  assert.equal(fs.existsSync(source), true);
+  assert.equal(fs.existsSync(path.join(vault, "raw", "processed", "provider-down.md")), false);
+  assert.equal(fs.existsSync(path.join(vault, "wiki", "sources")), false);
+});
+
+test("ingestFile can create explicit manual baseline analysis when enabled", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "inbox", "provider-down.md");
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.writeFileSync(source, "# Provider Down\n\nThis source can be manually baselined.");
+
+  const result = await ingestFile(vault, source, { ...config(root), allowBaselineAnalysis: true }, {
+    async complete() {
+      throw new Error("provider unavailable");
+    }
+  });
+  const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(fs.existsSync(path.join(vault, result.processed)), true);
+  assert.match(page, /Manual baseline source page created/);
+  assert.match(page, /AI analysis fallback used: provider unavailable/);
+  assert.match(page, /## Learning Boost/);
 });

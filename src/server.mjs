@@ -13,23 +13,30 @@ import { answerQuestion } from "./chat-lib.mjs";
 import { saveChatAsRawSource } from "./chat-source.mjs";
 import { preflightBrowserClip, saveBrowserClip } from "./clip.mjs";
 import { ingestVault } from "./ingest-lib.mjs";
-import { coachingSummary, writeBehaviorPages } from "./learning-coach.mjs";
+import {
+  learningAutomationStatus,
+  readLearningNotifications,
+  recordLearningNotification,
+  runLearningAutomationForVault,
+  updateAutomationSettings,
+  updateLearningNotificationAction
+} from "./learning-automation.mjs";
 import {
   activateLearningPlan,
   approveLearningPlan,
   draftLearningPlans,
-  learningPlanningState
+  reviseLearningGoal,
+  reviseLearningPlan
 } from "./learning-planner.mjs";
-import { readLearningState, updateVaultProfiles } from "./learning-store.mjs";
-import { answerLocally } from "./local-answer.mjs";
+import { updateVaultProfiles } from "./learning-store.mjs";
+import { answerLocallyAsync } from "./local-answer.mjs";
 import { createLocalAiRouterSupervisor } from "./local-ai-router-supervisor.mjs";
-import { addHighlight, addNote, deleteNote, listHighlights, listNotes, saveNoteMedia, updateNote } from "./notes.mjs";
+import { addHighlight, addNote, deleteNote, listNotes, saveNoteMedia, updateNote } from "./notes.mjs";
 import { createProvider } from "./provider.mjs";
 import { providerStatus } from "./provider-status.mjs";
-import { readPlanUpdateSuggestions, recordPlanUpdateChoice, suggestPlanUpdates } from "./plan-update-suggester.mjs";
+import { recordPlanUpdateChoice, suggestPlanUpdates } from "./plan-update-suggester.mjs";
 import { preflightStatus } from "./preflight.mjs";
 import {
-  readRemoteResearchSettings,
   remoteResearch,
   saveRemoteSourcesToResourceInbox,
   updateRemoteResearchSettings
@@ -44,12 +51,13 @@ import {
   captureResource,
   deleteResource,
   exportResources,
-  groupedResourceInbox,
+  markResourceIngestResults,
   purgeExpiredResources,
   readSourceCaptureSettings,
+  stageResourcesForIngest,
   updateSourceCaptureSettings
 } from "./source-capture.mjs";
-import { topicContent } from "./topic-content.mjs";
+import { topicContentAsync } from "./topic-content.mjs";
 import { listRawCandidates, listVaults, vaultName } from "./vaults.mjs";
 import { bootstrapVault } from "./vault-bootstrap.mjs";
 
@@ -61,6 +69,10 @@ const localAiRouterSupervisor = createLocalAiRouterSupervisor({
   reloadRuntimeConfig
 });
 let ingestRunning = false;
+let autoIngestTimer = null;
+let autoIngestIntervalMs = 0;
+let autoIngestStartTimer = null;
+let autoIngestBackoffUntil = 0;
 let lastIngestMessage = compactStatusMessage("Auto-ingest has not run yet.");
 let ingestProgress = {
   percent: 0,
@@ -78,9 +90,12 @@ const tabDataCache = {
   files: cacheState(),
   archives: cacheState(),
   topics: cacheState(),
-  notes: cacheState()
+  notes: cacheState(),
+  highlights: cacheState(),
+  learning: cacheState()
 };
 const tabDataWorkers = new Map();
+const learningAutomationRuntime = new Map();
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
@@ -98,8 +113,9 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname === "/help") {
+    const markdown = await readHelpMarkdownAsync();
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    response.end(renderHelp());
+    response.end(renderHelp(markdown));
     return;
   }
 
@@ -108,7 +124,7 @@ const server = http.createServer(async (request, response) => {
       const file = url.pathname.startsWith("/help-doc/")
         ? decodeURIComponent(url.pathname.slice("/help-doc/".length))
         : (url.searchParams.get("file") || "");
-      const doc = resolveHelpDoc(file);
+      const doc = await resolveHelpDocAsync(file);
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(renderHelp(doc.markdown, { title: `${doc.title} - LLM Agent Learning Boost Help`, backLabel: "Back to Help", backHref: "/help" }));
     } catch {
@@ -250,7 +266,7 @@ const server = http.createServer(async (request, response) => {
 
   if (request.method === "GET" && url.pathname === "/api/topic-content") {
     try {
-      const answer = topicContent(config, {
+      const answer = await topicContentAsync(config, {
         vault: url.searchParams.get("vault"),
         path: url.searchParams.get("path"),
         title: url.searchParams.get("title")
@@ -292,9 +308,137 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname === "/api/learning") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(cachedLearningPayload()));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/learning/automation-status") {
     try {
+      const vaultParam = url.searchParams.get("vault") || "";
+      const vaultPaths = vaultParam ? [resolveLearningVaultPath(vaultParam)] : listVaults(config.vaultsRoot);
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify(enrichedLearningState()));
+      response.end(JSON.stringify({
+        vaults: vaultPaths.map((vaultPath) => learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath))),
+        ingestRunning,
+        ingestProgress,
+        lastIngestMessage
+      }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/automation-settings") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const settings = updateAutomationSettings(vaultPath, payload.settings || {});
+      setAutomationRuntime(vaultPath, {
+        status: settings.learningAutopilot ? "watching" : "paused",
+        detail: settings.learningAutopilot ? "Learning Autopilot is watching for safe work." : "Learning Autopilot is paused for this vault."
+      });
+      refreshTabData("learning");
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), settings, automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)) }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/process-pending") {
+    if (ingestRunning) {
+      response.writeHead(409, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: "Learning automation is already processing pending work." }));
+      return;
+    }
+    ingestRunning = true;
+    let vaultPath = null;
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      vaultPath = resolveLearningVaultPath(payload.vault);
+      setAutomationRuntime(vaultPath, { running: true, status: "processing", detail: "Processing pending learning sources..." });
+      const result = await runLearningAutomationForVault(vaultPath, { config, provider, force: payload.force === true, resourceLimit: payload.limit || 12 });
+      updateRuntimeFromAutomationResult(vaultPath, result);
+      ingestProgress = progressState({
+        completed: result.processed || 0,
+        total: Math.max(result.processed || 0, result.pendingRawCount || 0),
+        vault: vaultName(vaultPath),
+        detail: result.detail || "Learning automation finished."
+      });
+      lastIngestMessage = reportStatus(result.detail || "Learning automation finished.");
+      refreshChangedTabsAfterIngest();
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result, automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)) }));
+    } catch (error) {
+      if (vaultPath) setAutomationRuntime(vaultPath, { running: false, status: "blocked", detail: summarizeStatusError(error), lastBlockedAt: new Date().toISOString() });
+      lastIngestMessage = reportStatus(`Learning automation failed: ${summarizeStatusError(error)}`);
+      console.error(`[learning-automation] ${error.stack || error.message}`);
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    } finally {
+      ingestRunning = false;
+    }
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/learning/notifications") {
+    try {
+      const vaultParam = url.searchParams.get("vault") || "";
+      const pendingNativeOnly = url.searchParams.get("pendingNative") === "1";
+      const vaultPaths = vaultParam ? [resolveLearningVaultPath(vaultParam)] : listVaults(config.vaultsRoot);
+      const notifications = vaultPaths.flatMap((vaultPath) => readLearningNotifications(vaultPath, {
+        limit: Number(url.searchParams.get("limit") || 50),
+        pendingNativeOnly
+      }).map((item) => ({ ...item, vault: vaultName(vaultPath) })));
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ notifications }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/notification-action") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = updateLearningNotificationAction(vaultPath, payload.id, payload.action || "read", {
+        nativeError: payload.nativeError || payload.error || ""
+      });
+      refreshTabData("learning");
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/native/notification-test") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const notification = recordLearningNotification(vaultPath, {
+        type: "notification_test",
+        severity: "info",
+        title: "Learning Boost notifications are on",
+        body: "Native macOS delivery is ready for learning alerts.",
+        detail: "This is a privacy-safe test notification.",
+        actions: ["Open Learning", "Review alerts"]
+      });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), notification }));
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: error.message }));
@@ -392,6 +536,70 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "POST" && url.pathname === "/api/learning/process-resources") {
+    if (ingestRunning) {
+      response.writeHead(409, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: "Ingest is already running. Wait for it to finish before processing captured sources." }));
+      return;
+    }
+    ingestRunning = true;
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const staged = stageResourcesForIngest(vaultPath, { limit: payload.limit || 12 });
+      if (!staged.staged.length) {
+        ingestProgress = progressState({
+          completed: 0,
+          total: 0,
+          vault: vaultName(vaultPath),
+          detail: "No captured resources are ready for insight processing."
+        });
+        lastIngestMessage = reportStatus("No captured resources are ready for insight processing.");
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ vault: vaultName(vaultPath), staged: [], processed: 0, updated: 0, results: [] }));
+        return;
+      }
+      ingestProgress = progressState({
+        completed: 0,
+        total: staged.staged.length,
+        vault: vaultName(vaultPath),
+        detail: `Staged ${staged.staged.length} captured resource(s) for insight processing.`
+      });
+      lastIngestMessage = reportStatus(`Processing ${staged.staged.length} captured resource(s) into insights...`);
+      const results = await ingestVault(vaultPath, config, provider);
+      const marked = markResourceIngestResults(vaultPath, results);
+      invalidateTabData();
+      ingestProgress = progressState({
+        completed: results.length,
+        total: Math.max(results.length, staged.staged.length),
+        vault: vaultName(vaultPath),
+        detail: `Processed ${results.length} raw source(s); updated ${marked.updated} captured resource(s).`
+      });
+      lastIngestMessage = reportStatus(`Processed ${results.length} raw source(s); updated ${marked.updated} captured resource(s).`);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        vault: vaultName(vaultPath),
+        staged: staged.staged,
+        processed: results.length,
+        updated: marked.updated,
+        results
+      }));
+    } catch (error) {
+      ingestProgress = {
+        ...ingestProgress,
+        detail: summarizeStatusError(error)
+      };
+      lastIngestMessage = reportStatus(`Captured-source processing failed: ${summarizeStatusError(error)}`);
+      console.error(`[resource-ingest] ${error.stack || error.message}`);
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    } finally {
+      ingestRunning = false;
+    }
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/api/learning/resource-export") {
     try {
       const body = await readBody(request);
@@ -473,6 +681,36 @@ const server = http.createServer(async (request, response) => {
       const payload = JSON.parse(body || "{}");
       const vaultPath = resolveLearningVaultPath(payload.vault);
       const result = activateLearningPlan(vaultPath, payload.planId, { confirmed: payload.confirmed === true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/plan-revise") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = reviseLearningPlan(vaultPath, payload.planId, payload.patch || {});
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/goal-revise") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = reviseLearningGoal(vaultPath, payload.goalId, payload.patch || {});
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
     } catch (error) {
@@ -707,12 +945,10 @@ const server = http.createServer(async (request, response) => {
       const body = await readBody(request);
       updateProviderConfig(config.configFile, JSON.parse(body || "{}"));
       reloadRuntimeConfig();
-      const status = await providerStatus(config);
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
         status: "Provider settings saved.",
-        config: readProviderConfigForUi(config.configFile),
-        providerStatus: status
+        config: readProviderConfigForUi(config.configFile)
       }));
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
@@ -783,7 +1019,6 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname === "/api/notes") {
-    refreshNotesCache();
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(cachedTabPayload("notes")));
     return;
@@ -792,7 +1027,7 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && url.pathname === "/api/highlights") {
     try {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ highlights: listHighlights(config) }));
+      response.end(JSON.stringify(cachedTabPayload("highlights")));
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: error.message }));
@@ -931,7 +1166,7 @@ const server = http.createServer(async (request, response) => {
     try {
       const body = await readBody(request);
       const { question } = JSON.parse(body || "{}");
-      const answer = answerLocally(String(question || ""), config);
+      const answer = await answerLocallyAsync(String(question || ""), config);
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ answer }));
     } catch (error) {
@@ -948,12 +1183,11 @@ const server = http.createServer(async (request, response) => {
 server.listen(config.chatPort, config.bridgeHost, () => {
   console.log(`LLM Agent Learning Boost UI: http://${config.bridgeHost}:${config.chatPort}`);
   void localAiRouterSupervisor.start();
-  setTimeout(() => {
-    void startAutoIngest();
-  }, 1500);
+  ensureAutoIngestScheduler();
 });
 
 async function startAutoIngest() {
+  if (autoIngestTimer) return;
   for (const vault of listVaults(config.vaultsRoot)) {
     bootstrapVault(vault, config);
     await yieldToServer();
@@ -964,9 +1198,37 @@ async function startAutoIngest() {
       console.log(`[backfill] added learning sections to ${backfilled.length} wiki page${backfilled.length === 1 ? "" : "s"}`);
     }
   }
-  refreshTabData("all");
+  refreshChangedTabsAfterIngest();
   void runAutoIngest();
-  setInterval(runAutoIngest, config.watchIntervalMs);
+  autoIngestIntervalMs = config.watchIntervalMs;
+  autoIngestTimer = setInterval(runAutoIngest, autoIngestIntervalMs);
+}
+
+function ensureAutoIngestScheduler() {
+  if (!config.autoIngestOnStart) {
+    stopAutoIngestScheduler();
+    lastIngestMessage = reportStatus("Automatic raw file processing is off. Enable it to process raw/inbox and raw/input automatically.");
+    return;
+  }
+  if (autoIngestTimer && autoIngestIntervalMs === config.watchIntervalMs) return;
+  stopAutoIngestScheduler();
+  lastIngestMessage = reportStatus("Automatic raw file processing is on. Watching raw/inbox and raw/input for every vault.");
+  autoIngestStartTimer = setTimeout(() => {
+    autoIngestStartTimer = null;
+    void startAutoIngest();
+  }, 1500);
+}
+
+function stopAutoIngestScheduler() {
+  if (autoIngestStartTimer) {
+    clearTimeout(autoIngestStartTimer);
+    autoIngestStartTimer = null;
+  }
+  if (autoIngestTimer) {
+    clearInterval(autoIngestTimer);
+    autoIngestTimer = null;
+  }
+  autoIngestIntervalMs = 0;
 }
 
 function reloadRuntimeConfig() {
@@ -981,6 +1243,7 @@ function reloadRuntimeConfig() {
     detail: "Config reloaded."
   };
   lastIngestMessage = reportStatus(`Config reloaded from ${config.configFile} at ${formatLocal(new Date())}.`);
+  ensureAutoIngestScheduler();
 }
 
 function cacheState() {
@@ -995,14 +1258,53 @@ function cacheState() {
 
 function cachedTabPayload(kind) {
   const state = tabDataCache[kind] || cacheState();
-  if (!state.ready && !state.loading) refreshTabData(kind);
+  const stale = isTabCacheStale(state);
+  if ((!state.ready || stale) && !state.loading) refreshTabData(kind);
   const key = kind === "archives" ? "archives" : kind;
   return {
     [key]: state.items,
     loading: !state.ready || state.loading,
+    stale,
     error: state.error,
     updatedAt: state.updatedAt
   };
+}
+
+function cachedLearningPayload() {
+  const state = tabDataCache.learning || cacheState();
+  const stale = isTabCacheStale(state);
+  if ((!state.ready || stale) && !state.loading) refreshTabData("learning");
+  const data = state.data ? enrichLearningRuntime(state.data) : { vaults: [], appProfileIndex: { schemaVersion: 1, profiles: [] } };
+  return {
+    ...data,
+    loading: !state.ready || state.loading,
+    stale,
+    error: state.error,
+    updatedAt: state.updatedAt
+  };
+}
+
+function enrichLearningRuntime(data) {
+  const vaultPaths = listVaults(config.vaultsRoot);
+  return {
+    ...data,
+    vaults: (data.vaults || []).map((item) => {
+      const vaultPath = vaultPaths.find((candidate) => vaultName(candidate) === item.vault);
+      if (!vaultPath) return item;
+      return {
+        ...item,
+        automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)),
+        notifications: readLearningNotifications(vaultPath, { limit: 30 })
+      };
+    })
+  };
+}
+
+function isTabCacheStale(state) {
+  if (!state?.updatedAt) return false;
+  const updated = Date.parse(state.updatedAt);
+  if (!Number.isFinite(updated)) return false;
+  return Date.now() - updated > 30000;
 }
 
 function addNoteToCache(note) {
@@ -1047,7 +1349,13 @@ function invalidateTabData() {
     state.loading = false;
     state.error = "";
   }
-  refreshTabData("all");
+  refreshChangedTabsAfterIngest();
+}
+
+function refreshChangedTabsAfterIngest() {
+  refreshTabData("files");
+  refreshTabData("topics");
+  refreshTabData("learning");
 }
 
 function refreshTabData(kind = "all") {
@@ -1057,10 +1365,12 @@ function refreshTabData(kind = "all") {
   }
   if (!tabDataCache[kind] || tabDataWorkers.has(kind)) return;
   const kinds = [kind];
+  const started = Date.now();
   for (const item of kinds) {
     tabDataCache[item].loading = true;
     tabDataCache[item].error = "";
   }
+  console.log(`[tab-data] ${kind} refresh started.`);
   const worker = fork(path.join(agentRoot, "src", "tab-data-worker.mjs"), [kind], {
     cwd: agentRoot,
     env: process.env,
@@ -1069,6 +1379,7 @@ function refreshTabData(kind = "all") {
   const timeout = setTimeout(() => {
     tabDataCache[kind].loading = false;
     tabDataCache[kind].error = "Tab data scan is taking too long. Try again after iCloud finishes syncing this vault.";
+    console.warn(`[tab-data] ${kind} refresh timed out after ${Date.now() - started}ms.`);
     worker.kill("SIGTERM");
   }, 25000);
   tabDataWorkers.set(kind, worker);
@@ -1079,6 +1390,17 @@ function refreshTabData(kind = "all") {
     }
     const result = message.result || {};
     for (const item of Object.keys(tabDataCache)) {
+      if (item === "learning" && result.learning && typeof result.learning === "object") {
+        tabDataCache.learning = {
+          ...tabDataCache.learning,
+          data: result.learning,
+          ready: true,
+          loading: false,
+          error: "",
+          updatedAt: new Date().toISOString()
+        };
+        continue;
+      }
       if (!Array.isArray(result[item])) continue;
       tabDataCache[item] = {
         items: result[item],
@@ -1092,6 +1414,12 @@ function refreshTabData(kind = "all") {
   worker.on("exit", (code) => {
     clearTimeout(timeout);
     tabDataWorkers.delete(kind);
+    const elapsed = Date.now() - started;
+    if (code) {
+      console.warn(`[tab-data] ${kind} refresh exited with code ${code} after ${elapsed}ms.`);
+    } else {
+      console.log(`[tab-data] ${kind} refresh finished in ${elapsed}ms.`);
+    }
     for (const item of kinds) {
       tabDataCache[item].loading = false;
       if (code && !tabDataCache[item].error) tabDataCache[item].error = `Tab data refresh exited with code ${code}.`;
@@ -1100,6 +1428,7 @@ function refreshTabData(kind = "all") {
   worker.on("error", (error) => {
     clearTimeout(timeout);
     tabDataWorkers.delete(kind);
+    console.warn(`[tab-data] ${kind} refresh failed after ${Date.now() - started}ms: ${error.message}`);
     for (const item of kinds) {
       tabDataCache[item].loading = false;
       tabDataCache[item].error = error.message;
@@ -1355,6 +1684,39 @@ function resolveHelpDoc(file) {
   throw new Error("Help document not found.");
 }
 
+async function resolveHelpDocAsync(file) {
+  const normalized = decodeURIComponent(String(file || ""))
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "");
+  if (!normalized || normalized.includes("\0") || normalized.split("/").includes("..")) {
+    throw new Error("Invalid help document path.");
+  }
+  const rel = normalized.startsWith("docs/") ? normalized.slice("docs/".length) : normalized;
+  if (!rel || !rel.endsWith(".md")) {
+    throw new Error("Invalid help document type.");
+  }
+  const roots = [
+    path.join(agentRoot, "docs"),
+    path.resolve("docs"),
+    path.resolve("../docs")
+  ];
+  for (const root of roots) {
+    const full = path.resolve(root, rel);
+    if (full !== root && !full.startsWith(root + path.sep)) continue;
+    try {
+      const markdown = await fs.promises.readFile(full, "utf8");
+      return {
+        file: full,
+        markdown,
+        title: titleFromMarkdown(markdown) || path.basename(full, ".md")
+      };
+    } catch {
+      // Try the next bundled docs root.
+    }
+  }
+  throw new Error("Help document not found.");
+}
+
 function titleFromMarkdown(markdown) {
   const match = String(markdown || "").match(/^#\s+(.+)$/m);
   return match ? decodeHtmlEntities(match[1]).replace(/`/g, "") : "";
@@ -1444,20 +1806,27 @@ function runOsascript(lines) {
 }
 
 async function runAutoIngest() {
+  if (Date.now() < autoIngestBackoffUntil) return;
   if (ingestRunning) return;
   ingestRunning = true;
   try {
     let count = 0;
+    await yieldToServer();
     const vaults = listVaults(config.vaultsRoot);
-    const candidateCounts = vaults.map((vault) => listRawCandidates(vault).length);
-    const total = candidateCounts.reduce((sum, item) => sum + item, 0);
+    const candidateCounts = [];
+    for (const vault of vaults) {
+      await yieldToServer();
+      candidateCounts.push(listRawCandidates(vault).length);
+    }
+    const rawTotal = candidateCounts.reduce((sum, item) => sum + item, 0);
+    const total = rawTotal || vaults.length;
     let completed = 0;
     ingestProgress = {
-      percent: total ? 0 : 100,
+      percent: 0,
       completed,
       total,
       vault: "",
-      detail: total ? "Auto-ingest started." : "No pending files."
+      detail: rawTotal ? "Learning Autopilot started." : "Learning Autopilot is checking vaults."
     };
     for (const [index, vault] of vaults.entries()) {
       await yieldToServer();
@@ -1471,9 +1840,12 @@ async function runAutoIngest() {
         vault: vaultName(vault),
         detail: `Scanning ${vaultName(vault)}.`
       });
-      const results = await ingestVault(vault, config, provider);
+      setAutomationRuntime(vault, { running: true, status: "processing", detail: `Processing ${vaultName(vault)}.` });
+      const automationResult = await runLearningAutomationForVault(vault, { config, provider });
+      updateRuntimeFromAutomationResult(vault, automationResult);
+      const results = automationResult.results || [];
       await yieldToServer();
-      completed += candidateCounts[index];
+      completed += rawTotal ? candidateCounts[index] : 1;
       count += results.length;
       for (const result of results) {
         console.log(`[auto-ingest] ${result.vault}: ${result.source} -> ${result.sourcePage}`);
@@ -1488,6 +1860,7 @@ async function runAutoIngest() {
     lastIngestMessage = count
       ? reportStatus(`Operation progress: 100%. Processed ${count} file${count === 1 ? "" : "s"} at ${formatLocal(new Date())}.`)
       : reportStatus(`Operation progress: 100%. No pending files at ${formatLocal(new Date())}.`);
+    autoIngestBackoffUntil = 0;
     ingestProgress = progressState({
       completed: total,
       total,
@@ -1495,21 +1868,48 @@ async function runAutoIngest() {
       detail: lastIngestMessage
     });
   } catch (error) {
-    lastIngestMessage = reportStatus(`Operation progress: ${ingestProgress.percent || 0}%. Auto-ingest error at ${formatLocal(new Date())}: ${summarizeStatusError(error)}`);
+    const summary = summarizeStatusError(error);
+    autoIngestBackoffUntil = Date.now() + Math.max(config.watchIntervalMs, 60000);
+    lastIngestMessage = reportStatus(`Operation progress: ${ingestProgress.percent || 0}%. Auto-ingest blocked at ${formatLocal(new Date())}: ${summary}`);
     ingestProgress = {
       ...ingestProgress,
-      detail: lastIngestMessage
+      detail: `Auto-ingest blocked: ${summary}. Pending raw files were left in place. Next retry after ${formatLocal(new Date(autoIngestBackoffUntil))}.`
     };
     console.error(`[auto-ingest] ${error.stack || error.message}`);
   } finally {
     ingestRunning = false;
-    refreshTabData("all");
+    refreshChangedTabsAfterIngest();
   }
 }
 
 function progressState({ completed, total, vault, detail }) {
   const percent = total ? Math.min(100, Math.max(0, Math.round((completed / total) * 100))) : 100;
   return { percent, completed, total, vault, detail };
+}
+
+function automationRuntimeFor(vaultPath) {
+  return learningAutomationRuntime.get(vaultName(vaultPath)) || {};
+}
+
+function setAutomationRuntime(vaultPath, patch = {}) {
+  const key = vaultName(vaultPath);
+  learningAutomationRuntime.set(key, {
+    ...(learningAutomationRuntime.get(key) || {}),
+    ...patch,
+    lastRunAt: patch.lastRunAt || new Date().toISOString()
+  });
+}
+
+function updateRuntimeFromAutomationResult(vaultPath, result = {}) {
+  const now = new Date().toISOString();
+  setAutomationRuntime(vaultPath, {
+    running: false,
+    status: result.status || "idle",
+    detail: result.detail || "Learning automation finished.",
+    lastRunAt: now,
+    lastSuccessAt: result.status === "processed" ? now : automationRuntimeFor(vaultPath).lastSuccessAt || "",
+    lastBlockedAt: result.status === "blocked" ? now : automationRuntimeFor(vaultPath).lastBlockedAt || ""
+  });
 }
 
 function reportStatus(detail) {
@@ -1550,33 +1950,6 @@ function readBody(request, maxBytes = 64 * 1024 * 1024) {
     request.on("end", () => resolve(body));
     request.on("error", reject);
   });
-}
-
-function enrichedLearningState() {
-  const state = readLearningState(config);
-  const vaultPaths = listVaults(config.vaultsRoot);
-  state.vaults = (state.vaults || []).map((item) => {
-    const vaultPath = vaultPaths.find((candidate) => vaultName(candidate) === item.vault);
-    if (!vaultPath) return item;
-    const behaviorCoach = coachingSummary(vaultPath, { learningProfile: item.learningProfile });
-    writeBehaviorPages(vaultPath, behaviorCoach);
-    return {
-      ...item,
-      behaviorCoach,
-      sourceCapture: {
-        settings: readSourceCaptureSettings(vaultPath),
-        groups: groupedResourceInbox(vaultPath)
-      },
-      remoteResearch: {
-        settings: readRemoteResearchSettings(vaultPath)
-      },
-      planning: {
-        ...learningPlanningState(vaultPath),
-        updateSuggestions: readPlanUpdateSuggestions(vaultPath)
-      }
-    };
-  });
-  return state;
 }
 
 function resolveLearningVaultPath(name) {
@@ -1628,12 +2001,7 @@ function authorizedBridgeRequest(request, response) {
 }
 
 function renderHtml() {
-  const vaultOptions = listVaults(config.vaultsRoot)
-    .map((vaultPath) => {
-      const name = vaultName(vaultPath);
-      return `<option value="${serverEscapeHtml(name)}">${serverEscapeHtml(name)}</option>`;
-    })
-    .join("");
+  const vaultOptions = "";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1648,7 +2016,7 @@ function renderHtml() {
     body[data-theme="contrast"] { --bg: #ffffff; --text: #000000; --panel: #ffffff; --line: #000000; --soft: #eeeeee; --muted: #333333; --accent: #000000; --accent-text: #ffffff; --shadow: rgba(0, 0, 0, 0.2); --mark: #ffff00; }
     body[data-theme="megatron"] { --bg: #0b0d12; --text: #e8eef7; --panel: #161a23; --line: #3b4354; --soft: #222838; --muted: #9aa8bd; --accent: #39d5ff; --accent-text: #061019; --shadow: rgba(0, 0, 0, 0.36); --mark: #705d17; }
     body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
-    main { max-width: none; margin: 0 392px 0 0; padding: 32px 20px; box-sizing: border-box; }
+    main { max-width: none; margin: 0; padding: 32px 20px; box-sizing: border-box; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; min-width: 0; }
     h1 { font-size: 24px; margin: 0; }
     .header-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 12px; min-width: 0; }
@@ -1751,6 +2119,9 @@ function renderHtml() {
     table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
     th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 14px; vertical-align: top; }
     th { background: var(--soft); font-weight: 700; }
+    .provider-details-table { table-layout: fixed; margin: 8px 0 18px; }
+    .provider-details-table th { width: 220px; min-width: 180px; overflow-wrap: normal; word-break: normal; white-space: normal; hyphens: none; }
+    .provider-details-table td { overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; }
     tr:last-child td { border-bottom: 0; }
     tr.selectable-row { cursor: default; }
     tr.selectable-row:hover td { background: color-mix(in srgb, var(--soft) 72%, transparent); }
@@ -1759,13 +2130,13 @@ function renderHtml() {
     tr.selectable-row input[type="checkbox"] { accent-color: var(--accent); }
     .muted { color: var(--muted); }
     .path { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; }
-    .side-topics { position: fixed; top: 0; right: 20px; bottom: 20px; width: 340px; overflow: visible; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-top: 0; border-radius: 0 0 6px 6px; padding: 14px; box-shadow: 0 12px 30px var(--shadow); box-sizing: border-box; }
+    .side-topics { position: fixed; z-index: 18; top: 0; right: 20px; bottom: 20px; width: min(340px, calc(100vw - 40px)); overflow: visible; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-top: 0; border-radius: 0 0 6px 6px; padding: 14px; box-shadow: 0 12px 30px var(--shadow); box-sizing: border-box; }
     .side-topic-controls { flex: 0 0 auto; background: var(--panel); padding: 0 0 10px; border-bottom: 1px solid var(--line); }
     body.sidebar-hidden main { margin-right: 0; }
     .side-topic-header { display: block; margin-bottom: 10px; padding-right: 18px; }
     .side-topics h2 { margin: 0; font-size: 15px; }
     .side-topic-toggle, .side-topic-restore { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 30px; padding: 0; font-size: 13px; font-weight: 800; letter-spacing: 0; line-height: 1; border-radius: 6px 0 0 6px; box-shadow: 0 8px 18px var(--shadow); }
-    .side-topic-toggle { position: fixed; top: 5px; right: 360px; z-index: 19; }
+    .side-topic-toggle { position: fixed; top: 5px; right: min(360px, calc(100vw - 40px)); z-index: 19; }
     .side-topic-restore { position: fixed; top: 5px; right: 20px; z-index: 18; border-radius: 6px; }
     .side-topic-restore.hidden, .side-topics.hidden { display: none; }
     .side-topic-search-row { display: flex; gap: 6px; margin-bottom: 10px; }
@@ -1855,6 +2226,8 @@ function renderHtml() {
     .provider-config-form { display: grid; gap: 14px; margin: 14px 0; }
     .provider-config-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .provider-grid { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 10px; margin-top: 10px; }
+    .provider-grid .inline-toggle { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; justify-content: start; gap: 8px; min-height: 34px; white-space: normal; }
+    .provider-grid .inline-toggle input { width: 16px; height: 16px; justify-self: start; }
     .provider-group { border: 1px solid var(--line); border-radius: 6px; padding: 12px; background: color-mix(in srgb, var(--panel) 92%, var(--soft)); }
     .provider-group[hidden] { display: none; }
     .provider-group h3 { margin-top: 0; }
@@ -1905,12 +2278,91 @@ function renderHtml() {
     .learning-action-row button { min-width: 0; }
     .learning-card.danger { border-color: color-mix(in srgb, #dc2626 45%, var(--line)); }
     .learning-card.warning { border-color: color-mix(in srgb, #f59e0b 55%, var(--line)); }
+    .learning-flowchart { display: grid; grid-template-columns: repeat(7, minmax(112px, 1fr)); gap: 8px; align-items: stretch; margin: 10px 0 14px; }
+    .learning-flow-node { position: relative; border: 1px solid var(--line); border-radius: 6px; padding: 10px; background: var(--soft); min-height: 86px; display: grid; gap: 4px; align-content: start; }
+    .learning-flow-node::after { content: ">"; position: absolute; right: -9px; top: 50%; transform: translateY(-50%); color: var(--muted); font-weight: 800; }
+    .learning-flow-node:last-child::after { content: ""; }
+    .learning-flow-node strong { font-size: 13px; }
+    .learning-flow-node span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .learning-flow-node.active { border-color: var(--accent); background: color-mix(in srgb, var(--mark) 42%, var(--panel)); }
+    .learning-map-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(260px, .9fr); gap: 12px; margin: 12px 0; }
+    .learning-map-panel { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 12px; min-width: 0; }
+    .learning-map-panel h3 { margin: 0 0 8px; }
+    .learning-routing-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+    .learning-routing-list li { border-top: 1px solid var(--line); padding-top: 8px; overflow-wrap: anywhere; }
+    .learning-routing-list li:first-child { border-top: 0; padding-top: 0; }
+    .learning-event-feed { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+    .learning-event-feed li { display: grid; grid-template-columns: minmax(120px, .35fr) minmax(0, 1fr); gap: 8px; border-bottom: 1px solid var(--line); padding: 6px 0; }
+    .learning-event-feed time { color: var(--muted); font-size: 12px; }
+    .learning-autopilot-hero, .learning-study-surface, .learning-plan-guide, .learning-notification-center {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--panel) 94%, var(--soft));
+      padding: 16px;
+      margin: 12px 0;
+    }
+    .learning-autopilot-hero { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(180px, .55fr); gap: 14px; align-items: stretch; overflow: hidden; }
+    .learning-autopilot-copy h3, .learning-study-header h3, .learning-plan-guide h3, .learning-notification-center h3 { margin: 0 0 6px; font-size: 20px; }
+    .learning-autopilot-copy p, .learning-study-header p, .learning-plan-guide p, .learning-notification-center p { margin: 0 0 10px; color: var(--muted); }
+    .learning-kicker { color: var(--accent); font-weight: 800; font-size: 12px; text-transform: uppercase; letter-spacing: 0; }
+    .learning-autopilot-meter { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; align-content: center; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
+    .learning-autopilot-meter strong { font-size: 24px; line-height: 1; color: var(--accent); }
+    .learning-autopilot-meter span { color: var(--muted); font-size: 12px; align-self: center; }
+    .learning-stepper { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 8px; list-style: none; margin: 2px 0 0; padding: 0; }
+    .learning-stepper li { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 7px; align-items: start; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); transition: transform .18s ease, border-color .18s ease, background .18s ease; }
+    .learning-stepper li span { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--soft); color: var(--muted); font-weight: 800; }
+    .learning-stepper li strong { font-size: 13px; }
+    .learning-stepper li em { grid-column: 2; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: anywhere; }
+    .learning-stepper li.active { border-color: var(--accent); background: color-mix(in srgb, var(--mark) 36%, var(--panel)); transform: translateY(-2px); }
+    .learning-stepper li.active span { background: var(--accent); color: #fff; }
+    .learning-study-surface { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(260px, .8fr); gap: 14px; }
+    .learning-study-header { grid-column: 1 / -1; }
+    .learning-card-deck { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+    .learning-study-card { min-height: 210px; perspective: 900px; }
+    .learning-study-card-inner { position: relative; min-height: 210px; transform-style: preserve-3d; transition: transform .28s ease; }
+    .learning-study-card.flipped .learning-study-card-inner { transform: rotateY(180deg); }
+    .learning-study-card-face { position: absolute; inset: 0; display: grid; align-content: space-between; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); backface-visibility: hidden; overflow: hidden; }
+    .learning-study-card-face h4 { margin: 0; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
+    .learning-study-card-face p { margin: 0; overflow-wrap: anywhere; }
+    .learning-study-card-face small { color: var(--muted); overflow-wrap: anywhere; }
+    .learning-study-card-face.back { transform: rotateY(180deg); background: color-mix(in srgb, var(--panel) 85%, var(--soft)); }
+    .learning-bit-explorer { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--soft); }
+    .learning-bit-explorer h4 { margin: 0 0 8px; }
+    .learning-bit-explorer details { border-top: 1px solid var(--line); padding: 8px 0; }
+    .learning-bit-explorer details:first-of-type { border-top: 0; }
+    .learning-empty-state { border: 1px dashed var(--line); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--soft); }
+    .learning-plan-summary { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
+    .learning-plan-summary strong { font-size: 16px; }
+    .learning-plan-summary span:not(.learning-chip) { color: var(--muted); }
+    .learning-plan-timeline { display: grid; gap: 8px; padding: 0; margin: 12px 0; list-style: none; }
+    .learning-plan-timeline li { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; }
+    .learning-plan-timeline li > span { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; color: #fff; background: var(--accent); font-weight: 800; }
+    .learning-plan-timeline li > div { border-left: 2px solid var(--line); padding: 0 0 10px 12px; }
+    .learning-plan-timeline strong { display: block; }
+    .learning-plan-timeline p { margin: 4px 0; }
+    .learning-plan-timeline em { color: var(--muted); font-style: normal; font-size: 12px; }
+    .learning-notification-center ul { display: grid; gap: 8px; padding: 0; margin: 0; list-style: none; }
+    .learning-notification-center li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    .learning-notification-center li.warning { border-color: color-mix(in srgb, #f59e0b 55%, var(--line)); }
+    .learning-notification-center li.critical { border-color: color-mix(in srgb, #dc2626 55%, var(--line)); }
+    .learning-notification-center small { color: var(--muted); }
+    @media (prefers-reduced-motion: reduce) {
+      .learning-stepper li, .learning-study-card-inner { transition: none; }
+      .learning-stepper li.active { transform: none; }
+    }
     @media (max-width: 1240px) {
       main { margin-right: 0; padding-right: 20px; }
       .side-topics { position: relative; width: auto; max-height: 220px; margin: 0 20px 20px; border-top: 1px solid var(--line); border-radius: 6px; overflow: visible; }
       .side-topic-toggle { top: 5px; left: auto; right: 20px; border-radius: 6px; }
       .side-topic-restore { top: 5px; bottom: auto; right: 20px; }
       .learning-boost-grid { grid-template-columns: 1fr; }
+      .learning-flowchart { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+      .learning-flow-node::after { content: ""; }
+      .learning-map-grid { grid-template-columns: 1fr; }
+      .learning-event-feed li { grid-template-columns: 1fr; }
+      .learning-autopilot-hero, .learning-study-surface { grid-template-columns: 1fr; }
+      .learning-stepper { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+      .learning-notification-center li { grid-template-columns: 1fr; }
       .learning-plan-row { grid-template-columns: 1fr; }
       .learning-form { grid-template-columns: 1fr; }
       .learning-toggle-grid { grid-template-columns: 1fr; }
@@ -2174,6 +2626,15 @@ function renderHtml() {
             <span id="secret-status-LOCAL_AI_ROUTER_BEARER_TOKEN" class="provider-secret-status"></span>
           </div>
         </section>
+        <section class="provider-group" data-provider-group="all">
+          <h3>Automatic Raw Processing</h3>
+          <div class="provider-grid">
+            <label class="inline-toggle"><input data-config-key="AUTO_INGEST_ON_START" type="checkbox"> Auto-process raw/inbox and raw/input in every vault</label>
+            <label class="learning-field"><span>Raw scan interval ms</span><input data-config-key="WATCH_INTERVAL_MS" type="number" min="1000" step="1000" placeholder="5000"></label>
+            <label class="learning-field"><span>Provider timeout ms</span><input data-config-key="AI_PROVIDER_TIMEOUT_MS" type="number" min="5000" step="5000" placeholder="60000"></label>
+          </div>
+          <p class="muted">When enabled, Learning Boost watches each vault for new files under <code>raw/inbox</code> and <code>raw/input</code>. Processed files and vault media assets are skipped.</p>
+        </section>
         <section class="provider-group" data-provider-group="local_auto ollama">
           <h3>Ollama</h3>
           <div class="provider-grid">
@@ -2294,16 +2755,36 @@ function renderHtml() {
       <p class="muted">Local profile, onboarding, and working-memory settings. Profile data is stored in the selected vault under <code>.llm-wiki/learning/</code>.</p>
       <div class="learning-workspace">
         <div class="learning-toolbar">
-          <label class="muted" for="learning-vault">Vault</label>
-          <select id="learning-vault">${vaultOptions}</select>
-          <button id="refresh-learning" class="secondary" type="button">Refresh</button>
-          <span id="learning-feedback" class="copy-feedback"></span>
-        </div>
+	          <label class="muted" for="learning-vault">Vault</label>
+	          <select id="learning-vault">${vaultOptions}</select>
+	          <button id="refresh-learning" class="secondary" type="button">Refresh</button>
+	          <button id="learning-notification-control" class="secondary" type="button">Enable learning notifications</button>
+	          <span id="learning-feedback" class="copy-feedback"></span>
+	        </div>
 
         <section class="learning-section">
           <h3>Overview</h3>
           <div id="learning-status-box" class="answer learning-overview">Loading learning profile...</div>
         </section>
+
+        <details class="learning-section" open>
+          <summary>Learning Autopilot</summary>
+          <form id="learning-automation-form" class="learning-form">
+            <div class="learning-toggle-grid">
+              <label class="inline-toggle"><input id="learning-autopilot-toggle" type="checkbox"> Learning Autopilot</label>
+              <label class="inline-toggle"><input id="auto-process-new-sources-toggle" type="checkbox"> Auto-process new sources</label>
+              <label class="inline-toggle"><input id="auto-draft-plans-toggle" type="checkbox"> Auto-draft plans and goals</label>
+              <label class="inline-toggle"><input id="auto-suggest-plan-updates-toggle" type="checkbox"> Auto-suggest plan updates</label>
+              <label class="inline-toggle"><input id="native-mac-notifications-toggle" type="checkbox"> Native macOS notifications</label>
+              <label class="inline-toggle"><input id="approval-gates-toggle" type="checkbox" checked disabled> Require approval for activation and external writes</label>
+            </div>
+            <div class="learning-button-row">
+              <button class="primary" type="submit">Save Autopilot settings</button>
+              <button id="process-pending-learning" class="secondary" type="button">Process pending now</button>
+              <button id="test-native-notification" class="secondary" type="button">Send test notification</button>
+            </div>
+          </form>
+        </details>
 
         <details class="learning-section" open>
           <summary>Plan Actions</summary>
@@ -2329,15 +2810,71 @@ function renderHtml() {
                 <button id="clear-behavior" class="secondary" type="button">Clear behavior</button>
                 <button id="enable-behavior-alerts" class="secondary" type="button">Enable alerts</button>
                 <button id="export-resources" class="secondary" type="button">Export resources</button>
+                <button id="process-resources" class="secondary" type="button">Process captured sources now</button>
                 <button id="purge-resources" class="secondary" type="button">Purge expired</button>
                 <button id="retake-interview" class="secondary" type="button">Retake interview</button>
               </div>
             </div>
           </div>
+	        </details>
+
+        <details class="learning-section">
+          <summary>Revise Plans And Goals</summary>
+          <div class="learning-actions">
+            <div class="learning-plan-row">
+              <label class="learning-field">
+                <span>Plan</span>
+                <select id="learning-plan-select"><option value="">No plan selected</option></select>
+              </label>
+              <label class="learning-field">
+                <span>Goal</span>
+                <select id="learning-goal-select"><option value="">No goal selected</option></select>
+              </label>
+              <button id="load-plan-revision" class="secondary" type="button">Load revision fields</button>
+              <button id="save-plan-revision" class="secondary" type="button">Save plan revision</button>
+              <button id="save-goal-revision" class="secondary" type="button">Save goal revision</button>
+            </div>
+            <div class="learning-form">
+              <label class="learning-field"><span>Plan title</span><input id="revision-plan-title" autocomplete="off" placeholder="Plan title"></label>
+              <label class="learning-field"><span>Plan status</span><select id="revision-plan-status">
+                <option value="proposed">Proposed</option>
+                <option value="approved">Approved</option>
+                <option value="active">Active</option>
+                <option value="paused">Paused</option>
+                <option value="completed">Completed</option>
+                <option value="archived">Archived</option>
+              </select></label>
+              <label class="learning-field"><span>Goal title</span><input id="revision-goal-title" autocomplete="off" placeholder="Goal title"></label>
+              <label class="learning-field"><span>Goal status</span><select id="revision-goal-status">
+                <option value="proposed">Proposed</option>
+                <option value="approved">Approved</option>
+                <option value="active">Active</option>
+                <option value="paused">Paused</option>
+                <option value="completed">Completed</option>
+                <option value="archived">Archived</option>
+              </select></label>
+              <label class="learning-field"><span>Goal deadline</span><input id="revision-goal-deadline" type="date"></label>
+              <label class="learning-field full"><span>Success criteria</span><textarea id="revision-goal-success" rows="3" placeholder="One success criterion per line"></textarea></label>
+              <label class="learning-field full"><span>Plan stages JSON</span><textarea id="revision-plan-stages" rows="8" spellcheck="false" placeholder="Edit stages as JSON"></textarea></label>
+            </div>
+          </div>
         </details>
 
-        <details class="learning-section" open>
-          <summary>Learner Profile</summary>
+	        <details class="learning-section">
+	          <summary>Behavior And Notifications</summary>
+	          <form id="behavior-settings-form" class="learning-form">
+	            <div class="learning-toggle-grid">
+	              <label class="inline-toggle"><input id="behavior-capture-toggle" type="checkbox"> Learning event capture</label>
+	              <label class="inline-toggle"><input id="behavior-coaching-toggle" type="checkbox"> Coaching alerts</label>
+	              <label class="inline-toggle"><input id="expanded-monitoring-toggle" type="checkbox"> Expanded monitoring</label>
+	              <label class="inline-toggle"><input id="detailed-notifications-toggle" type="checkbox"> Detailed notifications</label>
+	            </div>
+	            <button class="primary" type="submit">Save behavior settings</button>
+	          </form>
+	        </details>
+
+	        <details class="learning-section" open>
+	          <summary>Learner Profile</summary>
           <form id="learning-profile-form" class="learning-form">
             <label class="learning-field"><span>Profile ID</span><input id="profile-id" autocomplete="off" placeholder="default"></label>
             <label class="learning-field"><span>Profile name</span><input id="profile-name" autocomplete="off" placeholder="Learner"></label>
@@ -2378,15 +2915,19 @@ function renderHtml() {
           <form id="source-capture-form" class="learning-form">
             <div class="learning-toggle-grid">
               <label class="inline-toggle"><input id="source-capture-enabled" type="checkbox"> Enable source capture</label>
+              <label class="inline-toggle"><input id="auto-insights-toggle" type="checkbox"> Auto insights after capture</label>
               <label class="inline-toggle"><input id="full-local-capture-mode" type="checkbox"> Full Local Capture Mode</label>
               <label class="inline-toggle"><input id="manual-import-toggle" type="checkbox"> Manual import</label>
               <label class="inline-toggle"><input id="browser-clipper-toggle" type="checkbox"> Browser clipper</label>
               <label class="inline-toggle"><input id="browser-history-toggle" type="checkbox"> Browser history import</label>
               <label class="inline-toggle"><input id="opened-documents-toggle" type="checkbox"> Opened-document detection</label>
               <label class="inline-toggle"><input id="screenshots-toggle" type="checkbox"> Screenshots</label>
-              <label class="inline-toggle"><input id="meetings-toggle" type="checkbox"> Meetings</label>
-              <label class="inline-toggle"><input id="voice-memos-toggle" type="checkbox"> Voice memos</label>
-            </div>
+	              <label class="inline-toggle"><input id="meetings-toggle" type="checkbox"> Meetings</label>
+	              <label class="inline-toggle"><input id="voice-memos-toggle" type="checkbox"> Voice memos</label>
+	              <label class="inline-toggle"><input id="clipboard-toggle" type="checkbox"> Clipboard</label>
+	              <label class="inline-toggle"><input id="visited-web-pages-toggle" type="checkbox"> Visited web pages</label>
+	              <label class="inline-toggle"><input id="frontmost-app-metadata-toggle" type="checkbox"> Frontmost app metadata</label>
+	            </div>
             <label class="learning-field full"><span>Watch folders</span><input id="watch-folders" autocomplete="off" placeholder="Comma-separated folders"></label>
             <label class="learning-field"><span>Page content</span><select id="capture-page-content">
               <option value="ask">Ask</option>
@@ -2607,12 +3148,14 @@ function renderHtml() {
     const providerTabDot = document.querySelector("#provider-tab-dot");
     const learningVault = document.querySelector("#learning-vault");
     const refreshLearning = document.querySelector("#refresh-learning");
+    const learningNotificationControl = document.querySelector("#learning-notification-control");
     const exportRemnote = document.querySelector("#export-remnote");
     const pauseBehavior = document.querySelector("#pause-behavior");
     const exportBehavior = document.querySelector("#export-behavior");
     const clearBehavior = document.querySelector("#clear-behavior");
     const enableBehaviorAlerts = document.querySelector("#enable-behavior-alerts");
     const exportResources = document.querySelector("#export-resources");
+    const processResources = document.querySelector("#process-resources");
     const purgeResources = document.querySelector("#purge-resources");
     const draftLearningPlans = document.querySelector("#draft-learning-plans");
     const approveLearningPlanButton = document.querySelector("#approve-learning-plan");
@@ -2621,9 +3164,34 @@ function renderHtml() {
     const exportPlanReminders = document.querySelector("#export-plan-reminders");
     const suggestPlanUpdatesButton = document.querySelector("#suggest-plan-updates");
     const learningPlanId = document.querySelector("#learning-plan-id");
+    const learningPlanSelect = document.querySelector("#learning-plan-select");
+    const learningGoalSelect = document.querySelector("#learning-goal-select");
+    const loadPlanRevision = document.querySelector("#load-plan-revision");
+    const savePlanRevision = document.querySelector("#save-plan-revision");
+    const saveGoalRevision = document.querySelector("#save-goal-revision");
+    const revisionPlanTitle = document.querySelector("#revision-plan-title");
+    const revisionPlanStatus = document.querySelector("#revision-plan-status");
+    const revisionGoalTitle = document.querySelector("#revision-goal-title");
+    const revisionGoalStatus = document.querySelector("#revision-goal-status");
+    const revisionGoalDeadline = document.querySelector("#revision-goal-deadline");
+    const revisionGoalSuccess = document.querySelector("#revision-goal-success");
+    const revisionPlanStages = document.querySelector("#revision-plan-stages");
     const retakeInterview = document.querySelector("#retake-interview");
     const learningStatusBox = document.querySelector("#learning-status-box");
     const learningFeedback = document.querySelector("#learning-feedback");
+    const behaviorSettingsForm = document.querySelector("#behavior-settings-form");
+    const learningAutomationForm = document.querySelector("#learning-automation-form");
+    const learningAutopilotToggle = document.querySelector("#learning-autopilot-toggle");
+    const autoProcessNewSourcesToggle = document.querySelector("#auto-process-new-sources-toggle");
+    const autoDraftPlansToggle = document.querySelector("#auto-draft-plans-toggle");
+    const autoSuggestPlanUpdatesToggle = document.querySelector("#auto-suggest-plan-updates-toggle");
+    const nativeMacNotificationsToggle = document.querySelector("#native-mac-notifications-toggle");
+    const processPendingLearning = document.querySelector("#process-pending-learning");
+    const testNativeNotification = document.querySelector("#test-native-notification");
+    const behaviorCaptureToggle = document.querySelector("#behavior-capture-toggle");
+    const behaviorCoachingToggle = document.querySelector("#behavior-coaching-toggle");
+    const expandedMonitoringToggle = document.querySelector("#expanded-monitoring-toggle");
+    const detailedNotificationsToggle = document.querySelector("#detailed-notifications-toggle");
     const learningProfileForm = document.querySelector("#learning-profile-form");
     const profileId = document.querySelector("#profile-id");
     const profileName = document.querySelector("#profile-name");
@@ -2644,6 +3212,7 @@ function renderHtml() {
     const sourceCaptureForm = document.querySelector("#source-capture-form");
     const manualResourceForm = document.querySelector("#manual-resource-form");
     const sourceCaptureEnabled = document.querySelector("#source-capture-enabled");
+    const autoInsightsToggle = document.querySelector("#auto-insights-toggle");
     const fullLocalCaptureMode = document.querySelector("#full-local-capture-mode");
     const manualImportToggle = document.querySelector("#manual-import-toggle");
     const browserClipperToggle = document.querySelector("#browser-clipper-toggle");
@@ -2652,6 +3221,9 @@ function renderHtml() {
     const screenshotsToggle = document.querySelector("#screenshots-toggle");
     const meetingsToggle = document.querySelector("#meetings-toggle");
     const voiceMemosToggle = document.querySelector("#voice-memos-toggle");
+    const clipboardToggle = document.querySelector("#clipboard-toggle");
+    const visitedWebPagesToggle = document.querySelector("#visited-web-pages-toggle");
+    const frontmostAppMetadataToggle = document.querySelector("#frontmost-app-metadata-toggle");
     const watchFolders = document.querySelector("#watch-folders");
     const capturePageContent = document.querySelector("#capture-page-content");
     const cloudProcessingPolicy = document.querySelector("#cloud-processing-policy");
@@ -2895,8 +3467,8 @@ function renderHtml() {
     });
     deleteArchivesButton.addEventListener("click", deleteSelectedArchives);
     restoreArchivesButton.addEventListener("click", restoreSelectedArchives);
-    const savedSideTopicHidden = localStorage.getItem("llm-wiki-side-topic-hidden") === "1";
-    setSideTopicHidden(savedSideTopicHidden);
+    const savedSideTopicHidden = localStorage.getItem("llm-wiki-side-topic-hidden");
+    setSideTopicHidden(savedSideTopicHidden !== "0");
     sideTopicHide.addEventListener("click", () => {
       setSideTopicHidden(true);
       localStorage.setItem("llm-wiki-side-topic-hidden", "1");
@@ -2951,12 +3523,17 @@ function renderHtml() {
     chooseConfigFile.addEventListener("click", chooseConfigPathValue);
     openConfigFile.addEventListener("click", openConfigPathValue);
     refreshLearning.addEventListener("click", loadLearning);
+    learningNotificationControl.addEventListener("click", requestBehaviorNotifications);
+    learningAutomationForm.addEventListener("submit", saveLearningAutomationSettings);
+    processPendingLearning.addEventListener("click", processPendingLearningNow);
+    testNativeNotification.addEventListener("click", sendNativeNotificationTest);
     exportRemnote.addEventListener("click", () => exportRemnoteBundle(false));
     pauseBehavior.addEventListener("click", toggleBehaviorPause);
     exportBehavior.addEventListener("click", exportBehaviorData);
     clearBehavior.addEventListener("click", clearBehaviorData);
     enableBehaviorAlerts.addEventListener("click", requestBehaviorNotifications);
     exportResources.addEventListener("click", exportResourceInbox);
+    processResources.addEventListener("click", () => processCapturedResources({ manual: true }));
     purgeResources.addEventListener("click", purgeResourceInbox);
     draftLearningPlans.addEventListener("click", draftPlansFromResources);
     approveLearningPlanButton.addEventListener("click", approveSelectedLearningPlan);
@@ -2964,6 +3541,11 @@ function renderHtml() {
     exportPlanCalendar.addEventListener("click", exportSelectedPlanCalendar);
     exportPlanReminders.addEventListener("click", exportSelectedPlanReminders);
     suggestPlanUpdatesButton.addEventListener("click", suggestUpdatesForPlans);
+    learningPlanSelect.addEventListener("change", syncRevisionFieldsFromSelectedPlan);
+    learningGoalSelect.addEventListener("change", syncRevisionFieldsFromSelectedGoal);
+    loadPlanRevision.addEventListener("click", syncRevisionFields);
+    savePlanRevision.addEventListener("click", saveSelectedPlanRevision);
+    saveGoalRevision.addEventListener("click", saveSelectedGoalRevision);
     learningStatusBox.addEventListener("click", (event) => {
       const actionButton = event.target.closest("[data-learning-action]");
       if (!actionButton) return;
@@ -2971,12 +3553,48 @@ function renderHtml() {
       if (action === "approve-plan") approveLearningPlanButton.click();
       if (action === "schedule-plan") exportPlanCalendar.click();
       if (action === "export-remnote") exportRemnote.click();
+      if (action === "process-pending") processPendingLearning.click();
+      if (action === "test-native-notification") testNativeNotification.click();
+      if (action === "flip-card") {
+        const card = actionButton.closest(".learning-study-card");
+        card?.classList.toggle("flipped");
+      }
+      if (action === "mark-notification-read") markLearningNotification(actionButton.dataset.vault, actionButton.dataset.notificationId, "read");
+      if (action === "dismiss-notification") markLearningNotification(actionButton.dataset.vault, actionButton.dataset.notificationId, "dismiss");
+    });
+    window.addEventListener("learning-native-notification-status", async (event) => {
+      const detail = event.detail || {};
+      const nativeStatus = detail.status || "unknown";
+      if (nativeStatus === "authorized" || nativeStatus === "provisional" || nativeStatus === "ephemeral") {
+        await updateBehaviorSettings({ notificationPermission: "granted" });
+        learningFeedback.textContent = nativeStatus === "authorized" ? "macOS notifications enabled" : "macOS notifications partly enabled";
+        return;
+      }
+      if (nativeStatus === "denied") {
+        await updateBehaviorSettings({ notificationPermission: "denied" });
+        learningFeedback.textContent = "macOS notifications are blocked in System Settings.";
+        return;
+      }
+      if (nativeStatus === "delivered") {
+        learningFeedback.textContent = "macOS accepted the notification";
+        await loadLearning();
+        return;
+      }
+      if (nativeStatus === "failed" || nativeStatus === "permission_denied") {
+        learningFeedback.textContent = detail.message || "macOS notification delivery failed";
+        await loadLearning();
+      }
     });
     learningVault.addEventListener("change", renderLearningProfile);
     retakeInterview.addEventListener("click", () => {
       learningFeedback.textContent = "Interview fields ready";
       profileName.focus();
     });
+    [behaviorSettingsForm, learningAutomationForm, learningProfileForm, sourceCaptureForm, manualResourceForm].forEach((form) => {
+      form?.addEventListener("input", markLearningFieldDirty);
+      form?.addEventListener("change", markLearningFieldDirty);
+    });
+    behaviorSettingsForm.addEventListener("submit", saveBehaviorSettings);
     learningProfileForm.addEventListener("submit", saveLearningProfile);
     sourceCaptureForm.addEventListener("submit", saveSourceCaptureSettings);
     manualResourceForm.addEventListener("submit", addManualResource);
@@ -3729,15 +4347,15 @@ function renderHtml() {
         });
         providerStatusBox.innerHTML = '<h2>Current Provider</h2>' +
           '<div class="provider-state"><span class="status-dot ' + escapeHtml(data.statusColor || "grey") + '"></span><span>' + escapeHtml(data.status || "Unknown") + '</span></div>' +
-          '<table><tbody>' + rows.map(([label, value]) =>
+          '<table class="provider-details-table"><tbody>' + rows.map(([label, value]) =>
             '<tr><th>' + escapeHtml(label) + '</th><td>' + escapeHtml(value || "") + '</td></tr>'
           ).join("") + '</tbody></table>' +
           '<h3>Shared Agent Settings</h3>' +
-          '<table><tbody>' + sharedRows.map(([label, value]) =>
+          '<table class="provider-details-table"><tbody>' + sharedRows.map(([label, value]) =>
             '<tr><th>' + escapeHtml(label) + '</th><td>' + escapeHtml(value || "") + '</td></tr>'
           ).join("") + '</tbody></table>' +
           '<h3>Details</h3>' +
-          '<table><tbody>' + (data.details || []).map((item) =>
+          '<table class="provider-details-table"><tbody>' + (data.details || []).map((item) =>
             '<tr><th>' + escapeHtml(item.label) + '</th><td>' + escapeHtml(item.value) + '</td></tr>'
           ).join("") + '</tbody></table>' +
           renderLocalAiRouterStatus(routerData) +
@@ -3920,7 +4538,8 @@ function renderHtml() {
       return "red";
     }
 
-    async function loadLearning() {
+    async function loadLearning(options = {}) {
+      const snapshot = options.preserveDirty ? snapshotDirtyLearningFields(options) : null;
       learningStatusBox.textContent = "Loading learning profile...";
       try {
         const response = await fetch("/api/learning");
@@ -3929,14 +4548,89 @@ function renderHtml() {
         learningCache = data;
         populateSelect(learningVault, (data.vaults || []).map((item) => item.vault), "Choose vault");
         renderLearningProfile();
+        restoreDirtyLearningFields(snapshot);
       } catch (error) {
         learningStatusBox.textContent = error.message;
+        restoreDirtyLearningFields(snapshot);
       }
     }
 
     function selectedLearningVault() {
       const vaults = learningCache?.vaults || [];
       return vaults.find((item) => item.vault === learningVault.value) || vaults[0] || null;
+    }
+
+    function patchLearningCacheVault(vault, patch) {
+      if (!learningCache?.vaults?.length || !vault) return;
+      const index = learningCache.vaults.findIndex((item) => item.vault === vault);
+      if (index < 0) return;
+      learningCache.vaults[index] = mergeLearningPatch(learningCache.vaults[index], patch || {});
+    }
+
+    function mergeLearningPatch(current, patch) {
+      const next = { ...current, ...patch };
+      if (patch.userProfile) next.userProfile = { ...(current.userProfile || {}), ...patch.userProfile };
+      if (patch.learningProfile) next.learningProfile = { ...(current.learningProfile || {}), ...patch.learningProfile };
+      if (patch.sourceCapture) {
+        next.sourceCapture = {
+          ...(current.sourceCapture || {}),
+          ...patch.sourceCapture,
+          settings: {
+            ...(current.sourceCapture?.settings || {}),
+            ...(patch.sourceCapture.settings || {})
+          }
+        };
+      }
+      if (patch.behaviorCoach) {
+        next.behaviorCoach = {
+          ...(current.behaviorCoach || {}),
+          ...patch.behaviorCoach,
+          settings: {
+            ...(current.behaviorCoach?.settings || {}),
+            ...(patch.behaviorCoach.settings || {})
+          }
+        };
+      }
+      return next;
+    }
+
+    function snapshotDirtyLearningFields(options = {}) {
+      const exclude = new Set(options.excludeForms || []);
+      const fields = [];
+      for (const form of [behaviorSettingsForm, learningProfileForm, sourceCaptureForm, manualResourceForm]) {
+        if (!form || exclude.has(form)) continue;
+        form.querySelectorAll("input, select, textarea").forEach((field) => {
+          if (field.dataset.learningDirty !== "1" || !field.id) return;
+          fields.push({
+            id: field.id,
+            checked: field.type === "checkbox" ? field.checked : undefined,
+            value: field.type === "checkbox" ? undefined : field.value
+          });
+        });
+      }
+      return fields;
+    }
+
+    function restoreDirtyLearningFields(snapshot) {
+      for (const item of snapshot || []) {
+        const field = document.getElementById(item.id);
+        if (!field) continue;
+        if (field.type === "checkbox") field.checked = item.checked === true;
+        else field.value = item.value || "";
+        field.dataset.learningDirty = "1";
+      }
+    }
+
+    function clearLearningDirty(form) {
+      form?.querySelectorAll("input, select, textarea").forEach((field) => {
+        delete field.dataset.learningDirty;
+      });
+    }
+
+    function markLearningFieldDirty(event) {
+      if (event.target?.matches?.("input, select, textarea")) {
+        event.target.dataset.learningDirty = "1";
+      }
     }
 
     function renderLearningProfile() {
@@ -3958,11 +4652,27 @@ function renderHtml() {
       const planning = state.planning || {};
       const plans = planning.plans || [];
       const goals = planning.goals || [];
+      const sourceLinks = planning.sourceLinks || [];
+      const sourceGroups = planning.sourceGroups || [];
       const updateSuggestions = planning.updateSuggestions || [];
+      const automation = state.automation || {};
+      const automationSettings = automation.settings || {};
+      const notifications = state.notifications || [];
       learningVault.value = state.vault;
+      learningAutopilotToggle.checked = automationSettings.learningAutopilot !== false;
+      autoProcessNewSourcesToggle.checked = automationSettings.autoProcessNewSources !== false;
+      autoDraftPlansToggle.checked = automationSettings.autoDraftPlans !== false;
+      autoSuggestPlanUpdatesToggle.checked = automationSettings.autoSuggestPlanUpdates !== false;
+      nativeMacNotificationsToggle.checked = automationSettings.nativeMacNotifications !== false;
       pauseBehavior.textContent = coachSettings.paused ? "Resume coaching" : "Pause coaching";
       enableBehaviorAlerts.textContent = coachSettings.notificationPermission === "granted" ? "Alerts enabled" : "Enable alerts";
+      learningNotificationControl.textContent = coachSettings.notificationPermission === "granted" ? "Learning notifications enabled" : "Enable learning notifications";
+      behaviorCaptureToggle.checked = coachSettings.captureEnabled !== false;
+      behaviorCoachingToggle.checked = coachSettings.coachingEnabled !== false;
+      expandedMonitoringToggle.checked = coachSettings.expandedMonitoringEnabled === true;
+      detailedNotificationsToggle.checked = coachSettings.detailedNotifications === true;
       sourceCaptureEnabled.checked = sourceSettings.enabled === true;
+      autoInsightsToggle.checked = sourceSettings.autoProcessCapturedResources === true;
       fullLocalCaptureMode.checked = sourceSettings.fullLocalCaptureMode === true;
       manualImportToggle.checked = sourceSettings.manualImport !== false;
       browserClipperToggle.checked = sourceSettings.browserClipper !== false;
@@ -3971,6 +4681,9 @@ function renderHtml() {
       screenshotsToggle.checked = sourceSettings.screenshots === true;
       meetingsToggle.checked = sourceSettings.meetings === true;
       voiceMemosToggle.checked = sourceSettings.voiceMemos === true;
+      clipboardToggle.checked = sourceSettings.clipboard === true;
+      visitedWebPagesToggle.checked = sourceSettings.visitedWebPages === true;
+      frontmostAppMetadataToggle.checked = sourceSettings.frontmostAppMetadata === true;
       watchFolders.value = (sourceSettings.watchFolders || []).join(", ");
       capturePageContent.value = sourceSettings.capturePageContent || "ask";
       cloudProcessingPolicy.value = sourceSettings.cloudProcessingPolicy || "ask_each_time";
@@ -3979,6 +4692,7 @@ function renderHtml() {
       chatNeverSendLocalCloud.checked = remoteSettings.neverSendLocalNotesToCloudWhenBrowsing !== false;
       chatAllowInternetNeeded.checked = remoteSettings.allowInternetWhenNeeded === true;
       if (!learningPlanId.value && plans.length) learningPlanId.value = plans[plans.length - 1].id || "";
+      populatePlanGoalRevisionControls(plans, goals);
       profileId.value = user.profileId || profile.activeProfileId || "default";
       profileName.value = user.displayName || "";
       firstLanguage.value = user.firstLanguage || "";
@@ -4016,6 +4730,8 @@ function renderHtml() {
         ["Source capture", sourceSettings.enabled ? (sourceSettings.fullLocalCaptureMode ? "full local" : "normal") : "manual/clipper only"],
         ["Goals", goals.length],
         ["Plans", plans.length],
+        ["Source links", sourceLinks.length || stats.sourceLinks || 0],
+        ["Source groups", sourceGroups.length],
         ["Plan update suggestions", updateSuggestions.length],
         ["External write logs", (planning.externalWriteLog || []).length],
         ["Learning dir", state.paths?.learningDir],
@@ -4023,7 +4739,12 @@ function renderHtml() {
         ["RemNote export", state.paths?.remnoteExport]
       ];
       learningStatusBox.innerHTML = '<h2>Learning Boost</h2>' +
-        renderLearningBoostGrid(state, { rows, resourceGroups, plans, goals, updateSuggestions, coachAlerts, coachSettings, sourceSettings, remoteSettings, stats, user, profile }) +
+        renderLearningAutopilotWorkspace(state, { automation, resourceGroups, sourceLinks, sourceGroups, plans, goals, updateSuggestions, coach, stats, notifications }) +
+        renderLearningSourceMap(state, { sourceLinks, sourceGroups, plans, goals, coach }) +
+        renderLearningStudyTools(state, { stats, sourceLinks }) +
+        renderLearningPlanGuide(state, { plans, goals, updateSuggestions }) +
+        renderLearningNotificationCenter(state, { notifications, coachAlerts, automation, coachSettings }) +
+        renderLearningBoostGrid(state, { rows, resourceGroups, sourceLinks, sourceGroups, plans, goals, updateSuggestions, coachAlerts, coachSettings, sourceSettings, remoteSettings, stats, user, profile }) +
         '<h2>Learning Profile</h2>' +
         '<table><tbody>' + rows.map(([label, value]) =>
           '<tr><th>' + escapeHtml(label) + '</th><td>' + escapeHtml(value || "") + '</td></tr>'
@@ -4036,8 +4757,12 @@ function renderHtml() {
         '<h3>Recent Source-to-Card Trace</h3><ul>' + (stats.recentCards || []).slice(0, 10).map((card) =>
           '<li>' + escapeHtml(card.front || card.cloze || card.type || "Card") +
           (card.sourcePage ? ' <span class="muted">' + escapeHtml(card.sourcePage) + '</span>' : '') +
-          '</li>'
+        '</li>'
         ).join("") + ((stats.recentCards || []).length ? '' : '<li>No cards generated yet.</li>') + '</ul>' +
+        '<h3>Recent Source Routing</h3><ul>' + (sourceLinks || []).slice(-10).reverse().map((link) =>
+          '<li><strong>' + escapeHtml(link.title || "Source") + '</strong> ' +
+          '<span class="muted">' + escapeHtml([link.group, (link.linkedPlans || []).length + " plan links", (link.linkedGoals || []).length + " goal links"].filter(Boolean).join(" / ")) + '</span></li>'
+        ).join("") + (sourceLinks.length ? '' : '<li>No source routing records yet.</li>') + '</ul>' +
         '<h3>Fallback Alerts</h3><ul>' + coachAlerts.slice(0, 6).map((alert) =>
           '<li><strong>' + escapeHtml(alert.title || "Alert") + '</strong>: ' + escapeHtml(alert.message || "") +
           '<ul>' + (alert.actions || []).slice(0, 3).map((action) => '<li>' + escapeHtml(action) + '</li>').join("") + '</ul></li>'
@@ -4063,6 +4788,224 @@ function renderHtml() {
           '<li>' + escapeHtml(item.label) + (item.preferNotToSay ? ' <span class="muted">Prefer not to say available</span>' : '') + '</li>'
         ).join("") + '</ul>';
       maybeNotifyBehaviorAlerts(coachAlerts, coachSettings);
+      maybeNotifyLearningEvents(coach.recentEvents || [], coachSettings);
+    }
+
+    function populatePlanGoalRevisionControls(plans, goals) {
+      const previousPlan = learningPlanSelect.value || learningPlanId.value;
+      const previousGoal = learningGoalSelect.value;
+      learningPlanSelect.innerHTML = '<option value="">No plan selected</option>' + plans.slice().reverse().map((plan) =>
+        '<option value="' + escapeHtml(plan.id || "") + '">' + escapeHtml((plan.title || plan.id || "Plan") + " - " + (plan.status || "status")) + '</option>'
+      ).join("");
+      learningGoalSelect.innerHTML = '<option value="">No goal selected</option>' + goals.slice().reverse().map((goal) =>
+        '<option value="' + escapeHtml(goal.id || "") + '">' + escapeHtml((goal.title || goal.id || "Goal") + " - " + (goal.status || "status")) + '</option>'
+      ).join("");
+      const selectedPlan = plans.find((plan) => plan.id === previousPlan) || plans[plans.length - 1];
+      const selectedGoal = goals.find((goal) => goal.id === previousGoal) || goals.find((goal) => goal.id === selectedPlan?.goalId) || goals[goals.length - 1];
+      learningPlanSelect.value = selectedPlan?.id || "";
+      learningGoalSelect.value = selectedGoal?.id || "";
+      syncRevisionFields();
+    }
+
+    function selectedLearningPlan() {
+      const plans = selectedLearningVault()?.planning?.plans || [];
+      return plans.find((plan) => plan.id === learningPlanSelect.value) || plans.find((plan) => plan.id === selectedLearningPlanId()) || null;
+    }
+
+    function selectedLearningGoal() {
+      const goals = selectedLearningVault()?.planning?.goals || [];
+      return goals.find((goal) => goal.id === learningGoalSelect.value) || goals.find((goal) => goal.id === selectedLearningPlan()?.goalId) || null;
+    }
+
+    function syncRevisionFields() {
+      syncRevisionFieldsFromSelectedPlan();
+      syncRevisionFieldsFromSelectedGoal();
+    }
+
+    function syncRevisionFieldsFromSelectedPlan() {
+      const plan = selectedLearningPlan();
+      if (!plan) {
+        revisionPlanTitle.value = "";
+        revisionPlanStatus.value = "proposed";
+        revisionPlanStages.value = "";
+        return;
+      }
+      learningPlanId.value = plan.id || learningPlanId.value;
+      revisionPlanTitle.value = plan.title || "";
+      revisionPlanStatus.value = plan.status || "proposed";
+      revisionPlanStages.value = JSON.stringify(plan.stages || [], null, 2);
+      if (plan.goalId) {
+        learningGoalSelect.value = plan.goalId;
+        syncRevisionFieldsFromSelectedGoal();
+      }
+    }
+
+    function syncRevisionFieldsFromSelectedGoal() {
+      const goal = selectedLearningGoal();
+      if (!goal) {
+        revisionGoalTitle.value = "";
+        revisionGoalStatus.value = "proposed";
+        revisionGoalDeadline.value = "";
+        revisionGoalSuccess.value = "";
+        return;
+      }
+      revisionGoalTitle.value = goal.title || "";
+      revisionGoalStatus.value = goal.status || "proposed";
+      revisionGoalDeadline.value = String(goal.deadline || "").slice(0, 10);
+      revisionGoalSuccess.value = (goal.successCriteria || []).join("\\n");
+    }
+
+    function renderLearningAutopilotWorkspace(state, context) {
+      const automation = context.automation || {};
+      const steps = learningWorkflowSteps(context);
+      const activeIndex = Math.max(0, steps.findIndex((step) => step.active));
+      return '<section class="learning-autopilot-hero">' +
+        '<div class="learning-autopilot-copy">' +
+          '<span class="learning-kicker">Learning Autopilot</span>' +
+          '<h3>' + escapeHtml(automationTitle(automation)) + '</h3>' +
+          '<p>' + escapeHtml(automation.detail || "Learning Boost watches approved sources, processes them into cards and bits, drafts plans, and asks before risky actions.") + '</p>' +
+          '<div class="learning-action-row"><button class="primary" type="button" data-learning-action="process-pending">Process pending now</button><button class="secondary" type="button" data-learning-action="test-native-notification">Test macOS notification</button></div>' +
+        '</div>' +
+        '<div class="learning-autopilot-meter">' +
+          '<strong>' + escapeHtml(String(automation.pendingRawCount || 0)) + '</strong><span>pending raw files</span>' +
+          '<strong>' + escapeHtml(String(automation.pendingResourceCount || 0)) + '</strong><span>resources waiting</span>' +
+          '<strong>' + escapeHtml(String(automation.notificationsUnread || 0)) + '</strong><span>alerts unread</span>' +
+        '</div>' +
+        '<ol class="learning-stepper" style="--active-step:' + activeIndex + '">' + steps.map((step, index) =>
+          '<li class="' + (step.active ? "active" : "") + '"><span>' + escapeHtml(String(index + 1)) + '</span><strong>' + escapeHtml(step.label) + '</strong><em>' + escapeHtml(step.detail) + '</em></li>'
+        ).join("") + '</ol>' +
+      '</section>';
+    }
+
+    function learningWorkflowSteps(context) {
+      const resources = context.resourceGroups.reduce((sum, group) => sum + (group.resources || []).length, 0);
+      const activePlans = (context.plans || []).filter((plan) => ["active", "approved"].includes(plan.status)).length;
+      return [
+        { label: "Capture", detail: resources ? resources + " approved source(s)" : "Clip, import, or drop a file", active: resources > 0 || (context.automation.pendingRawCount || 0) > 0 },
+        { label: "Process", detail: (context.sourceLinks || []).length + " source link(s)", active: (context.automation.pendingRawCount || 0) > 0 },
+        { label: "Understand", detail: (context.stats.bits || 0) + " bit(s)", active: (context.stats.bits || 0) > 0 },
+        { label: "Practice", detail: (context.stats.cards || 0) + " card(s)", active: (context.stats.dueCards || []).length > 0 },
+        { label: "Plan", detail: (context.plans || []).length + " plan(s)", active: activePlans > 0 || (context.updateSuggestions || []).length > 0 },
+        { label: "Review", detail: ((context.stats.dueCards || []).length) + " due", active: (context.stats.dueCards || []).length > 0 }
+      ];
+    }
+
+    function automationTitle(automation = {}) {
+      if (automation.running) return "Learning is processing in the background";
+      if (automation.blocked || automation.status === "blocked") return "Learning is paused until the provider answers";
+      if (automation.settings?.learningAutopilot === false || automation.status === "paused") return "Learning Autopilot is paused";
+      return "Learning is automatic for safe local work";
+    }
+
+    function renderLearningStudyTools(state, context) {
+      const cards = [...(context.stats.dueCards || []), ...(context.stats.recentCards || [])]
+        .filter((card, index, list) => list.findIndex((item) => (item.id || item.front || item.cloze) === (card.id || card.front || card.cloze)) === index)
+        .slice(0, 8);
+      const bits = (context.stats.recentBits || []).slice(0, 8);
+      return '<section class="learning-study-surface">' +
+        '<div class="learning-study-header"><h3>Cards And Bits</h3><p>Practice recall first, then inspect source-grounded bits when you need context.</p></div>' +
+        '<div class="learning-card-deck">' + (cards.length ? cards.map((card, index) =>
+          '<article class="learning-study-card"><div class="learning-study-card-inner">' +
+            '<div class="learning-study-card-face front"><span class="learning-chip">' + escapeHtml(card.type || "card") + '</span><h4>' + escapeHtml(card.front || card.cloze || "Recall prompt") + '</h4><button class="secondary" type="button" data-learning-action="flip-card" data-card-index="' + index + '">Show answer</button></div>' +
+            '<div class="learning-study-card-face back"><h4>Answer</h4><p>' + escapeHtml(card.back || card.explanation || "No answer text saved yet.") + '</p><small>' + escapeHtml(card.sourcePage || "No source link") + '</small><button class="secondary" type="button" data-learning-action="flip-card" data-card-index="' + index + '">Back to prompt</button></div>' +
+          '</div></article>'
+        ).join("") : '<div class="learning-empty-state">No cards yet. Autopilot will create cards after a provider successfully processes sources.</div>') + '</div>' +
+        '<div class="learning-bit-explorer"><h4>Recent learning bits</h4>' + (bits.length ? bits.map((bit) =>
+          '<details><summary>' + escapeHtml(bit.title || bit.type || "Learning bit") + '</summary><p>' + escapeHtml(bit.body || "") + '</p><div class="learning-chip-row"><span class="learning-chip">' + escapeHtml(bit.level || "core") + '</span><span class="learning-chip">' + escapeHtml(bit.sourcePage || "source pending") + '</span></div></details>'
+        ).join("") : '<p class="muted">No recent bits yet. Processed sources will appear here automatically.</p>') + '</div>' +
+      '</section>';
+    }
+
+    function renderLearningPlanGuide(state, context) {
+      const plan = (context.plans || []).slice().reverse().find((item) => ["active", "approved", "proposed", "scheduled"].includes(item.status)) || {};
+      const goal = (context.goals || []).find((item) => item.id === plan.goalId) || (context.goals || [])[0] || {};
+      const stages = (plan.stages || []).slice(0, 7);
+      return '<section class="learning-plan-guide">' +
+        '<div><h3>Plan And Goal Guide</h3><p>Autopilot may draft plans, but activation and external writes stay confirmation-gated.</p></div>' +
+        '<div class="learning-plan-summary"><strong>' + escapeHtml(goal.title || "No goal drafted yet") + '</strong><span>' + escapeHtml(goal.description || "Approved captured resources will become proposed goals automatically.") + '</span><span class="learning-chip">' + escapeHtml(goal.status || "waiting") + '</span></div>' +
+        '<ol class="learning-plan-timeline">' + (stages.length ? stages.map((stage, index) =>
+          '<li><span>' + escapeHtml(String(index + 1)) + '</span><div><strong>' + escapeHtml(stage.title || stage.stage || "Stage") + '</strong><p>' + escapeHtml(stage.goal || stage.description || "Work in a small, reviewable step.") + '</p><em>' + escapeHtml(stage.status || plan.status || "proposed") + '</em></div></li>'
+        ).join("") : '<li><span>1</span><div><strong>Waiting for plan draft</strong><p>Autopilot drafts a proposed plan after resources are processed.</p><em>safe automatic step</em></div></li>') + '</ol>' +
+        '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="approve-plan">Approve selected plan</button><button class="secondary" type="button" data-learning-action="schedule-plan">Schedule approved plan</button></div>' +
+      '</section>';
+    }
+
+    function renderLearningNotificationCenter(state, context) {
+      const notices = (context.notifications || []).slice(0, 8);
+      const alerts = (context.coachAlerts || []).slice(0, Math.max(0, 8 - notices.length)).map((alert, index) => ({
+        id: "coach-alert-" + index,
+        vault: state.vault,
+        severity: alert.severity || "warning",
+        title: alert.title || "Learning alert",
+        body: alert.message || "",
+        detail: (alert.actions || []).slice(0, 3).join(" · "),
+        created: "",
+        readAt: "coach"
+      }));
+      const rows = [...notices.map((item) => ({ ...item, vault: state.vault })), ...alerts].slice(0, 8);
+      return '<section class="learning-notification-center">' +
+        '<div class="learning-study-header"><h3>Notification Center</h3><p>macOS notifications carry important learning alerts; this list remains visible if Focus or system settings hide them.</p></div>' +
+        '<ul>' + (rows.length ? rows.map((item) =>
+          '<li class="' + escapeHtml(item.severity || "info") + '"><div><strong>' + escapeHtml(item.title || "Learning Boost") + '</strong><p>' + escapeHtml(item.body || item.detail || "") + '</p><small>' + escapeHtml([shortEventTime(item.created), item.detail, notificationDeliveryLabel(item)].filter(Boolean).join(" · ")) + '</small></div>' +
+          (!item.readAt ? '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="mark-notification-read" data-vault="' + escapeHtml(item.vault || state.vault) + '" data-notification-id="' + escapeHtml(item.id || "") + '">Mark read</button><button class="secondary" type="button" data-learning-action="dismiss-notification" data-vault="' + escapeHtml(item.vault || state.vault) + '" data-notification-id="' + escapeHtml(item.id || "") + '">Dismiss</button></div>' : '') +
+          '</li>'
+        ).join("") : '<li><div><strong>No alerts right now</strong><p>Autopilot will notify you when a source is processed, a provider blocks work, or a plan needs confirmation.</p></div></li>') + '</ul>' +
+      '</section>';
+    }
+
+    function notificationDeliveryLabel(item) {
+      const status = item.nativeDeliveryStatus || (item.deliveredAt ? "delivered" : "pending");
+      if (status === "delivered") return "macOS delivered";
+      if (status === "permission_denied") return "macOS notifications blocked: " + (item.nativeError || "permission not enabled");
+      if (status === "failed") return "macOS delivery failed: " + (item.nativeError || "will retry if possible");
+      if ((item.deliveryAttempts || 0) > 0) return "macOS pending, attempts: " + item.deliveryAttempts;
+      return "macOS pending";
+    }
+
+    function renderLearningFlow(state, context) {
+      const resourceCount = context.resourceGroups.reduce((sum, group) => sum + (group.resources || []).length, 0);
+      const activePlans = (context.plans || []).filter((plan) => ["active", "approved"].includes(plan.status)).length;
+      const flow = [
+        { label: "Capture", metric: resourceCount + " queued", detail: resourceCount ? "Resource inbox has sources" : "No queued resources", active: resourceCount > 0 },
+        { label: "Process", metric: (context.sourceLinks || []).length + " processed", detail: "AI analysis creates bits/cards", active: (context.sourceLinks || []).length > 0 },
+        { label: "Group", metric: (context.sourceGroups || []).length + " groups", detail: "Related sources stay together", active: (context.sourceGroups || []).length > 0 },
+        { label: "Plan", metric: (context.plans || []).length + " plans", detail: activePlans ? activePlans + " active/approved" : "Draft or approve a plan", active: activePlans > 0 },
+        { label: "Practice", metric: (context.stats.cards || 0) + " cards", detail: "Recall instead of rereading", active: (context.stats.cards || 0) > 0 },
+        { label: "Review", metric: (context.stats.dueCards || []).length + " due", detail: "Keep review sessions small", active: (context.stats.dueCards || []).length > 0 },
+        { label: "Export", metric: "RemNote", detail: state.paths?.remnoteExport || "Ready when cards exist", active: (context.stats.cards || 0) > 0 }
+      ];
+      return '<section class="learning-map-panel"><h3>Learning Flow</h3><div class="learning-flowchart">' +
+        flow.map((node) => '<div class="learning-flow-node ' + (node.active ? "active" : "") + '">' +
+          '<strong>' + escapeHtml(node.label) + '</strong>' +
+          '<span>' + escapeHtml(node.metric) + '</span>' +
+          '<span>' + escapeHtml(node.detail) + '</span>' +
+        '</div>').join("") +
+        '</div></section>';
+    }
+
+    function renderLearningSourceMap(state, context) {
+      const links = (context.sourceLinks || []).slice(-6).reverse();
+      const groups = (context.sourceGroups || []).slice(0, 6);
+      const events = (context.coach?.recentEvents || []).slice(0, 8);
+      return '<div class="learning-map-grid">' +
+        '<section class="learning-map-panel"><h3>Source-To-Plan Map</h3>' +
+          '<ul class="learning-routing-list">' + (links.length ? links.map((link) =>
+            '<li><strong>' + escapeHtml(link.title || "Source") + '</strong>' +
+            '<div class="muted">' + escapeHtml(link.group || "Ungrouped") + '</div>' +
+            '<div class="learning-chip-row">' +
+              '<span class="learning-chip">' + escapeHtml((link.linkedGoals || []).length + " goals") + '</span>' +
+              '<span class="learning-chip">' + escapeHtml((link.linkedPlans || []).length + " plans") + '</span>' +
+              '<span class="learning-chip">' + escapeHtml((link.cardsCreated || 0) + " cards") + '</span>' +
+            '</div></li>'
+          ).join("") : '<li>No processed sources have been routed yet.</li>') + '</ul></section>' +
+        '<section class="learning-map-panel"><h3>Groups And Notifications</h3>' +
+          '<div class="learning-chip-row">' + (groups.length ? groups.map((group) =>
+            '<span class="learning-chip">' + escapeHtml(group.group + " · " + group.count) + '</span>'
+          ).join("") : '<span class="learning-chip">No source groups yet</span>') + '</div>' +
+          '<h3>Event Feed</h3><ul class="learning-event-feed">' + (events.length ? events.map((event) =>
+            '<li><time>' + escapeHtml(shortEventTime(event.created)) + '</time><span>' + escapeHtml(eventLabel(event)) + '</span></li>'
+          ).join("") : '<li><time></time><span>No learning events recorded yet.</span></li>') + '</ul></section>' +
+      '</div>';
     }
 
     function renderLearningBoostGrid(state, context) {
@@ -4071,6 +5014,7 @@ function renderHtml() {
       const due = (context.stats.dueCards || []).slice(0, 3).map((card) => card.front || card.cloze || card.type || "Card");
       const plan = context.plans[context.plans.length - 1] || {};
       const goal = context.goals[context.goals.length - 1] || {};
+      const sourceLinkCount = (context.sourceLinks || []).length;
       const providerStatus = providerStatusCache?.status || "Provider not checked";
       const providerTips = (providerStatusCache?.fallbackSuggestions || providerStatusCache?.suggestions || []).slice(0, 3);
       const cards = [
@@ -4082,7 +5026,7 @@ function renderHtml() {
           resources ? "Review top ResourceInbox item" : "Add one source",
           "Ingest one ready source",
           "Defer low-priority sources"
-        ].slice(0, 3), context.resourceGroups.slice(0, 3).map((group) => (group.topic || "Unsorted") + ": " + (group.resources || []).length)),
+        ].slice(0, 3), context.resourceGroups.slice(0, 3).map((group) => (group.topic || "Unsorted") + ": " + (group.resources || []).length).concat(["Processed links: " + sourceLinkCount])),
         learningCard("Learning plans", "Plans protect working memory by staging the work.", [
           "Draft plans",
           "Stage approved?",
@@ -4090,7 +5034,8 @@ function renderHtml() {
         ], [
           "Latest plan: " + (plan.title || "none"),
           "Status: " + (plan.status || "n/a"),
-          "Stages: " + ((plan.stages || []).length || 0)
+          "Stages: " + ((plan.stages || []).length || 0),
+          "Source links: " + sourceLinkCount
         ], '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="approve-plan">Stage approved?</button><button class="secondary" type="button" data-learning-action="schedule-plan">Schedule this?</button></div>'),
         learningCard("Goals", "A goal gives resources a concrete learning outcome.", [
           goal.title ? "Review current goal" : "Draft one goal",
@@ -4207,8 +5152,13 @@ function renderHtml() {
         });
         const data = await response.json();
         if (data.error) throw new Error(data.error);
+        patchLearningCacheVault(data.vault || vault, {
+          userProfile: data.userProfile || {},
+          learningProfile: data.learningProfile || {}
+        });
+        clearLearningDirty(learningProfileForm);
+        renderLearningProfile();
         learningFeedback.textContent = "Saved";
-        await loadLearning();
         setTimeout(() => { learningFeedback.textContent = ""; }, 1400);
       } catch (error) {
         learningFeedback.textContent = error.message;
@@ -4272,6 +5222,11 @@ function renderHtml() {
     }
 
     async function requestBehaviorNotifications() {
+      if (window.webkit?.messageHandlers?.learningNotification) {
+        window.webkit.messageHandlers.learningNotification.postMessage({ action: "requestPermission" });
+        learningFeedback.textContent = "macOS notification permission requested";
+        return;
+      }
       if (!("Notification" in window)) {
         learningFeedback.textContent = "Notifications are not available in this view.";
         return;
@@ -4279,6 +5234,100 @@ function renderHtml() {
       const permission = await Notification.requestPermission();
       await updateBehaviorSettings({ notificationPermission: permission });
       learningFeedback.textContent = permission === "granted" ? "Alerts enabled" : "Alerts not enabled";
+    }
+
+    async function saveLearningAutomationSettings(event) {
+      event.preventDefault();
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      learningFeedback.textContent = "Saving Autopilot settings...";
+      try {
+        const data = await postLearningAction("/api/learning/automation-settings", {
+          vault,
+          settings: {
+            learningAutopilot: learningAutopilotToggle.checked,
+            autoProcessNewSources: autoProcessNewSourcesToggle.checked,
+            autoDraftPlans: autoDraftPlansToggle.checked,
+            autoSuggestPlanUpdates: autoSuggestPlanUpdatesToggle.checked,
+            nativeMacNotifications: nativeMacNotificationsToggle.checked,
+            requireApprovalForPlanActivation: true
+          }
+        });
+        patchLearningCacheVault(vault, { automation: data.automation || { settings: data.settings } });
+        clearLearningDirty(learningAutomationForm);
+        learningFeedback.textContent = "Autopilot settings saved";
+        renderLearningProfile();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function processPendingLearningNow() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      processPendingLearning.disabled = true;
+      learningFeedback.textContent = "Processing pending learning sources...";
+      try {
+        const data = await postLearningAction("/api/learning/process-pending", { vault, force: true, limit: 12 });
+        learningFeedback.textContent = data.detail || "Learning automation finished";
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      } finally {
+        processPendingLearning.disabled = false;
+      }
+    }
+
+    async function sendNativeNotificationTest() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      learningFeedback.textContent = "Sending test notification...";
+      try {
+        await postLearningAction("/api/native/notification-test", { vault });
+        if (window.webkit?.messageHandlers?.learningNotification) {
+          window.webkit.messageHandlers.learningNotification.postMessage({
+            action: "pollNow"
+          });
+          learningFeedback.textContent = "Test notification queued for macOS delivery";
+          setTimeout(loadLearning, 1400);
+          return;
+        }
+        learningFeedback.textContent = "Test notification queued";
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function markLearningNotification(vault, id, action) {
+      if (!vault || !id) return;
+      try {
+        await postLearningAction("/api/learning/notification-action", { vault, id, action });
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function saveBehaviorSettings(event) {
+      event.preventDefault();
+      const current = selectedLearningVault()?.behaviorCoach?.settings || {};
+      if (expandedMonitoringToggle.checked && current.expandedMonitoringEnabled !== true) {
+        if (!window.confirm("Enable expanded monitoring for additional local learning signals?")) return;
+      }
+      learningFeedback.textContent = "Saving behavior settings...";
+      try {
+        await updateBehaviorSettings({
+          captureEnabled: behaviorCaptureToggle.checked,
+          coachingEnabled: behaviorCoachingToggle.checked,
+          expandedMonitoringEnabled: expandedMonitoringToggle.checked,
+          detailedNotifications: detailedNotificationsToggle.checked
+        });
+        clearLearningDirty(behaviorSettingsForm);
+        learningFeedback.textContent = "Behavior settings saved";
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
     }
 
     async function updateBehaviorSettings(settings) {
@@ -4291,7 +5340,13 @@ function renderHtml() {
       });
       const data = await response.json();
       if (data.error) throw new Error(data.error);
-      await loadLearning();
+      patchLearningCacheVault(data.vault || vault, {
+        behaviorCoach: {
+          ...(selectedLearningVault()?.behaviorCoach || {}),
+          settings: data.settings || {}
+        }
+      });
+      renderLearningProfile();
       return data;
     }
 
@@ -4328,6 +5383,7 @@ function renderHtml() {
             vault,
             settings: {
               enabled: sourceCaptureEnabled.checked,
+              autoProcessCapturedResources: autoInsightsToggle.checked,
               fullLocalCaptureMode: fullLocalCaptureMode.checked,
               manualImport: manualImportToggle.checked,
               browserClipper: browserClipperToggle.checked,
@@ -4336,6 +5392,9 @@ function renderHtml() {
               screenshots: screenshotsToggle.checked,
               meetings: meetingsToggle.checked,
               voiceMemos: voiceMemosToggle.checked,
+              clipboard: clipboardToggle.checked,
+              visitedWebPages: visitedWebPagesToggle.checked,
+              frontmostAppMetadata: frontmostAppMetadataToggle.checked,
               watchFolders: listFromInput(watchFolders.value),
               capturePageContent: capturePageContent.value,
               cloudProcessingPolicy: cloudProcessingPolicy.value,
@@ -4345,8 +5404,15 @@ function renderHtml() {
         });
         const data = await response.json();
         if (data.error) throw new Error(data.error);
+        patchLearningCacheVault(data.vault || vault, {
+          sourceCapture: {
+            ...(selectedLearningVault()?.sourceCapture || {}),
+            settings: data.settings || {}
+          }
+        });
+        clearLearningDirty(sourceCaptureForm);
+        renderLearningProfile();
         learningFeedback.textContent = "Source capture settings saved";
-        await loadLearning();
       } catch (error) {
         learningFeedback.textContent = error.message;
       }
@@ -4360,6 +5426,9 @@ function renderHtml() {
       if (screenshotsToggle.checked && current.screenshots !== true) confirmations.push("Enable screenshot watch?");
       if (meetingsToggle.checked && current.meetings !== true) confirmations.push("Enable meeting import?");
       if (voiceMemosToggle.checked && current.voiceMemos !== true) confirmations.push("Enable voice memo import?");
+      if (clipboardToggle.checked && current.clipboard !== true) confirmations.push("Enable clipboard capture?");
+      if (visitedWebPagesToggle.checked && current.visitedWebPages !== true) confirmations.push("Enable visited web page capture?");
+      if (frontmostAppMetadataToggle.checked && current.frontmostAppMetadata !== true) confirmations.push("Enable frontmost app metadata capture?");
       if (cloudProcessingPolicy.value === "allow_non_sensitive" && current.cloudProcessingPolicy !== "allow_non_sensitive") {
         confirmations.push("Allow non-sensitive captured sources to use cloud processing when policy permits?");
       }
@@ -4395,6 +5464,7 @@ function renderHtml() {
               file: remoteUrl ? "" : value,
               topic: resourceTopic.value,
               sensitivity: resourceSensitivity.value,
+              processingStatus: "ready_for_ingest",
               userApproved: true,
               contentApproved: false
             }
@@ -4407,10 +5477,38 @@ function renderHtml() {
         resourceUrl.value = "";
         resourceTopic.value = "";
         resourceSensitivity.value = "";
+        clearLearningDirty(manualResourceForm);
         learningFeedback.textContent = "Resource added";
-        await loadLearning();
+        await loadLearning({ preserveDirty: true, excludeForms: [manualResourceForm] });
+        if (autoInsightsToggle.checked) await processCapturedResources({ manual: false });
       } catch (error) {
         learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function processCapturedResources({ manual = true } = {}) {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      if (manual && !window.confirm("Process captured ResourceInbox items into source pages, concepts, cards, and Learning Boost insights now?")) return;
+      processResources.disabled = true;
+      learningFeedback.textContent = "Processing captured sources into insights...";
+      try {
+        const data = await postLearningAction("/api/learning/process-resources", { vault, limit: 12 });
+        if (!data.processed) {
+          learningFeedback.textContent = "No captured sources were ready for insight processing";
+          await loadLearning({ preserveDirty: true });
+          return;
+        }
+        learningFeedback.textContent = "Processed " + data.processed + " source(s); updated " + data.updated + " captured resource(s)";
+        await loadLearning({ preserveDirty: true });
+        loadFiles();
+        loadTopics();
+        ensureSideTopicsLoaded();
+        loadStatus();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      } finally {
+        processResources.disabled = false;
       }
     }
 
@@ -4539,6 +5637,59 @@ function renderHtml() {
       }
     }
 
+    async function saveSelectedPlanRevision() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      const planId = learningPlanSelect.value || selectedLearningPlanId();
+      if (!vault || !planId) return;
+      let stages;
+      try {
+        stages = revisionPlanStages.value.trim() ? JSON.parse(revisionPlanStages.value) : [];
+      } catch {
+        learningFeedback.textContent = "Plan stages must be valid JSON.";
+        return;
+      }
+      learningFeedback.textContent = "Saving plan revision...";
+      try {
+        const data = await postLearningAction("/api/learning/plan-revise", {
+          vault,
+          planId,
+          patch: {
+            title: revisionPlanTitle.value.trim(),
+            status: revisionPlanStatus.value,
+            goalId: learningGoalSelect.value || selectedLearningPlan()?.goalId || "",
+            stages
+          }
+        });
+        learningFeedback.textContent = data.revised ? "Plan revision saved" : "Plan revision not saved";
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function saveSelectedGoalRevision() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      const goalId = learningGoalSelect.value || selectedLearningGoal()?.id || "";
+      if (!vault || !goalId) return;
+      learningFeedback.textContent = "Saving goal revision...";
+      try {
+        const data = await postLearningAction("/api/learning/goal-revise", {
+          vault,
+          goalId,
+          patch: {
+            title: revisionGoalTitle.value.trim(),
+            status: revisionGoalStatus.value,
+            deadline: revisionGoalDeadline.value,
+            successCriteria: revisionGoalSuccess.value.split(/\\r?\\n/).map((item) => item.trim()).filter(Boolean)
+          }
+        });
+        learningFeedback.textContent = data.revised ? "Goal revision saved" : "Goal revision not saved";
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
     function selectedLearningPlanId() {
       const planId = learningPlanId.value.trim();
       if (planId) return planId;
@@ -4650,16 +5801,52 @@ function renderHtml() {
     }
 
     function maybeNotifyBehaviorAlerts(alerts, settings) {
-      if (!("Notification" in window) || settings?.notificationPermission !== "granted" || Notification.permission !== "granted") return;
       for (const alert of (alerts || []).filter((item) => item.severity === "high").slice(0, 1)) {
         const key = "behavior-alert-" + alert.type;
         if (sessionStorage.getItem(key)) continue;
         sessionStorage.setItem(key, "1");
+        if (postNativeLearningNotification("Learning Boost", settings.detailedNotifications ? alert.message : "A learning fallback needs attention.")) continue;
+        if (!("Notification" in window) || settings?.notificationPermission !== "granted" || Notification.permission !== "granted") return;
         new Notification("Learning Boost", {
           body: settings.detailedNotifications ? alert.message : "A learning fallback needs attention.",
           silent: false
         });
       }
+    }
+
+    function maybeNotifyLearningEvents(events, settings) {
+      const event = (events || []).find((item) => item.type === "source_linked_to_learning" || item.type === "source_processed");
+      if (!event) return;
+      const key = "learning-event-" + (event.created || event.sourcePage || event.type);
+      if (sessionStorage.getItem(key)) return;
+      sessionStorage.setItem(key, "1");
+      if (postNativeLearningNotification("Learning Boost source processed", settings.detailedNotifications ? eventLabel(event) : "A source was processed and added to learning.")) return;
+      if (!("Notification" in window) || settings?.notificationPermission !== "granted" || Notification.permission !== "granted") return;
+      new Notification("Learning Boost source processed", {
+        body: settings.detailedNotifications ? eventLabel(event) : "A source was processed and added to learning.",
+        silent: false
+      });
+    }
+
+    function postNativeLearningNotification(title, body) {
+      const bridge = window.webkit?.messageHandlers?.learningNotification;
+      if (!bridge) return false;
+      bridge.postMessage({ action: "notify", title, body });
+      return true;
+    }
+
+    function shortEventTime(value) {
+      if (!value) return "";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value).slice(0, 16);
+      return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    }
+
+    function eventLabel(event) {
+      const type = String(event?.type || "learning_event").replace(/_/g, " ");
+      const source = event?.sourcePage || event?.sourcePath || event?.metadata?.group || "";
+      const plan = event?.planId || event?.metadata?.planId || "";
+      return [type, source, plan].filter(Boolean).join(" · ");
     }
 
     function listFromInput(value) {
@@ -6838,7 +8025,7 @@ function renderHtml() {
 </html>`;
 }
 
-function renderHelp(markdown = readHelpMarkdown(), options = {}) {
+function renderHelp(markdown = fallbackHelpMarkdown(), options = {}) {
   const title = options.title || "LLM Agent Learning Boost Help";
   const backHref = options.backHref || "/";
   const backLabel = options.backLabel || "Back to agent";
@@ -7003,6 +8190,34 @@ function readHelpMarkdown() {
     "",
     "Use the menu bar icon to open the config file, verify vault setup, and reinstall the app from the latest build."
   ].join("\\n");
+}
+
+async function readHelpMarkdownAsync() {
+  const candidates = [
+    path.join(agentRoot, "README.md"),
+    path.resolve("README.md"),
+    path.resolve("../README.md"),
+    path.join(agentRoot, "docs", "ENV_AND_GITIGNORE.md"),
+    path.resolve("docs/ENV_AND_GITIGNORE.md")
+  ];
+  for (const file of candidates) {
+    try {
+      return await fs.promises.readFile(file, "utf8");
+    } catch {
+      // Try the next bundled help source.
+    }
+  }
+  return fallbackHelpMarkdown();
+}
+
+function fallbackHelpMarkdown() {
+  return [
+    "# LLM Agent Learning Boost Help",
+    "",
+    "The app help file could not be found in this installation.",
+    "",
+    "Use the menu bar icon to open the config file, verify vault setup, and reinstall the app from the latest build."
+  ].join("\n");
 }
 
 function markdownToHtml(markdown) {

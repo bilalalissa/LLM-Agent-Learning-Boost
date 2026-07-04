@@ -14,6 +14,7 @@ const JSONL_FILES = [
   "resource-inbox.jsonl",
   "plans.jsonl",
   "goals.jsonl",
+  "source-links.jsonl",
   "plan-update-suggestions.jsonl",
   "external-write-log.jsonl"
 ];
@@ -25,6 +26,7 @@ const LEARNING_PAGES = [
   ["memory-map.md", memoryMapPage],
   ["goals.md", goalsPage],
   ["learning-plan.md", learningPlanPage],
+  ["source-map.md", sourceMapPage],
   ["plan-updates.md", planUpdatesPage],
   ["behavior-insights.md", behaviorInsightsPage],
   ["fallbacks.md", fallbacksPage],
@@ -174,6 +176,7 @@ function ensureJson(file, value, created, vaultPath) {
   let normalized = current;
   if (file.endsWith("user-profile.json")) normalized = normalizeUserProfile(current);
   else if (file.endsWith("profile.json")) normalized = normalizeLearningProfile(current);
+  else if (file.endsWith("source-capture-settings.json")) normalized = normalizeSourceCaptureSettingsForScaffold(current);
   writeJson(file, normalized);
   return normalized;
 }
@@ -236,12 +239,13 @@ function defaultBehaviorSettings() {
 
 function defaultSourceCaptureSettings() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     enabled: false,
     fullLocalCaptureMode: false,
     manualImport: true,
     watchFolders: [],
     browserClipper: true,
+    autoProcessCapturedResources: true,
     browserHistoryImport: false,
     openedDocuments: false,
     screenshots: false,
@@ -257,6 +261,17 @@ function defaultSourceCaptureSettings() {
     sensitiveSourceHandling: "local_only_redact_or_skip",
     localProcessingOnly: true,
     updated: new Date().toISOString()
+  };
+}
+
+function normalizeSourceCaptureSettingsForScaffold(input = {}) {
+  const schemaVersion = Number(input.schemaVersion || 0);
+  return {
+    ...defaultSourceCaptureSettings(),
+    ...input,
+    schemaVersion: 2,
+    autoProcessCapturedResources: schemaVersion < 2 ? true : input.autoProcessCapturedResources !== false,
+    updated: input.updated || new Date().toISOString()
   };
 }
 
@@ -276,15 +291,20 @@ function learningStats(paths) {
   const cards = readJsonl(path.join(paths.dir, "cards.jsonl"));
   const bits = readJsonl(path.join(paths.dir, "bits.jsonl"));
   const plans = readJsonl(path.join(paths.dir, "plans.jsonl"));
+  const sourceLinks = readJsonl(path.join(paths.dir, "source-links.jsonl"));
   const today = new Date().toISOString().slice(0, 10);
   const dueCards = cards.filter((card) => !card.due || card.due <= today).slice(0, 10);
   const recentCards = cards.slice(-10).reverse();
+  const recentBits = bits.slice(-12).reverse();
   return {
     bits: bits.length,
     cards: cards.length,
     plans: plans.length,
+    sourceLinks: sourceLinks.length,
+    recentSourceLinks: sourceLinks.slice(-10).reverse(),
     dueCards,
-    recentCards
+    recentCards,
+    recentBits
   };
 }
 
@@ -333,6 +353,10 @@ function goalsPage() {
 
 function learningPlanPage() {
   return `${frontmatter("learning-plan")}# Learning Plan\n\nPlans should be staged, confirmation-gated, and limited to a few immediate actions.\n`;
+}
+
+function sourceMapPage() {
+  return `${frontmatter("learning-source-map")}# Source Map\n\nProcessed sources will be linked here to related learning groups, goals, and plans.\n`;
 }
 
 function planUpdatesPage() {

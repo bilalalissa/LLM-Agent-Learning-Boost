@@ -1,10 +1,10 @@
 # Learning Plans and Goals
 
-Stage 7 turns gathered resources into proposed learning goals and staged plans.
+Stage 7 turns gathered learning context into proposed learning goals and staged plans.
 
 ## Files
 
-- `src/learning-planner.mjs`: goal and plan schema, ResourceInbox plan drafting, approval, activation, and plan pages.
+- `src/learning-planner.mjs`: goal and plan schema, aggregate learning-context plan drafting, approval, activation, and plan pages.
 - `src/plan-update-suggester.mjs`: update suggestions from new resources, weak reviews, deadline shifts, target-language changes, and calendar constraints.
 - `.llm-wiki/learning/goals.jsonl`: local goal records.
 - `.llm-wiki/learning/plans.jsonl`: local plan records.
@@ -15,7 +15,9 @@ Stage 7 turns gathered resources into proposed learning goals and staged plans.
 
 ## Plan Stages
 
-New plans use seven working-memory-friendly stages:
+New plans are drafted from ResourceInbox groups plus processed source links, learning bits, and active-recall cards. Per-source plan suggestions are treated as planning signals; they are not written directly as standalone active plans.
+
+Plans use seven working-memory-friendly stages:
 
 1. Resource triage and goal selection.
 2. First-pass understanding.

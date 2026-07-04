@@ -95,16 +95,25 @@ test("shared settings default reflects high-level plan progress fields without s
   assert.ok(Array.isArray(settings.lastKnownAgents));
 });
 
-test("raw candidate scan skips processed and asset folders before descent", () => {
+test("raw candidate scan only watches direct raw files plus inbox and input", () => {
   const { vault } = makeVaultRoot();
   fs.mkdirSync(path.join(vault, "raw", "inbox"), { recursive: true });
+  fs.mkdirSync(path.join(vault, "raw", "input"), { recursive: true });
   fs.mkdirSync(path.join(vault, "raw", "assets", "browser-clips", "package"), { recursive: true });
   fs.mkdirSync(path.join(vault, "raw", "processed"), { recursive: true });
+  fs.mkdirSync(path.join(vault, "raw", "archive"), { recursive: true });
+  fs.writeFileSync(path.join(vault, "raw", "loose.md"), "# Loose\n");
   fs.writeFileSync(path.join(vault, "raw", "inbox", "note.md"), "# Note\n");
+  fs.writeFileSync(path.join(vault, "raw", "input", "source.md"), "# Source\n");
   fs.writeFileSync(path.join(vault, "raw", "assets", "browser-clips", "package", "chunk.m4s"), "media");
   fs.writeFileSync(path.join(vault, "raw", "processed", "old.md"), "# Old\n");
+  fs.writeFileSync(path.join(vault, "raw", "archive", "archived.md"), "# Archived\n");
 
-  const rel = listRawCandidates(vault).map((file) => path.relative(vault, file));
+  const rel = listRawCandidates(vault).map((file) => path.relative(vault, file)).sort();
 
-  assert.deepEqual(rel, [path.join("raw", "inbox", "note.md")]);
+  assert.deepEqual(rel, [
+    path.join("raw", "inbox", "note.md"),
+    path.join("raw", "input", "source.md"),
+    path.join("raw", "loose.md")
+  ].sort());
 });

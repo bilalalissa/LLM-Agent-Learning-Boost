@@ -120,7 +120,14 @@ export function listRawCandidates(vaultPath) {
   const rawDir = path.join(vaultPath, "raw");
   if (!fs.existsSync(rawDir)) return [];
   const result = [];
-  walkRawCandidates(rawDir, rawDir, result);
+  for (const entry of fs.readdirSync(rawDir, { withFileTypes: true })) {
+    const file = path.join(rawDir, entry.name);
+    if (entry.isFile() && isIngestibleRawFile(file)) result.push(file);
+  }
+  for (const folder of ["inbox", "input"]) {
+    const dir = path.join(rawDir, folder);
+    if (isDirectory(dir)) walkRawCandidates(rawDir, dir, result);
+  }
   return result;
 }
 

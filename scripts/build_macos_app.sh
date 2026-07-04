@@ -37,6 +37,7 @@ SWIFTC_ARGS=(
   -framework AppKit
   -framework WebKit
   -framework ServiceManagement
+  -framework UserNotifications
 )
 if [ -n "$MACOS_ARCH" ]; then
   SWIFTC_ARGS=(-target "$MACOS_ARCH-apple-macosx13.0" "${SWIFTC_ARGS[@]}")

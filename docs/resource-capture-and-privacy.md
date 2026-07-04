@@ -24,6 +24,7 @@ Settings live at `.llm-wiki/learning/source-capture-settings.json`:
     "manualImport": true,
     "watchFolders": [],
     "browserClipper": true,
+    "autoProcessCapturedResources": true,
     "browserHistoryImport": false,
     "openedDocuments": false,
     "screenshots": false,
@@ -41,6 +42,8 @@ Settings live at `.llm-wiki/learning/source-capture-settings.json`:
   }
 }
 ```
+
+`autoProcessCapturedResources` is enabled by default for each vault. Captured resources are staged into `raw/input/`, and the app's provider-independent auto-ingest loop processes pending `raw/input/` and `raw/inbox/` files when a provider is available. You can still turn this off per vault from the Learning tab if you want manual review before processing.
 
 ## Sensitive and Critical Sources
 

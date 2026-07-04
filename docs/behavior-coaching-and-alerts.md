@@ -50,6 +50,8 @@ The Learning tab includes controls to:
 
 Notification alerts avoid sensitive source text unless detailed notifications are explicitly enabled.
 
+In the native macOS app, Learning Boost uses `UserNotifications`. A notification is marked delivered only after macOS accepts it. If permission is denied, not enabled, or the macOS add request fails, the in-app Notification Center keeps the alert visible and shows the native delivery blocker. Browser notifications are only a fallback outside the native wrapper.
+
 ## Alert Rules
 
 Each alert offers at most three actions. Example actions include:

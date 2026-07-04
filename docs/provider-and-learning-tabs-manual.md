@@ -6,7 +6,7 @@ This manual explains the two tabs that most affect daily use: Provider and Learn
 
 Use the Provider tab first. It tells you whether the app has a usable AI provider and whether that provider is local, LAN, or cloud fallback.
 
-If you are connecting to `bilalalissa/Ai-Local-Models-Router`, use [Connect Local AI Router](connect-local-ai-router.md) for the exact Provider tab fields.
+If you are connecting to `bilalalissa/Ai-Local-Models-Router`, use [Connect Local AI Router](connect-local-ai-router.md) for automatic localhost setup, ready/waiting status meanings, and manual Provider tab fields.
 
 Use the Learning tab second. It turns your vault sources into next actions, cards, plans, source capture settings, and exports.
 
@@ -156,9 +156,10 @@ MLX_LM_SERVER_BASE_URL=http://192.168.1.50:8080
 
 1. Vault selector: choose which vault's learning profile, plans, resources, and settings you are editing.
 2. Overview: read this first. It summarizes next actions, source backlog, plans, reviews, provider health, and profile status.
-3. Plan Actions: draft, approve, activate, and export learning plans. Approval does not automatically schedule anything.
-4. Learner Profile: personalizes explanations, target languages, session length, and coaching style.
-5. Source Capture and Add Resource: controls how new learning material enters the vault.
+3. Learning Autopilot: controls automatic source processing, plan drafting, plan-update suggestions, and native macOS notifications.
+4. Plan Actions: draft, approve, activate, and export learning plans. Approval does not automatically schedule anything.
+5. Learner Profile: personalizes explanations, target languages, session length, and coaching style.
+6. Source Capture and Add Resource: controls how new learning material enters the vault.
 
 ## Learning Tab Walkthrough
 
@@ -191,11 +192,27 @@ Cards you may see include:
 
 Use Overview as your "what now?" area. If it says provider health needs attention, go to Provider before drafting or exporting.
 
+### Learning Autopilot
+
+Learning Autopilot is the normal automatic flow. When it is on, Learning Boost watches `raw/`, `raw/inbox/`, `raw/input/`, and approved captured resources. If the selected provider can answer, the app processes pending sources into source pages, multiple learning bits, active-recall cards, source links, and dashboards. If the provider cannot answer, the file stays pending and the Notification Center records the blocker.
+
+Controls:
+
+- Learning Autopilot: pause or resume background learning work for the selected vault.
+- Auto-process new sources: process new raw files and staged ResourceInbox items when safe.
+- Auto-draft plans/goals: draft proposed plans from gathered bits, cards, source links, and resources.
+- Auto-suggest plan updates: record plan edits that may help, without applying them automatically.
+- Native macOS notifications: allow the wrapper to send privacy-safe system alerts.
+- Process pending now: run the same safe loop immediately.
+- Send test notification: queue one alert and ask macOS to deliver it.
+
+The in-app Notification Center remains the durable alert log. It shows native delivery state such as pending, delivered, blocked by permission, or failed after retry attempts.
+
 ### Plan Actions
 
-Plan Actions are for turning collected resources into staged work.
+Plan Actions are for turning gathered learning outputs into staged work.
 
-Draft plans creates proposed learning plans from ResourceInbox items.
+Draft plans creates proposed learning plans from ResourceInbox items plus processed learning bits, cards, and source links. Source-level suggestions guide the draft, but the plan is based on the gathered context, not one isolated source.
 
 Approve plan marks a plan as approved. Approval means "this plan is acceptable." It does not schedule Calendar or Reminders.
 

@@ -20,9 +20,10 @@ Every processed source asks the provider for a `learning_boost` object. The app 
 - source-page Learning Boost sections
 - `.llm-wiki/learning/bits.jsonl`
 - `.llm-wiki/learning/cards.jsonl`
-- `.llm-wiki/learning/plans.jsonl`
 - `.llm-wiki/learning/behavior-log.jsonl`
 - `.llm-wiki/learning/fallbacks.jsonl` when local extraction falls back
 - RemNote-ready `exports/remnote-import.md`, `exports/remnote-import.txt`, `exports/remnote-media-index.md`, and `exports/remnote-media/`
+
+Each processed source produces multiple bits and cards when provider output is sparse. Source-level plan suggestions are retained as learning signals, but real goals and plans are drafted from gathered ResourceInbox items plus processed bits, cards, and source links.
 
 Final RemNote formatting is implemented in Stage 4; see [RemNote Export](remnote-export.md).

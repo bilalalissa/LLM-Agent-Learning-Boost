@@ -9,12 +9,13 @@ export const RESOURCE_INBOX_FILE = "resource-inbox.jsonl";
 
 export function defaultSourceCaptureSettings() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     enabled: false,
     fullLocalCaptureMode: false,
     manualImport: true,
     watchFolders: [],
     browserClipper: true,
+    autoProcessCapturedResources: true,
     browserHistoryImport: false,
     openedDocuments: false,
     screenshots: false,
@@ -53,14 +54,20 @@ export function updateSourceCaptureSettings(vaultPath, input = {}) {
 
 export function normalizeSourceCaptureSettings(input = {}) {
   const full = input.fullLocalCaptureMode === true;
+  const schemaVersion = Number(input.schemaVersion || 0);
+  const autoProcessCapturedResources = schemaVersion < 2
+    ? true
+    : input.autoProcessCapturedResources !== false;
   return {
     ...defaultSourceCaptureSettings(),
     ...input,
+    schemaVersion: 2,
     enabled: input.enabled === true,
     fullLocalCaptureMode: full,
     manualImport: input.manualImport !== false,
     watchFolders: normalizeList(input.watchFolders),
     browserClipper: input.browserClipper !== false,
+    autoProcessCapturedResources,
     browserHistoryImport: full && input.browserHistoryImport === true,
     openedDocuments: full && input.openedDocuments === true,
     screenshots: input.screenshots === true,
@@ -190,6 +197,68 @@ export function deleteResource(vaultPath, id) {
   return { deleted: current.length - next.length, id };
 }
 
+export function stageResourcesForIngest(vaultPath, options = {}) {
+  const limit = Math.max(1, Number(options.limit || 12));
+  const current = resourceInbox(vaultPath);
+  const staged = [];
+  const now = new Date();
+  const next = current.map((item) => {
+    if (staged.length >= limit || !resourceCanBeStaged(item)) return item;
+    const existingRawInput = String(item.rawInput || "");
+    if (existingRawInput && fs.existsSync(path.join(vaultPath, existingRawInput))) {
+      staged.push({ id: item.id, title: item.title, file: existingRawInput, reused: true });
+      return {
+        ...item,
+        processingStatus: "ready_for_ingest",
+        recommendedNextAction: "Processing is queued. Run captured-source processing to create insights."
+      };
+    }
+    const file = uniqueResourceInputRel(vaultPath, item, now);
+    fs.mkdirSync(path.dirname(path.join(vaultPath, file)), { recursive: true });
+    fs.writeFileSync(path.join(vaultPath, file), renderResourceInputMarkdown(item));
+    staged.push({ id: item.id, title: item.title, file, reused: false });
+    return {
+      ...item,
+      rawInput: file,
+      processingStatus: "ready_for_ingest",
+      recommendedNextAction: "Processing is queued. Run captured-source processing to create insights."
+    };
+  });
+  if (staged.length) {
+    writeJsonl(resourceInboxPath(vaultPath), next);
+    writeResourcesPage(vaultPath, next);
+  }
+  return { staged, resources: next };
+}
+
+export function markResourceIngestResults(vaultPath, ingestResults = []) {
+  const byRawInput = new Map();
+  for (const result of ingestResults || []) {
+    if (result?.source) byRawInput.set(String(result.source), result);
+  }
+  if (!byRawInput.size) return { updated: 0, resources: resourceInbox(vaultPath) };
+  let updated = 0;
+  const next = resourceInbox(vaultPath).map((item) => {
+    const result = byRawInput.get(String(item.rawInput || ""));
+    if (!result) return item;
+    updated += 1;
+    return {
+      ...item,
+      processingStatus: "ingested",
+      sourcePage: result.sourcePage || item.sourcePage || "",
+      processed: result.processed || item.processed || "",
+      ingestedAt: new Date().toISOString(),
+      learning: result.learning || item.learning || null,
+      recommendedNextAction: result.sourcePage
+        ? "Open the generated source page and review the Learning Boost insights."
+        : "Review the processed source output."
+    };
+  });
+  writeJsonl(resourceInboxPath(vaultPath), next);
+  writeResourcesPage(vaultPath, next);
+  return { updated, resources: next };
+}
+
 export function exportResources(vaultPath) {
   const paths = learningPaths(vaultPath);
   const file = path.join(paths.exportsDir, "resources-export.json");
@@ -249,6 +318,61 @@ function normalizeResource(input, { sourceType, now, vaultPath, settings }) {
   resource.cloudProcessing = cloudProcessingDecision(resource, settings);
   resource.localOnly = !resource.cloudProcessing.allowed;
   return resource;
+}
+
+function resourceCanBeStaged(item = {}) {
+  if (["ingested", "deferred", "deleted"].includes(item.processingStatus)) return false;
+  if (item.sourceType === "browser_clip") return false;
+  return Boolean(item.title || item.url || item.file || item.description);
+}
+
+function uniqueResourceInputRel(vaultPath, item, now) {
+  const stamp = now.toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const base = `${stamp}--resource--${slugify(item.title || item.url || item.file || "captured-source")}`;
+  let rel = `raw/input/${base}.md`;
+  let index = 2;
+  while (fs.existsSync(path.join(vaultPath, rel))) {
+    rel = `raw/input/${base}-${index}.md`;
+    index += 1;
+  }
+  return rel;
+}
+
+function renderResourceInputMarkdown(item = {}) {
+  const lines = [
+    "---",
+    "type: captured-resource",
+    `title: ${yamlString(item.title || "Captured resource")}`,
+    `source_type: ${yamlString(item.sourceType || "manual_import")}`,
+    `resource_id: ${yamlString(item.id || "")}`,
+    `captured_at: ${yamlString(item.capturedAt || "")}`,
+    `topic: ${yamlString(item.topic || "")}`,
+    `sensitivity: ${yamlString(item.sensitivity || "unknown")}`,
+    `source_url: ${yamlString(item.url || "")}`,
+    `source_file: ${yamlString(item.file || "")}`,
+    "---",
+    "",
+    `# ${item.title || "Captured resource"}`,
+    "",
+    item.url ? `Source URL: ${item.url}` : "",
+    item.file ? `Source file: ${item.file}` : "",
+    item.topic ? `Topic: ${item.topic}` : "",
+    "",
+    "## Capture Notes",
+    "",
+    item.description || "This ResourceInbox item was staged for Learning Boost processing. Review the generated source page and add more source text if the resulting insights need more evidence.",
+    "",
+    "## Processing Guidance",
+    "",
+    "- Treat this as captured source material.",
+    "- Keep generated insights grounded in the available title, URL, file reference, description, and later source review.",
+    "- If the source content is not available in this staged note, say that the generated insight is based on metadata only."
+  ];
+  return lines.filter((line, index) => line || lines[index - 1] === "").join("\n") + "\n";
+}
+
+function yamlString(value) {
+  return JSON.stringify(String(value || ""));
 }
 
 function preserveLocalFile(vaultPath, file, sourceType, input) {

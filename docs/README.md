@@ -3,8 +3,9 @@
 This index splits the macOS/local-first Learning Boost workflow by topic.
 
 - [Provider and Learning Tabs Manual](provider-and-learning-tabs-manual.md): User-centered walkthrough for the Provider and Learning tabs, with annotated tab maps, examples, safe defaults, and troubleshooting.
+- [Learning Flow and Notifications](learning-flow-and-notifications.md): Detailed user guide for Learning Autopilot, source processing, cards/bits, aggregate plans/goals, controls, safety gates, and macOS notification delivery.
 - [Local AI Providers](local-ai-providers.md): Configure `local_auto`, Ollama, MLX-LM Server, MLX-LM CLI, LAN model endpoints, provider health checks, and confirmation-gated cloud fallback.
-- [Connect Local AI Router](connect-local-ai-router.md): Set Provider tab fields for `bilalalissa/Ai-Local-Models-Router`, direct local model providers, and the router broker endpoint.
+- [Connect Local AI Router](connect-local-ai-router.md): Use the same-Mac Local AI Router localhost API, understand ready versus waiting Provider states, and configure direct local provider fallbacks.
 - [User Profile and Onboarding](user-profile-and-onboarding.md): Understand the local profile/account files, onboarding interview fields, first and target language settings, demographic privacy, and personalization controls.
 - [Working-Memory Method](working-memory-method.md): Review the learning design for chunking, progressive disclosure, active recall, overload detection, and small visible next actions.
 - [Source Ingest](source-ingest.md): See how text, PDFs, documents, images, audio, video, screenshots, transcripts, and structured files become source pages and learning outputs.

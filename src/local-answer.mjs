@@ -35,6 +35,39 @@ export function answerLocally(question, config) {
   return lines.join("\n");
 }
 
+export async function answerLocallyAsync(question, config) {
+  const terms = tokenize(question);
+  if (!terms.length) {
+    return "Ask a question or enter a few topic words. Local mode searches only the stored wiki pages and does not call an AI provider.";
+  }
+
+  const matches = await findMatchesAsync(terms, config);
+  if (!matches.length) {
+    return [
+      "No strong local match found in the stored wiki pages.",
+      "",
+      "Try using a topic name from the right-side list, or ingest more sources into the relevant vault."
+    ].join("\n");
+  }
+
+  const top = matches.slice(0, 6);
+  const lines = [
+    `Local answer from ${top.length} stored wiki page${top.length === 1 ? "" : "s"}:`,
+    ""
+  ];
+
+  for (const match of top) {
+    lines.push(`## ${match.title}`);
+    lines.push(`${match.vault} / ${match.relativePath}`);
+    lines.push("");
+    lines.push(match.content || "No readable page content found.");
+    lines.push("");
+  }
+
+  lines.push("This answer was generated locally from stored wiki text only. No AI provider or internet connection was used.");
+  return lines.join("\n");
+}
+
 function findMatches(terms, config) {
   const matches = [];
   for (const vaultPath of listVaults(config.vaultsRoot)) {
@@ -54,6 +87,65 @@ function findMatches(terms, config) {
     }
   }
   return matches.sort((a, b) => b.score - a.score);
+}
+
+async function findMatchesAsync(terms, config) {
+  const matches = [];
+  for (const vaultPath of listVaults(config.vaultsRoot)) {
+    for (const file of await listWikiFilesAsync(vaultPath)) {
+      const relativePath = path.relative(vaultPath, file);
+      if (!relativePath.startsWith(`wiki${path.sep}`)) continue;
+      const fullText = stripUserNotes(await readFileAsync(file));
+      const score = scoreText(`${relativePath}\n${fullText}`, terms);
+      if (score <= 0) continue;
+      matches.push({
+        vault: vaultName(vaultPath),
+        relativePath,
+        title: extractTitle(fullText, relativePath),
+        score,
+        content: localPageContent(fullText)
+      });
+    }
+  }
+  return matches.sort((a, b) => b.score - a.score);
+}
+
+async function listWikiFilesAsync(vaultPath) {
+  const wikiDir = path.join(vaultPath, "wiki");
+  const result = [];
+  await walkAsync(wikiDir, result);
+  for (const name of ["index.md", "log.md", "Welcome.md"]) {
+    const file = path.join(vaultPath, name);
+    try {
+      const stat = await fs.promises.stat(file);
+      if (stat.isFile()) result.push(file);
+    } catch {
+      // Optional root files may not exist.
+    }
+  }
+  return result.filter((file) => file.endsWith(".md"));
+}
+
+async function walkAsync(dir, result) {
+  let entries = [];
+  try {
+    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) await walkAsync(file, result);
+    else result.push(file);
+  }
+}
+
+async function readFileAsync(file) {
+  try {
+    return await fs.promises.readFile(file, "utf8");
+  } catch {
+    return "";
+  }
 }
 
 function scoreText(text, terms) {

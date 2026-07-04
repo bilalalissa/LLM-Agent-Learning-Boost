@@ -27,8 +27,9 @@ npm run learning:export-remnote
 
 - [Docs Index](docs/README.md): map of all topic docs.
 - [Provider and Learning Tabs Manual](docs/provider-and-learning-tabs-manual.md): user-centered walkthrough with annotated tab maps, safe defaults, and examples.
+- [Learning Flow and Notifications](docs/learning-flow-and-notifications.md): detailed guide to Autopilot, source processing, bits/cards, aggregate plans/goals, controls, safety gates, and macOS notifications.
 - [Local AI Providers](docs/local-ai-providers.md): Ollama, MLX-LM, LAN endpoints, and cloud fallback confirmation.
-- [Connect Local AI Router](docs/connect-local-ai-router.md): Provider tab settings for `bilalalissa/Ai-Local-Models-Router`, direct local providers, and router broker mode.
+- [Connect Local AI Router](docs/connect-local-ai-router.md): Automatic same-Mac Local AI Router setup through the localhost integration API, plus direct local provider fallback settings.
 - [User Profile and Onboarding](docs/user-profile-and-onboarding.md): local profile/account, interview questions, demographics, and privacy.
 - [Working-Memory Method](docs/working-memory-method.md): chunking, progressive disclosure, active recall, and overload detection.
 - [Source Ingest](docs/source-ingest.md): text, PDF, documents, images, audio, video, screenshots, and transcripts.

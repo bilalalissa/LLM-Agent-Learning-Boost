@@ -45,6 +45,49 @@ export function topicContent(config, input) {
   return lines.join("\n");
 }
 
+export async function topicContentAsync(config, input) {
+  const vaultPath = resolveVault(config, input.vault);
+  const topicRel = normalizeWikiRel(input.path);
+  const topicTitle = String(input.title || titleFromRel(topicRel));
+  const topicText = await readPageAsync(vaultPath, topicRel);
+  if (!topicText) throw new Error(`Topic page not found: ${topicRel}`);
+
+  const linked = parseWikiLinks(topicText);
+  const linkedSources = linked.filter((rel) => rel.startsWith("wiki/sources/"));
+  const inferredSources = linkedSources.length ? [] : await findSourcePagesMentioningAsync(vaultPath, topicRel, topicTitle);
+  const ordered = topicRel.startsWith("wiki/sources/")
+    ? unique([topicRel, ...linked])
+    : unique([
+      ...linkedSources,
+      ...inferredSources,
+      topicRel,
+      ...linked.filter((rel) => !rel.startsWith("wiki/sources/") && rel !== topicRel)
+    ]);
+
+  const lines = [
+    `# ${topicTitle}`,
+    "",
+    "The selected page is shown first when it is a source. Linked wiki pages follow in link order.",
+    ""
+  ];
+
+  for (const rel of ordered) {
+    const text = await readPageAsync(vaultPath, rel);
+    if (!text) continue;
+    lines.push(`## ${rel.startsWith("wiki/sources/") ? "Source" : "Related"}: ${titleFromMarkdown(text, rel)}`);
+    lines.push(`${vaultName(vaultPath)} / ${rel}`);
+    lines.push("");
+    lines.push(cleanForDisplay(text));
+    lines.push("");
+  }
+
+  if (ordered.length === 0) {
+    lines.push("No related wiki pages were found.");
+  }
+
+  return lines.join("\n");
+}
+
 function resolveVault(config, name) {
   const vaultPath = listVaults(config.vaultsRoot).find((item) => vaultName(item) === name);
   if (!vaultPath) throw new Error(`Unknown vault: ${name}`);
@@ -60,6 +103,14 @@ function normalizeWikiRel(value) {
 
 function readPage(vaultPath, rel) {
   return readIfExists(path.join(vaultPath, rel));
+}
+
+async function readPageAsync(vaultPath, rel) {
+  try {
+    return await fs.promises.readFile(path.join(vaultPath, rel), "utf8");
+  } catch {
+    return "";
+  }
 }
 
 function parseWikiLinks(markdown) {
@@ -90,6 +141,38 @@ function findSourcePagesMentioning(vaultPath, topicRel, topicTitle) {
     .map((file) => path.relative(vaultPath, file).replace(/\\/g, "/"));
 }
 
+async function findSourcePagesMentioningAsync(vaultPath, topicRel, topicTitle) {
+  const sourceDir = path.join(vaultPath, "wiki", "sources");
+  try {
+    const stat = await fs.promises.stat(sourceDir);
+    if (!stat.isDirectory()) return [];
+  } catch {
+    return [];
+  }
+  const needles = [
+    topicRel.replace(/\.md$/, ""),
+    topicTitle.toLowerCase()
+  ].filter(Boolean);
+  const files = [];
+  await walkAsync(sourceDir, files);
+  const matches = [];
+  for (const file of files.filter((item) => item.endsWith(".md"))) {
+    const lower = (await readFileAsync(file)).toLowerCase();
+    if (needles.some((needle) => lower.includes(needle.toLowerCase()))) {
+      matches.push(path.relative(vaultPath, file).replace(/\\/g, "/"));
+    }
+  }
+  return matches;
+}
+
+async function readFileAsync(file) {
+  try {
+    return await fs.promises.readFile(file, "utf8");
+  } catch {
+    return "";
+  }
+}
+
 function cleanForDisplay(markdown) {
   return markdown
     .replace(/^---[\s\S]*?---\s*/m, "")
@@ -118,6 +201,20 @@ function walk(dir, result) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const file = path.join(dir, entry.name);
     if (entry.isDirectory()) walk(file, result);
+    else result.push(file);
+  }
+}
+
+async function walkAsync(dir, result) {
+  let entries = [];
+  try {
+    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) await walkAsync(file, result);
     else result.push(file);
   }
 }

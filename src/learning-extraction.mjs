@@ -2,9 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { readBehaviorSettings, trackBehaviorEvent } from "./behavior-tracker.mjs";
 import { normalizeLearningBit, normalizeLearningCard, normalizeLearningProfile } from "./learning-model.mjs";
+import { linkProcessedSourceToLearning } from "./learning-planner.mjs";
 import { ensureLearningScaffold, learningPaths } from "./learning-store.mjs";
 import { exportRemnoteBundle } from "./remnote-export.mjs";
-import { slugify, today, vaultName } from "./vaults.mjs";
+import { slugify, vaultName } from "./vaults.mjs";
 
 export const LEARNING_BOOST_SECTIONS = [
   "Working-Memory Friendly Gist",
@@ -18,6 +19,9 @@ export const LEARNING_BOOST_SECTIONS = [
   "Learning Plan Suggestions",
   "Evidence Map"
 ];
+
+const MIN_LEARNING_BITS_PER_SOURCE = 3;
+const MIN_LEARNING_CARDS_PER_SOURCE = 4;
 
 export function learningBoostJsonShape() {
   return `{
@@ -65,7 +69,8 @@ export function normalizeLearningBoost(input = {}, context = {}) {
   const raw = input.learning_boost || input.learningBoost || input;
   const evidence = defaultEvidence(context);
   const targetLanguages = arrayOr(raw.target_languages || raw.targetLanguages, context.targetLanguages || ["AUTO"]);
-  const learningBits = arrayOr(raw.learning_bits || raw.learningBits, []).map((bit, index) => normalizeLearningBit({
+  const learningProfile = normalizeLearningProfile(context.learningProfile || {});
+  let learningBits = arrayOr(raw.learning_bits || raw.learningBits, []).map((bit, index) => normalizeLearningBit({
     ...bit,
     id: bit.id || stableId("bit", context.sourceRel, bit.title || bit.body || index),
     sourceVault: context.vault || bit.sourceVault || "",
@@ -76,7 +81,8 @@ export function normalizeLearningBoost(input = {}, context = {}) {
     mediaRefs: arrayOr(bit.mediaRefs || bit.media_refs, context.mediaRefs || []),
     evidence: arrayOr(bit.evidence, evidence)
   }));
-  const generalCards = arrayOr(raw.general_cards || raw.generalCards, []).map((card, index) => normalizeLearningCard({
+  learningBits = ensureLearningBitsDensity(learningBits, raw, context, evidence);
+  let generalCards = arrayOr(raw.general_cards || raw.generalCards, []).map((card, index) => normalizeLearningCard({
     ...card,
     id: card.id || stableId("card", context.sourceRel, card.front || card.cloze || index),
     sourceVault: context.vault || card.sourceVault || "",
@@ -87,7 +93,7 @@ export function normalizeLearningBoost(input = {}, context = {}) {
     mediaRefs: arrayOr(card.mediaRefs || card.media_refs, context.mediaRefs || []),
     evidence: arrayOr(card.evidence, evidence)
   }));
-  const targetLanguageCards = arrayOr(raw.target_language_cards || raw.targetLanguageCards, []).map((card, index) => normalizeLearningCard({
+  let targetLanguageCards = arrayOr(raw.target_language_cards || raw.targetLanguageCards, []).map((card, index) => normalizeLearningCard({
     ...card,
     id: card.id || stableId("lang-card", context.sourceRel, card.front || index),
     sourceVault: context.vault || card.sourceVault || "",
@@ -98,8 +104,8 @@ export function normalizeLearningBoost(input = {}, context = {}) {
     mediaRefs: arrayOr(card.mediaRefs || card.media_refs, context.mediaRefs || []),
     evidence: arrayOr(card.evidence, evidence)
   }));
+  ({ generalCards, targetLanguageCards } = ensureLearningCardsDensity({ generalCards, targetLanguageCards, learningBits, raw, context, evidence, targetLanguages }));
   const cards = [...generalCards, ...targetLanguageCards];
-  const learningProfile = normalizeLearningProfile(context.learningProfile || {});
   return {
     source_language: stringOr(raw.source_language || raw.sourceLanguage, context.language || "unknown"),
     target_languages: targetLanguages,
@@ -235,21 +241,9 @@ ${evidenceMap(data)}
 export function appendLearningOutputs(vaultPath, { sourceRel, sourceTitle, processedRel, boost, sourceKind = "source", processingNotes = [] }, config = {}) {
   ensureLearningScaffold(vaultPath, config);
   const paths = learningPaths(vaultPath);
-  const date = today();
   const normalized = normalizeLearningBoost(boost, { vault: vaultName(vaultPath), sourceRel, sourceTitle });
   for (const bit of normalized.learning_bits) appendJsonl(path.join(paths.dir, "bits.jsonl"), bit);
   for (const card of normalized.cards) appendJsonl(path.join(paths.dir, "cards.jsonl"), card);
-  for (const plan of normalized.learning_plan_suggestions) {
-    appendJsonl(path.join(paths.dir, "plans.jsonl"), {
-      id: stableId("plan", sourceRel, plan.stage || plan.goal),
-      sourceVault: vaultName(vaultPath),
-      sourcePage: sourceRel,
-      sourcePath: processedRel,
-      status: "suggested",
-      created: date,
-      ...plan
-    });
-  }
   trackBehaviorEvent(vaultPath, {
     type: "source_processed",
     sourcePage: sourceRel,
@@ -276,13 +270,22 @@ export function appendLearningOutputs(vaultPath, { sourceRel, sourceTitle, proce
   }
   for (const plan of normalized.learning_plan_suggestions) {
     trackBehaviorEvent(vaultPath, {
-      type: "learning_plan_proposed",
+      type: "source_learning_suggestion_created",
       sourcePage: sourceRel,
       sourcePath: processedRel,
       planId: stableId("plan", sourceRel, plan.stage || plan.goal),
       count: 1
     });
   }
+  const sourceLink = linkProcessedSourceToLearning(vaultPath, {
+    sourceRel,
+    sourceTitle,
+    processedRel,
+    boost: normalized,
+    sourceKind,
+    cardsCreated: normalized.cards.length,
+    bitsCreated: normalized.learning_bits.length
+  });
   const fallbackNotes = processingNotes.filter((note) => /fallback|unsupported|not available|not inspected|failed/i.test(note));
   const behaviorSettings = readBehaviorSettings(vaultPath);
   for (const note of behaviorSettings.captureEnabled && !behaviorSettings.paused ? fallbackNotes : []) {
@@ -301,9 +304,173 @@ export function appendLearningOutputs(vaultPath, { sourceRel, sourceTitle, proce
   return {
     bitsCreated: normalized.learning_bits.length,
     cardsCreated: normalized.cards.length,
-    plansCreated: normalized.learning_plan_suggestions.length,
+    plansCreated: 0,
+    sourceLink,
     fallbackEvents: fallbackNotes.length
   };
+}
+
+function ensureLearningBitsDensity(bits, raw, context, evidence) {
+  const result = [...bits];
+  const candidates = [
+    ...arrayOr(raw.detail_layers || raw.detailLayers, []).map((item) => ({
+      type: "concept",
+      level: item.level || "core",
+      title: item.title || "Learning point",
+      body: item.body || "",
+      evidence: arrayOr(item.evidence, evidence)
+    })),
+    ...normalizeDetails(raw.details_to_keep || raw.detailsToKeep, evidence).map((item) => ({
+      type: item.kind || "detail",
+      level: "detail",
+      title: item.text || item.kind || "Detail to keep",
+      body: item.why_it_matters || item.text || "",
+      evidence: item.evidence
+    })),
+    ...normalizeRelationships(raw.relationships, evidence).map((item) => ({
+      type: "relationship",
+      level: "core",
+      title: [item.from, item.to].filter(Boolean).join(" -> ") || "Concept relationship",
+      body: item.relationship || "",
+      evidence: item.evidence
+    })),
+    ...normalizeOpenQuestions(raw.open_questions || raw.openQuestions).map((item) => ({
+      type: "question",
+      level: "detail",
+      title: item.question || "Open learning question",
+      body: item.current_answer || item.needed_resource || "Track this question during review.",
+      evidence
+    })),
+    {
+      type: "summary",
+      level: "core",
+      title: context.sourceTitle || "Source gist",
+      body: raw.gist || raw.core_summary || raw.coreSummary || context.summary || "",
+      evidence
+    }
+  ];
+  for (const candidate of candidates) {
+    if (result.length >= MIN_LEARNING_BITS_PER_SOURCE) break;
+    if (!candidate.title && !candidate.body) continue;
+    const title = String(candidate.title || candidate.type || "Learning bit").trim();
+    if (result.some((bit) => sameText(bit.title, title))) continue;
+    result.push(normalizeLearningBit({
+      ...candidate,
+      id: stableId("bit", context.sourceRel, `${title}-${result.length}`),
+      sourceVault: context.vault || "",
+      sourcePage: context.sourceRel || "",
+      sourceLocation: evidence[0] || "",
+      sourceLanguage: raw.source_language || raw.sourceLanguage || context.language || "unknown",
+      targetLanguage: "general",
+      mediaRefs: arrayOr(context.mediaRefs, []),
+      cognitiveLoad: candidate.cognitiveLoad || 1
+    }));
+  }
+  while (result.length < MIN_LEARNING_BITS_PER_SOURCE) {
+    const index = result.length + 1;
+    result.push(normalizeLearningBit({
+      id: stableId("bit", context.sourceRel, `review-anchor-${index}`),
+      type: "review_anchor",
+      level: index === 1 ? "core" : "detail",
+      title: index === 1 ? (context.sourceTitle || "Source anchor") : `Review anchor ${index}`,
+      body: raw.core_summary || raw.gist || context.summary || "Use the source evidence to decide what should be remembered.",
+      sourceVault: context.vault || "",
+      sourcePage: context.sourceRel || "",
+      sourceLocation: evidence[0] || "",
+      sourceLanguage: raw.source_language || raw.sourceLanguage || context.language || "unknown",
+      targetLanguage: "general",
+      evidence
+    }));
+  }
+  return result;
+}
+
+function ensureLearningCardsDensity({ generalCards, targetLanguageCards, learningBits, raw, context, evidence, targetLanguages }) {
+  const general = [...generalCards];
+  const language = [...targetLanguageCards];
+  const allCards = () => [...general, ...language];
+  for (const bit of learningBits) {
+    if (allCards().length >= MIN_LEARNING_CARDS_PER_SOURCE) break;
+    const front = `What should you remember about ${bit.title || bit.type}?`;
+    if (allCards().some((card) => sameText(card.front, front))) continue;
+    general.push(normalizeLearningCard({
+      id: stableId("card", context.sourceRel, `${front}-${general.length}`),
+      type: "qa",
+      front,
+      back: bit.body || raw.core_summary || raw.gist || "Review the source evidence before answering.",
+      hint: bit.level || "",
+      sourceVault: context.vault || "",
+      sourcePage: context.sourceRel || "",
+      sourceLocation: bit.sourceLocation || evidence[0] || "",
+      sourceLanguage: bit.sourceLanguage || raw.source_language || raw.sourceLanguage || context.language || "unknown",
+      targetLanguage: bit.targetLanguage || "general",
+      mediaRefs: bit.mediaRefs || [],
+      evidence: bit.evidence?.length ? bit.evidence : evidence,
+      cognitiveLoad: bit.cognitiveLoad || 1
+    }));
+  }
+  const misconceptions = normalizeMisconceptions(raw.misconceptions_and_confusions || raw.misconceptionsAndConfusions);
+  for (const item of misconceptions) {
+    if (allCards().length >= MIN_LEARNING_CARDS_PER_SOURCE) break;
+    general.push(normalizeLearningCard({
+      id: stableId("card", context.sourceRel, `misconception-${item.prompt}-${general.length}`),
+      type: "qa",
+      front: item.prompt || `How are ${item.item_a} and ${item.item_b} different?`,
+      back: item.answer || "Compare the source evidence before answering.",
+      sourceVault: context.vault || "",
+      sourcePage: context.sourceRel || "",
+      sourceLocation: evidence[0] || "",
+      sourceLanguage: raw.source_language || raw.sourceLanguage || context.language || "unknown",
+      evidence
+    }));
+  }
+  const openQuestions = normalizeOpenQuestions(raw.open_questions || raw.openQuestions);
+  for (const item of openQuestions) {
+    if (allCards().length >= MIN_LEARNING_CARDS_PER_SOURCE) break;
+    general.push(normalizeLearningCard({
+      id: stableId("card", context.sourceRel, `open-question-${item.question}-${general.length}`),
+      type: "qa",
+      front: item.question || "What remains uncertain?",
+      back: item.current_answer || item.needed_resource || "Not answered yet. Keep this as a follow-up question.",
+      sourceVault: context.vault || "",
+      sourcePage: context.sourceRel || "",
+      sourceLocation: evidence[0] || "",
+      sourceLanguage: raw.source_language || raw.sourceLanguage || context.language || "unknown",
+      evidence
+    }));
+  }
+  const firstTargetLanguage = targetLanguages.find((item) => item && item !== "AUTO" && item !== "general");
+  if (firstTargetLanguage && allCards().length < MIN_LEARNING_CARDS_PER_SOURCE) {
+    language.push(normalizeLearningCard({
+      id: stableId("lang-card", context.sourceRel, `explain-${firstTargetLanguage}`),
+      type: "writing_prompt",
+      front: `Explain the source gist in ${firstTargetLanguage}.`,
+      back: raw.gist || raw.core_summary || "Use the source gist and learning bits.",
+      sourceVault: context.vault || "",
+      sourcePage: context.sourceRel || "",
+      sourceLocation: evidence[0] || "",
+      sourceLanguage: raw.source_language || raw.sourceLanguage || context.language || "unknown",
+      targetLanguage: firstTargetLanguage,
+      evidence
+    }));
+  }
+  while (allCards().length < MIN_LEARNING_CARDS_PER_SOURCE) {
+    const index = allCards().length + 1;
+    const bit = learningBits[(index - 1) % Math.max(learningBits.length, 1)] || {};
+    general.push(normalizeLearningCard({
+      id: stableId("card", context.sourceRel, `review-card-${index}`),
+      type: index % 2 === 0 ? "cloze" : "qa",
+      front: index % 2 === 0 ? "" : `What is one useful takeaway from ${context.sourceTitle || "this source"}?`,
+      cloze: index % 2 === 0 ? `The useful takeaway is {{${bit.title || context.sourceTitle || "the source idea"}}}.` : "",
+      back: bit.body || raw.core_summary || raw.gist || "Answer using the source evidence.",
+      sourceVault: context.vault || "",
+      sourcePage: context.sourceRel || "",
+      sourceLocation: evidence[0] || "",
+      sourceLanguage: raw.source_language || raw.sourceLanguage || context.language || "unknown",
+      evidence
+    }));
+  }
+  return { generalCards: general, targetLanguageCards: language };
 }
 
 function firstConcept(card) {
@@ -438,4 +605,16 @@ function arrayOr(value, fallback = []) {
 function stringOr(value, fallback) {
   const text = String(value ?? "").trim();
   return text || fallback;
+}
+
+function sameText(a, b) {
+  return String(a || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim() === String(b || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
 }

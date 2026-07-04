@@ -1,6 +1,13 @@
 import { getConfig } from "./config.mjs";
 import { listArchiveHistory, listFileHistory } from "./history.mjs";
-import { listNotes } from "./notes.mjs";
+import { coachingSummary, writeBehaviorPages } from "./learning-coach.mjs";
+import { learningAutomationStatus, readLearningNotifications } from "./learning-automation.mjs";
+import { learningPlanningState } from "./learning-planner.mjs";
+import { readLearningState } from "./learning-store.mjs";
+import { listHighlights, listNotes } from "./notes.mjs";
+import { readPlanUpdateSuggestions } from "./plan-update-suggester.mjs";
+import { readRemoteResearchSettings } from "./remote-research.mjs";
+import { groupedResourceInbox, readSourceCaptureSettings } from "./source-capture.mjs";
 import { listVaults, readIfExists, vaultName } from "./vaults.mjs";
 import path from "node:path";
 
@@ -14,10 +21,41 @@ try {
   if (includeAll || requested.has("archives")) result.archives = listArchiveHistory(config);
   if (includeAll || requested.has("topics")) result.topics = listTopicsFromIndexes(config);
   if (includeAll || requested.has("notes")) result.notes = listNotes(config);
+  if (includeAll || requested.has("highlights")) result.highlights = listHighlights(config);
+  if (includeAll || requested.has("learning")) result.learning = enrichedLearningState(config);
   process.send?.({ ok: true, result });
 } catch (error) {
   process.send?.({ ok: false, error: error.message });
   process.exitCode = 1;
+}
+
+function enrichedLearningState(config) {
+  const state = readLearningState(config);
+  const vaultPaths = listVaults(config.vaultsRoot);
+  state.vaults = (state.vaults || []).map((item) => {
+    const vaultPath = vaultPaths.find((candidate) => vaultName(candidate) === item.vault);
+    if (!vaultPath) return item;
+    const behaviorCoach = coachingSummary(vaultPath, { learningProfile: item.learningProfile });
+    writeBehaviorPages(vaultPath, behaviorCoach);
+    return {
+      ...item,
+      behaviorCoach,
+      sourceCapture: {
+        settings: readSourceCaptureSettings(vaultPath),
+        groups: groupedResourceInbox(vaultPath)
+      },
+      remoteResearch: {
+        settings: readRemoteResearchSettings(vaultPath)
+      },
+      automation: learningAutomationStatus(vaultPath),
+      notifications: readLearningNotifications(vaultPath, { limit: 30 }),
+      planning: {
+        ...learningPlanningState(vaultPath),
+        updateSuggestions: readPlanUpdateSuggestions(vaultPath)
+      }
+    };
+  });
+  return state;
 }
 
 function listTopicsFromIndexes(config) {

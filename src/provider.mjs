@@ -9,6 +9,7 @@ import {
   localProviderTip,
   resolveLocalProvider
 } from "./local-ai.mjs";
+import { codexCommandCandidates, isBrokenCodexInstall } from "./provider-status.mjs";
 
 export class ProviderError extends Error {}
 
@@ -70,7 +71,8 @@ function providerForResolvedLocal(config, resolved) {
     return openAiProvider({
       authMethod: config.mlxLmServer.apiKey ? "api_key" : "none",
       apiKey: config.mlxLmServer.apiKey,
-      baseUrl: `${config.mlxLmServer.baseUrl.replace(/\/$/, "")}/v1`
+      baseUrl: `${config.mlxLmServer.baseUrl.replace(/\/$/, "")}/v1`,
+      timeoutMs: config.providerTimeoutMs || 60000
     }, config.mlxLmServer.model, { apiKeyOptional: true });
   }
   if (resolved.provider === "ollama") {
@@ -78,7 +80,8 @@ function providerForResolvedLocal(config, resolved) {
       return openAiProvider({
         authMethod: "none",
         apiKey: "",
-        baseUrl: `${config.ollama.baseUrl.replace(/\/$/, "")}/v1`
+        baseUrl: `${config.ollama.baseUrl.replace(/\/$/, "")}/v1`,
+        timeoutMs: config.ollama.timeoutMs || config.providerTimeoutMs || 60000
       }, config.ollama.model, { apiKeyOptional: true });
     }
     return ollamaNativeProvider(config.ollama);
@@ -127,7 +130,7 @@ function openAiProvider(options, model, { apiKeyOptional = false } = {}) {
     name: "openai-compatible",
     async complete(messages, { temperature = 0.2 } = {}) {
       const headers = openAiHeaders(options, { apiKeyOptional });
-      const response = await fetch(`${options.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      const response = await fetchWithTimeout(`${options.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -136,14 +139,34 @@ function openAiProvider(options, model, { apiKeyOptional = false } = {}) {
         body: JSON.stringify({
           model,
           messages,
-          temperature
+          temperature,
+          stream: false
         })
-      });
-      if (!response.ok) throw new ProviderError(await response.text());
+      }, options.timeoutMs || 60000, "OpenAI-compatible");
+      if (!response.ok) throw await providerErrorFromResponse(response, "OpenAI-compatible");
       const data = await response.json();
       return data.choices?.[0]?.message?.content || "";
     }
   };
+}
+
+async function providerErrorFromResponse(response, providerName) {
+  const text = await response.text();
+  let payload = null;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    payload = null;
+  }
+  const code = payload?.error?.code || payload?.code || "";
+  const message = payload?.error?.message || payload?.message || text;
+  if (code === "no_local_provider") {
+    return new ProviderError([
+      "Local AI Router is connected, but no local model provider answered. Start or restart Ollama, LM Studio, MLX-LM, llama.cpp, or a custom OpenAI-compatible endpoint.",
+      message ? `Router detail: ${message}` : ""
+    ].filter(Boolean).join("\n"));
+  }
+  return new ProviderError(message || `${providerName} returned HTTP ${response.status}.`);
 }
 
 function ollamaNativeProvider(options) {
@@ -165,16 +188,31 @@ function ollamaNativeProvider(options) {
             stream: false,
             options: { temperature }
           };
-      const response = await fetch(`${options.baseUrl.replace(/\/$/, "")}${endpoint}`, {
+      const response = await fetchWithTimeout(`${options.baseUrl.replace(/\/$/, "")}${endpoint}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body)
-      });
+      }, options.timeoutMs || 60000, "Ollama");
       if (!response.ok) throw new ProviderError(await response.text());
       const data = await response.json();
       return data.message?.content || data.response || "";
     }
   };
+}
+
+async function fetchWithTimeout(url, init, timeoutMs, providerName) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new ProviderError(`${providerName} request timed out after ${timeoutMs}ms.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function mlxLmCliProvider(options) {
@@ -191,10 +229,28 @@ function mlxLmCliProvider(options) {
   };
 }
 
-function runCodexExec({ command, model, timeoutMs, prompt }) {
+async function runCodexExec({ command, model, timeoutMs, prompt }) {
+  let lastError = null;
+  for (const candidate of codexCommandCandidates(command)) {
+    try {
+      return await runSingleCodexExec({
+        command: candidate.command,
+        prefixArgs: candidate.args,
+        model,
+        timeoutMs,
+        prompt
+      });
+    } catch (error) {
+      lastError = error;
+      if (!isBrokenCodexInstall(error.message)) throw error;
+    }
+  }
+  throw lastError || new ProviderError("Codex CLI was not found.");
+}
+
+function runSingleCodexExec({ command, prefixArgs = [], model, timeoutMs, prompt }) {
   return new Promise((resolve, reject) => {
     const outputFile = path.join(os.tmpdir(), `llm-wiki-codex-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`);
-    const [bin, ...prefixArgs] = splitCommand(command);
     const args = [
       ...prefixArgs,
       "exec",
@@ -205,12 +261,21 @@ function runCodexExec({ command, model, timeoutMs, prompt }) {
       "--output-last-message", outputFile,
       "-"
     ];
-    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(command || "codex", args, { stdio: ["pipe", "pipe", "pipe"] });
     let stderr = "";
     let stdout = "";
+    let stdinError = null;
+    let settled = false;
+    function finish(callback, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fs.rmSync(outputFile, { force: true });
+      callback(value);
+    }
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      reject(new ProviderError(`Codex CLI timed out after ${timeoutMs}ms.`));
+      finish(reject, new ProviderError(`Codex CLI timed out after ${timeoutMs}ms.`));
     }, timeoutMs);
 
     child.stdout.on("data", (chunk) => {
@@ -220,24 +285,30 @@ function runCodexExec({ command, model, timeoutMs, prompt }) {
       stderr += chunk;
     });
     child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(new ProviderError(`Failed to start Codex CLI: ${error.message}`));
+      finish(reject, new ProviderError(`Failed to start Codex CLI: ${error.message}`));
+    });
+    child.stdin.on("error", (error) => {
+      stdinError = error;
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
       try {
         if (code !== 0) {
-          reject(new ProviderError(`Codex CLI exited with code ${code}: ${cleanCodexOutput(stderr || stdout)}`));
+          const output = cleanCodexOutput(stderr || stdout);
+          const pipeDetail = stdinError ? ` Prompt pipe reported: ${stdinError.message}.` : "";
+          finish(reject, new ProviderError(`Codex CLI exited with code ${code}: ${output || "no output."}${pipeDetail}`));
           return;
         }
         const answer = fs.existsSync(outputFile) ? fs.readFileSync(outputFile, "utf8").trim() : cleanCodexOutput(stdout);
-        fs.rmSync(outputFile, { force: true });
-        resolve(answer || cleanCodexOutput(stdout));
+        finish(resolve, answer || cleanCodexOutput(stdout));
       } catch (error) {
-        reject(error);
+        finish(reject, error);
       }
     });
-    child.stdin.end(prompt);
+    try {
+      child.stdin.end(prompt);
+    } catch (error) {
+      stdinError = error;
+    }
   });
 }
 

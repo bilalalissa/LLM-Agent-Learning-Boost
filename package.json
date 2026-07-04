@@ -11,6 +11,8 @@
     "serve": "node src/server.mjs",
     "check": "node src/check.mjs",
     "learning:backfill": "node src/backfill-learning-boost.mjs",
+    "learning:backfill-source-map": "node src/backfill-learning-boost.mjs --source-map-only",
+    "learning:rebuild-source-map": "node src/backfill-learning-boost.mjs --rebuild-source-map",
     "learning:export-remnote": "node src/remnote-export.mjs",
     "learning:plan": "node src/learning-plan-cli.mjs",
     "learning:check": "node src/learning-check.mjs",

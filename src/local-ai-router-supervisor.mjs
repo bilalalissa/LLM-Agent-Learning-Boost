@@ -62,31 +62,54 @@ export function createLocalAiRouterSupervisor({
         return snapshot();
       }
 
-      Object.assign(state, routerState(LOCAL_AI_ROUTER_STATUS.ready, "Local AI Router is reachable.", router, { reachability }));
-      const recommendation = await recommendLocalAiProvider(router, activeDeps);
+      const effectiveRouter = { ...router, baseUrl: reachability.baseUrl || router.baseUrl };
+      Object.assign(state, routerState(LOCAL_AI_ROUTER_STATUS.ready, "Local AI Router is reachable.", effectiveRouter, { reachability }));
+      const integrationConfig = await fetchRouterIntegrationConfig(effectiveRouter, activeDeps);
+      state.integrationConfig = integrationConfig;
+      const integrationMapping = integrationConfig.ok
+        ? mapRouterIntegrationConfig(integrationConfig.data, effectiveRouter)
+        : { patch: null };
+
+      const recommendation = await recommendLocalAiProvider(effectiveRouter, activeDeps);
       state.recommendation = recommendation;
-      if (!recommendation.ok) {
+      if (!recommendation.ok && !integrationMapping.patch) {
         state.detail = recommendation.detail || "Local AI Router is reachable but did not return a usable provider recommendation.";
         return snapshot();
       }
 
       if (router.autoStartProvider && recommendation.startable && recommendation.providerId) {
         state.startProviderAttempted = true;
-        state.startProvider = await startRouterProvider(router, recommendation.providerId, activeDeps);
+        state.startProvider = await startRouterProvider(effectiveRouter, recommendation.providerId, activeDeps);
       }
 
-      const mapped = mapRouterRecommendation(recommendation, router);
+      const mapped = integrationMapping.patch ? integrationMapping : mapRouterRecommendation(recommendation, effectiveRouter);
       state.providerPatch = mapped.patch;
-      if (router.autoApply && mapped.patch) {
+      const autoApplyRouterPatch = shouldAutoApplyRouterPatch(config, mapped.patch);
+      if (autoApplyRouterPatch) {
         applyProviderConfig(mapped.patch);
         reloadRuntimeConfig();
-        Object.assign(state, routerState(LOCAL_AI_ROUTER_STATUS.applied, mapped.detail, router, {
+        Object.assign(state, routerState(LOCAL_AI_ROUTER_STATUS.applied, mapped.detail, effectiveRouter, {
           reachability,
+          integrationConfig,
           recommendation,
           providerPatch: mapped.patch,
           startProviderAttempted: state.startProviderAttempted,
           startProvider: state.startProvider
         }));
+      }
+      if (router.autoApply && mapped.patch && !autoApplyRouterPatch) {
+        Object.assign(state, routerState(
+          LOCAL_AI_ROUTER_STATUS.ready,
+          `Local AI Router is reachable. Manual provider ${config.provider || "unknown"} is selected, so the router recommendation was not auto-applied.`,
+          effectiveRouter,
+          {
+            reachability,
+            integrationConfig,
+            recommendation,
+            providerPatch: mapped.patch,
+            autoApplySkipped: true
+          }
+        ));
       }
       return snapshot();
     } catch (error) {
@@ -108,6 +131,11 @@ export function createLocalAiRouterSupervisor({
   return { start, status: snapshot };
 }
 
+export function shouldAutoApplyRouterPatch(config = {}, patch = null) {
+  if (!config.localAiRouter?.autoApply || !patch) return false;
+  return ["local_auto", "openai_compat"].includes(config.provider || "local_auto");
+}
+
 export function routerState(status, detail, router = {}, extra = {}) {
   return {
     status,
@@ -125,26 +153,32 @@ export function routerState(status, detail, router = {}, extra = {}) {
 
 export async function checkRouterReachability(router = {}, deps = {}, options = {}) {
   const activeDeps = normalizeDeps(deps);
-  const baseUrl = normalizedRouterBaseUrl(router.baseUrl);
   const endpoints = [
     "/api/integration/manifest",
     "/api/health",
     "/v1/models"
   ];
-  for (const endpoint of endpoints) {
-    try {
-      const response = await activeDeps.fetch(`${baseUrl}${endpoint}`, {
-        method: "GET",
-        headers: routerHeaders(router),
-        signal: options.signal
-      });
-      if (response.status === 401) return { ok: false, status: 401, endpoint, detail: "Bearer token required." };
-      if (response.ok) return { ok: true, status: response.status, endpoint, detail: `Reached ${endpoint}.` };
-    } catch (error) {
-      if (options.quick) return { ok: false, status: 0, detail: error.message };
+  let lastDetail = "";
+  for (const baseUrl of routerBaseUrlCandidates(router)) {
+    for (const endpoint of endpoints) {
+      try {
+        const response = await activeDeps.fetch(`${baseUrl}${endpoint}`, {
+          method: "GET",
+          headers: routerHeaders(router),
+          signal: options.signal
+        });
+        if (response.status === 401) return { ok: false, status: 401, endpoint, baseUrl, detail: "Bearer token required." };
+        if (response.ok) return { ok: true, status: response.status, endpoint, baseUrl, detail: `Reached ${endpoint}.` };
+      } catch (error) {
+        lastDetail = error.message;
+        if (options.quick && !hasRemainingPreferredRouterCandidate(router, baseUrl)) {
+          return { ok: false, status: 0, detail: error.message, baseUrl };
+        }
+      }
     }
   }
-  return { ok: false, status: 0, detail: `Could not reach Local AI Router at ${baseUrl}.` };
+  const baseUrl = routerBaseUrlCandidates(router)[0] || "http://127.0.0.1:17640";
+  return { ok: false, status: 0, detail: lastDetail || `Could not reach Local AI Router at ${baseUrl}.`, baseUrl };
 }
 
 export async function waitForRouter(router = {}, deps = {}) {
@@ -258,6 +292,15 @@ export async function recommendLocalAiProvider(router = {}, deps = {}) {
   };
 }
 
+export async function fetchRouterIntegrationConfig(router = {}, deps = {}) {
+  const activeDeps = normalizeDeps(deps);
+  const baseUrl = normalizedRouterBaseUrl(router.baseUrl);
+  return fetchJson(activeDeps.fetch, `${baseUrl}/api/integration/config`, {
+    method: "GET",
+    headers: routerHeaders(router)
+  });
+}
+
 export async function startRouterProvider(router = {}, providerId, deps = {}) {
   const activeDeps = normalizeDeps(deps);
   const baseUrl = normalizedRouterBaseUrl(router.baseUrl);
@@ -327,6 +370,77 @@ export function mapRouterRecommendation(recommendation = {}, router = {}) {
   };
 }
 
+export function mapRouterIntegrationConfig(integrationConfig = {}, router = {}) {
+  const env = integrationConfig.learning_boost_env && typeof integrationConfig.learning_boost_env === "object"
+    ? integrationConfig.learning_boost_env
+    : {};
+  const integration = integrationConfig.local_integration && typeof integrationConfig.local_integration === "object"
+    ? integrationConfig.local_integration
+    : {};
+  const hasUsableConfig = Object.keys(env).length > 0 || integration.openai_compatible_base_url;
+  if (!hasUsableConfig) return { patch: null, detail: "Local AI Router did not return Learning Boost config." };
+
+  const selected = routerSelectionFromIntegration(integrationConfig);
+  const compatBase = ensureV1(env.OPENAI_COMPAT_BASE_URL || integration.openai_compatible_base_url || `${normalizedRouterBaseUrl(router.baseUrl)}/v1`);
+  const baseUrl = normalizedRouterBaseUrl(env.LOCAL_AI_ROUTER_BASE_URL || integration.base_url || stripV1(compatBase) || router.baseUrl);
+  const values = pickLearningBoostEnv(env);
+  values.DEFAULT_AI_PROVIDER ||= "openai_compat";
+  values.DEFAULT_AI_MODEL ||= selected.model || "local-model";
+  values.OPENAI_COMPAT_BASE_URL ||= compatBase;
+  values.OPENAI_COMPAT_AUTH_METHOD ||= integration.auth_method || "none";
+  values.LOCAL_AI_ROUTER_BASE_URL = baseUrl;
+  values.LOCAL_AI_ROUTER_AUTOSTART ||= "true";
+  values.LOCAL_AI_ROUTER_AUTO_APPLY ||= "true";
+  values.LOCAL_AI_ROUTER_AUTO_START_PROVIDER ||= "true";
+  values.LOCAL_AI_ROUTER_AUTO_INSTALL ||= "false";
+
+  const runtimeLabel = selected.runtime
+    ? [selected.providerName, selected.runtimeModel || selected.model].filter(Boolean).join(" ")
+    : "";
+  const waiting = selected.waiting;
+  return {
+    detail: waiting
+      ? "Applied Local AI Router localhost config. Router is connected; start Ollama, LM Studio, MLX-LM, llama.cpp, or a custom endpoint."
+      : `Applied Local AI Router localhost config. Selected runtime: ${runtimeLabel || "local model provider"}.`,
+    patch: { values },
+    selectedRuntime: selected.runtime || null,
+    routerStatus: integrationConfig.status || "unknown"
+  };
+}
+
+function routerSelectionFromIntegration(integrationConfig = {}) {
+  const route = integrationConfig.selected_route && typeof integrationConfig.selected_route === "object"
+    ? integrationConfig.selected_route
+    : {};
+  const runtime = integrationConfig.provider_runtime && typeof integrationConfig.provider_runtime === "object"
+    ? integrationConfig.provider_runtime
+    : integrationConfig.selected_runtime && typeof integrationConfig.selected_runtime === "object"
+      ? integrationConfig.selected_runtime
+      : null;
+  const decision = integrationConfig.router_decision && typeof integrationConfig.router_decision === "object"
+    ? integrationConfig.router_decision
+    : {};
+  const providerName = route.provider_name || runtime?.provider_name || runtime?.provider || runtime?.id || "";
+  const model = route.model_id || route.model || runtime?.active_model || runtime?.model || runtime?.default_model || "";
+  const runtimeModel = runtime?.active_model || runtime?.model || runtime?.default_model || "";
+  const runtimeHealth = String(runtime?.health || runtime?.status || "").toLowerCase();
+  const runtimeStopped = runtime?.running === false || runtime?.paused === true || ["stopped", "unhealthy", "error", "failed"].includes(runtimeHealth);
+  const waiting = integrationConfig.status === "waiting_for_provider"
+    || decision.can_execute === false
+    || decision.suspended === true
+    || !providerName
+    || !model
+    || runtimeStopped;
+  return {
+    route,
+    runtime,
+    providerName,
+    model,
+    runtimeModel,
+    waiting
+  };
+}
+
 function normalizeRecommendation(value = {}, router = {}) {
   const model = value.model || value.model_id || value.default_model || value.active_model || value.id || "local-model";
   return {
@@ -374,6 +488,23 @@ function providerKindFromRecommendation(value = {}) {
   if (text.includes("ollama")) return "ollama";
   if (text.includes("mlx")) return "mlx_lm_server";
   return "openai_compat";
+}
+
+function pickLearningBoostEnv(env = {}) {
+  const allowed = new Set([
+    "DEFAULT_AI_PROVIDER",
+    "DEFAULT_AI_MODEL",
+    "OPENAI_COMPAT_BASE_URL",
+    "OPENAI_COMPAT_AUTH_METHOD",
+    "LOCAL_AI_ROUTER_BASE_URL",
+    "LOCAL_AI_ROUTER_AUTOSTART",
+    "LOCAL_AI_ROUTER_AUTO_APPLY",
+    "LOCAL_AI_ROUTER_AUTO_START_PROVIDER",
+    "LOCAL_AI_ROUTER_AUTO_INSTALL"
+  ]);
+  return Object.fromEntries(Object.entries(env)
+    .filter(([key, value]) => allowed.has(key) && value !== undefined && value !== null)
+    .map(([key, value]) => [key, String(value)]));
 }
 
 async function fetchJson(fetchImpl, url, options) {
@@ -430,6 +561,29 @@ function splitCommand(command) {
 
 function normalizedRouterBaseUrl(value = "http://127.0.0.1:17640") {
   return String(value || "http://127.0.0.1:17640").replace(/\/+$/, "").replace(/\/v1$/, "");
+}
+
+function routerBaseUrlCandidates(router = {}) {
+  const base = normalizedRouterBaseUrl(router.baseUrl);
+  const compat = router.compatBaseUrl ? normalizedRouterBaseUrl(router.compatBaseUrl) : "";
+  const candidates = looksLikeProviderRuntimeUrl(base)
+    ? [compat, "http://127.0.0.1:17640", base]
+    : [base, compat, "http://127.0.0.1:17640"];
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function hasRemainingPreferredRouterCandidate(router, currentBaseUrl) {
+  const candidates = routerBaseUrlCandidates(router);
+  return candidates.indexOf(currentBaseUrl) < candidates.length - 1;
+}
+
+function looksLikeProviderRuntimeUrl(value) {
+  try {
+    const url = new URL(value);
+    return ["11434", "1234", "5001", "8080", "8081"].includes(url.port);
+  } catch {
+    return false;
+  }
 }
 
 function ensureV1(value) {

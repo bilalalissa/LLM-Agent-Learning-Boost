@@ -1,0 +1,402 @@
+import fs from "node:fs";
+import path from "node:path";
+import { trackBehaviorEvent } from "./behavior-tracker.mjs";
+import { ingestVault } from "./ingest-lib.mjs";
+import { draftLearningPlans, readLearningPlans } from "./learning-planner.mjs";
+import { learningPaths } from "./learning-store.mjs";
+import { suggestPlanUpdates } from "./plan-update-suggester.mjs";
+import {
+  markResourceIngestResults,
+  readSourceCaptureSettings,
+  resourceInbox,
+  stageResourcesForIngest
+} from "./source-capture.mjs";
+import { listRawCandidates, vaultName } from "./vaults.mjs";
+
+export const AUTOMATION_SETTINGS_FILE = "automation-settings.json";
+export const LEARNING_NOTIFICATIONS_FILE = "notifications.jsonl";
+
+export function defaultAutomationSettings() {
+  return {
+    schemaVersion: 1,
+    learningAutopilot: true,
+    autoProcessNewSources: true,
+    autoDraftPlans: true,
+    autoSuggestPlanUpdates: true,
+    requireApprovalForPlanActivation: true,
+    nativeMacNotifications: true,
+    updated: new Date().toISOString()
+  };
+}
+
+export function readAutomationSettings(vaultPath) {
+  return normalizeAutomationSettings(readJson(automationSettingsPath(vaultPath), {}));
+}
+
+export function updateAutomationSettings(vaultPath, input = {}) {
+  const current = readAutomationSettings(vaultPath);
+  const next = normalizeAutomationSettings({ ...current, ...input, updated: new Date().toISOString() });
+  writeJson(automationSettingsPath(vaultPath), next);
+  return next;
+}
+
+export function automationSettingsPath(vaultPath) {
+  return path.join(learningPaths(vaultPath).dir, AUTOMATION_SETTINGS_FILE);
+}
+
+export function learningNotificationsPath(vaultPath) {
+  return path.join(learningPaths(vaultPath).dir, LEARNING_NOTIFICATIONS_FILE);
+}
+
+export function learningAutomationStatus(vaultPath, runtime = {}) {
+  const settings = readAutomationSettings(vaultPath);
+  const resources = resourceInbox(vaultPath);
+  const sourceSettings = readSourceCaptureSettings(vaultPath);
+  const rawCandidates = listRawCandidates(vaultPath);
+  const notifications = readLearningNotifications(vaultPath, { limit: 40 });
+  const pendingResources = resources.filter((item) => !["ingested", "deferred", "deleted"].includes(item.processingStatus));
+  return {
+    settings,
+    vault: vaultName(vaultPath),
+    running: runtime.running === true,
+    blocked: runtime.status === "blocked",
+    status: runtime.status || (settings.learningAutopilot ? "watching" : "paused"),
+    detail: runtime.detail || (settings.learningAutopilot ? "Learning Autopilot is watching for safe work." : "Learning Autopilot is paused for this vault."),
+    lastRunAt: runtime.lastRunAt || "",
+    lastSuccessAt: runtime.lastSuccessAt || "",
+    lastBlockedAt: runtime.lastBlockedAt || "",
+    pendingRawCount: rawCandidates.length,
+    pendingRaw: rawCandidates.slice(0, 12).map((file) => path.relative(vaultPath, file).replace(/\\/g, "/")),
+    pendingResourceCount: pendingResources.length,
+    resourceInboxCount: resources.length,
+    sourceCaptureAutoProcess: sourceSettings.autoProcessCapturedResources !== false,
+    notificationsUnread: notifications.filter((item) => !item.readAt && item.status !== "dismissed").length,
+    notificationsPendingNative: notifications.filter((item) => nativeDeliveryPending(item)).length
+  };
+}
+
+export async function runLearningAutomationForVault(vaultPath, options = {}) {
+  const settings = readAutomationSettings(vaultPath);
+  const force = options.force === true;
+  if (!force && settings.learningAutopilot === false) {
+    return { skipped: true, status: "paused", detail: "Learning Autopilot is paused for this vault.", settings };
+  }
+
+  const sourceSettings = readSourceCaptureSettings(vaultPath);
+  const started = new Date();
+  const staged = settings.autoProcessNewSources && sourceSettings.autoProcessCapturedResources !== false
+    ? stageResourcesForIngest(vaultPath, { limit: options.resourceLimit || 12 })
+    : { staged: [] };
+  const rawBefore = listRawCandidates(vaultPath);
+
+  if (!rawBefore.length) {
+    return {
+      skipped: false,
+      status: "idle",
+      detail: staged.staged.length
+        ? `Staged ${staged.staged.length} captured resource(s); waiting for next scan.`
+        : "No pending learning sources.",
+      staged: staged.staged,
+      processed: 0,
+      results: [],
+      settings
+    };
+  }
+
+  const readiness = await providerReadiness(options.provider, options.config);
+  if (!readiness.ready) {
+    const detail = `Provider is not ready for Learning Autopilot: ${readiness.detail}`;
+    recordLearningNotification(vaultPath, {
+      type: "provider_blocked",
+      severity: "warning",
+      title: "Learning processing paused",
+      body: "The selected AI provider is not answering, so pending files were left in place.",
+      detail,
+      privacy: "safe",
+      actions: ["Open Provider", "Refresh health", "Try again"]
+    });
+    trackBehaviorEvent(vaultPath, {
+      type: "provider_failure",
+      provider: options.config?.provider || "",
+      count: rawBefore.length,
+      metadata: { detail, automation: true }
+    });
+    return {
+      skipped: false,
+      status: "blocked",
+      detail,
+      staged: staged.staged,
+      processed: 0,
+      results: [],
+      pendingRawCount: rawBefore.length,
+      settings
+    };
+  }
+
+  const results = await ingestVault(vaultPath, options.config, options.provider);
+  const marked = markResourceIngestResults(vaultPath, results);
+  for (const result of results) {
+    recordLearningNotification(vaultPath, {
+      type: "source_processed",
+      severity: "info",
+      title: "Source processed",
+      body: "A source was processed into Learning Boost bits and cards.",
+      detail: result.sourcePage || result.source || "",
+      sourcePage: result.sourcePage || "",
+      privacy: "safe",
+      actions: ["Open Learning", "Review cards", "Check plan"]
+    });
+  }
+
+  let planDraft = { plans: [], goals: [] };
+  if (settings.autoDraftPlans && shouldDraftPlans(vaultPath, results)) {
+    planDraft = draftLearningPlans(vaultPath, { limit: 3 });
+    if ((planDraft.plans || []).length) {
+      recordLearningNotification(vaultPath, {
+        type: "plan_drafted",
+        severity: "info",
+        title: "Learning plan drafted",
+        body: "Learning Boost drafted a proposed plan. Activation still needs your confirmation.",
+        detail: (planDraft.plans || []).map((plan) => plan.title || plan.id).join(", "),
+        privacy: "safe",
+        actions: ["Review plan", "Edit first", "Approve later"]
+      });
+    }
+  }
+
+  let updateSuggestions = { suggestions: [] };
+  if (settings.autoSuggestPlanUpdates) {
+    updateSuggestions = suggestPlanUpdates(vaultPath, {});
+    if ((updateSuggestions.suggestions || []).length) {
+      recordLearningNotification(vaultPath, {
+        type: "plan_update_suggested",
+        severity: "info",
+        title: "Plan update suggested",
+        body: "New learning signals may affect an existing plan. Review before applying.",
+        detail: `${updateSuggestions.suggestions.length} suggestion(s) ready.`,
+        privacy: "safe",
+        actions: ["Review suggestion", "Edit first", "Ignore"]
+      });
+    }
+  }
+
+  return {
+    skipped: false,
+    status: "processed",
+    detail: `Processed ${results.length} source(s), updated ${marked.updated} captured resource(s).`,
+    startedAt: started.toISOString(),
+    finishedAt: new Date().toISOString(),
+    staged: staged.staged,
+    processed: results.length,
+    results,
+    resourcesUpdated: marked.updated,
+    planDraft,
+    updateSuggestions,
+    settings
+  };
+}
+
+export function readLearningNotifications(vaultPath, options = {}) {
+  const includeDismissed = options.includeDismissed === true;
+  const pendingNativeOnly = options.pendingNativeOnly === true;
+  const limit = Math.max(1, Number(options.limit || 50));
+  return readJsonl(learningNotificationsPath(vaultPath))
+    .map(normalizeLearningNotification)
+    .filter((item) => includeDismissed || item.status !== "dismissed")
+    .filter((item) => !pendingNativeOnly || nativeDeliveryPending(item))
+    .slice(-limit)
+    .reverse();
+}
+
+export function recordLearningNotification(vaultPath, input = {}) {
+  const now = new Date().toISOString();
+  const notification = normalizeLearningNotification({
+    ...input,
+    id: input.id || stableId("learning-notice", `${input.type || "event"}-${input.title || ""}-${input.detail || ""}-${now.slice(0, 16)}`),
+    created: input.created || now,
+    updated: now
+  });
+  const existing = readJsonl(learningNotificationsPath(vaultPath));
+  if (!existing.some((item) => item.id === notification.id)) {
+    appendJsonl(learningNotificationsPath(vaultPath), notification);
+  }
+  return notification;
+}
+
+export function updateLearningNotificationAction(vaultPath, id, action = "read", details = {}) {
+  const now = new Date().toISOString();
+  const notifications = readJsonl(learningNotificationsPath(vaultPath));
+  let found = false;
+  const next = notifications.map((item) => {
+    if (item.id !== id) return item;
+    found = true;
+    if (action === "delivered") return normalizeLearningNotification({
+      ...item,
+      nativeDeliveryStatus: "delivered",
+      deliveryAttempts: Number(item.deliveryAttempts || 0) + 1,
+      lastDeliveryAttemptAt: now,
+      nativeError: "",
+      deliveredAt: item.deliveredAt || now,
+      updated: now
+    });
+    if (action === "native_failed") return normalizeLearningNotification({
+      ...item,
+      nativeDeliveryStatus: "failed",
+      deliveryAttempts: Number(item.deliveryAttempts || 0) + 1,
+      lastDeliveryAttemptAt: now,
+      nativeError: String(details.nativeError || details.error || "macOS did not accept the notification."),
+      updated: now
+    });
+    if (action === "permission_denied") return normalizeLearningNotification({
+      ...item,
+      nativeDeliveryStatus: "permission_denied",
+      deliveryAttempts: Number(item.deliveryAttempts || 0) + 1,
+      lastDeliveryAttemptAt: now,
+      nativeError: String(details.nativeError || details.error || "macOS notification permission is not enabled."),
+      updated: now
+    });
+    if (action === "dismiss") return normalizeLearningNotification({ ...item, status: "dismissed", readAt: item.readAt || now, updated: now });
+    return normalizeLearningNotification({ ...item, status: "read", readAt: item.readAt || now, updated: now });
+  });
+  if (!found) throw new Error(`Unknown learning notification: ${id}`);
+  writeJsonl(learningNotificationsPath(vaultPath), next);
+  return { updated: true, id, action };
+}
+
+function normalizeAutomationSettings(input = {}) {
+  return {
+    ...defaultAutomationSettings(),
+    ...input,
+    schemaVersion: 1,
+    learningAutopilot: input.learningAutopilot !== false,
+    autoProcessNewSources: input.autoProcessNewSources !== false,
+    autoDraftPlans: input.autoDraftPlans !== false,
+    autoSuggestPlanUpdates: input.autoSuggestPlanUpdates !== false,
+    requireApprovalForPlanActivation: input.requireApprovalForPlanActivation !== false,
+    nativeMacNotifications: input.nativeMacNotifications !== false,
+    updated: input.updated || new Date().toISOString()
+  };
+}
+
+function normalizeLearningNotification(input = {}) {
+  const now = new Date().toISOString();
+  const nativeDeliveryStatus = ["pending", "delivered", "permission_denied", "failed"].includes(input.nativeDeliveryStatus)
+    ? input.nativeDeliveryStatus
+    : (input.deliveredAt ? "delivered" : "pending");
+  return {
+    id: String(input.id || ""),
+    type: String(input.type || "learning_event"),
+    severity: ["info", "warning", "critical"].includes(input.severity) ? input.severity : "info",
+    status: ["unread", "read", "dismissed"].includes(input.status) ? input.status : "unread",
+    title: String(input.title || "Learning Boost"),
+    body: String(input.body || ""),
+    detail: String(input.detail || ""),
+    sourcePage: String(input.sourcePage || ""),
+    planId: String(input.planId || ""),
+    goalId: String(input.goalId || ""),
+    privacy: input.privacy === "detailed" ? "detailed" : "safe",
+    actions: Array.isArray(input.actions) ? input.actions.slice(0, 3).map(String) : [],
+    created: input.created || now,
+    updated: input.updated || now,
+    nativeDeliveryStatus,
+    deliveryAttempts: Math.max(0, Number(input.deliveryAttempts || 0)),
+    lastDeliveryAttemptAt: input.lastDeliveryAttemptAt || "",
+    nativeError: String(input.nativeError || ""),
+    deliveredAt: input.deliveredAt || "",
+    readAt: input.readAt || ""
+  };
+}
+
+function nativeDeliveryPending(item = {}) {
+  const normalized = normalizeLearningNotification(item);
+  return normalized.status !== "dismissed"
+    && normalized.nativeDeliveryStatus !== "delivered"
+    && normalized.nativeDeliveryStatus !== "permission_denied"
+    && !normalized.deliveredAt
+    && normalized.deliveryAttempts < 3;
+}
+
+async function providerReadiness(provider, config = {}) {
+  if (!provider?.complete) return { ready: false, detail: "Provider adapter is not available." };
+  const timeoutMs = Math.max(4000, Math.min(Number(config.providerTimeoutMs || 12000), 12000));
+  try {
+    const text = await withTimeout(provider.complete([
+      { role: "system", content: "You are a readiness probe for Learning Boost. Reply with READY only." },
+      { role: "user", content: "READY" }
+    ], { temperature: 0, allowCloudFallback: false }), timeoutMs);
+    if (String(text || "").trim()) return { ready: true, detail: "Selected provider answered a readiness probe." };
+    return { ready: false, detail: "Selected provider returned an empty readiness response." };
+  } catch (error) {
+    return { ready: false, detail: compactError(error) };
+  }
+}
+
+function shouldDraftPlans(vaultPath, results = []) {
+  if (!results.length) return false;
+  const plans = readLearningPlans(vaultPath);
+  if (!plans.length) return true;
+  return !plans.some((plan) => ["proposed", "approved", "active", "scheduled"].includes(plan.status));
+}
+
+function withTimeout(promise, timeoutMs) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`Provider readiness timed out after ${timeoutMs}ms.`)), timeoutMs))
+  ]);
+}
+
+function compactError(error) {
+  return String(error?.message || error || "Unknown provider error")
+    .replace(/\s+/g, " ")
+    .slice(0, 240);
+}
+
+function stableId(prefix, value) {
+  let hash = 2166136261;
+  for (const char of String(value || "")) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${prefix}-${(hash >>> 0).toString(16)}`;
+}
+
+function readJson(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function readJsonl(file) {
+  try {
+    return fs.readFileSync(file, "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function writeJsonl(file, items) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, items.map((item) => JSON.stringify(item)).join("\n") + (items.length ? "\n" : ""));
+}
+
+function appendJsonl(file, item) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${JSON.stringify(item)}\n`);
+}

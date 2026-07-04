@@ -13,9 +13,11 @@ import {
   deleteResource,
   exportResources,
   groupedResourceInbox,
+  markResourceIngestResults,
   purgeExpiredResources,
   readSourceCaptureSettings,
   resourceInbox,
+  stageResourcesForIngest,
   updateSourceCaptureSettings
 } from "../src/source-capture.mjs";
 import { ensureLearningScaffold, learningPaths } from "../src/learning-store.mjs";
@@ -33,13 +35,34 @@ test("source capture settings default to safe normal capture", () => {
   const { vault } = makeVault();
   const settings = readSourceCaptureSettings(vault);
 
+  assert.equal(settings.schemaVersion, 2);
   assert.equal(settings.enabled, false);
   assert.equal(settings.fullLocalCaptureMode, false);
   assert.equal(settings.manualImport, true);
   assert.equal(settings.browserClipper, true);
+  assert.equal(settings.autoProcessCapturedResources, true);
   assert.equal(settings.browserHistoryImport, false);
   assert.equal(settings.localProcessingOnly, true);
   assert.equal(settings.criticalInfoCloudPolicy, "never");
+});
+
+test("old source capture settings migrate to auto-process while explicit new off is preserved", () => {
+  const { vault } = makeVault();
+  const settingsFile = path.join(learningPaths(vault).dir, "source-capture-settings.json");
+  fs.writeFileSync(settingsFile, JSON.stringify({
+    schemaVersion: 1,
+    enabled: false,
+    browserClipper: true,
+    autoProcessCapturedResources: false
+  }, null, 2));
+
+  ensureLearningScaffold(vault, {});
+  assert.equal(readSourceCaptureSettings(vault).schemaVersion, 2);
+  assert.equal(readSourceCaptureSettings(vault).autoProcessCapturedResources, true);
+
+  updateSourceCaptureSettings(vault, { autoProcessCapturedResources: false });
+  assert.equal(readSourceCaptureSettings(vault).schemaVersion, 2);
+  assert.equal(readSourceCaptureSettings(vault).autoProcessCapturedResources, false);
 });
 
 test("full local capture gates broad collectors behind explicit mode and preview", () => {
@@ -92,6 +115,37 @@ test("manual resource capture groups resources and writes resources page", () =>
   assert.deepEqual(groups.map((group) => group.topic), ["AI", "Language learning"]);
   assert.match(resourcesPage, /## AI/);
   assert.match(resourcesPage, /LLM Agent Notes/);
+});
+
+test("captured resources can be staged for ingest and marked as ingested", () => {
+  const { vault } = makeVault();
+  const captured = captureResource(vault, {
+    title: "Retrieval Practice Article",
+    url: "https://example.com/retrieval-practice",
+    topic: "Learning",
+    description: "A source about recall practice.",
+    processingStatus: "ready_for_ingest",
+    userApproved: true
+  });
+
+  const staged = stageResourcesForIngest(vault);
+  assert.equal(captured.captured, true);
+  assert.equal(staged.staged.length, 1);
+  assert.match(staged.staged[0].file, /^raw\/input\/.+retrieval-practice-article\.md$/);
+  assert.equal(fs.existsSync(path.join(vault, staged.staged[0].file)), true);
+  assert.match(fs.readFileSync(path.join(vault, staged.staged[0].file), "utf8"), /A source about recall practice/);
+
+  const marked = markResourceIngestResults(vault, [{
+    source: staged.staged[0].file,
+    sourcePage: "wiki/sources/2026-07-01--retrieval-practice-article.md",
+    processed: "raw/processed/2026-07-01--retrieval-practice-article.md",
+    learning: { cardsCreated: 2 }
+  }]);
+  const resource = resourceInbox(vault)[0];
+  assert.equal(marked.updated, 1);
+  assert.equal(resource.processingStatus, "ingested");
+  assert.equal(resource.sourcePage, "wiki/sources/2026-07-01--retrieval-practice-article.md");
+  assert.equal(resource.learning.cardsCreated, 2);
 });
 
 test("screenshots collector requires enabled screenshot capture or manual approval", () => {
