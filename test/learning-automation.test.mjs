@@ -57,6 +57,8 @@ test("notification queue supports native delivery and read actions", () => {
   updateLearningNotificationAction(vault, notice.id, "delivered");
   assert.equal(readLearningNotifications(vault, { pendingNativeOnly: true }).length, 0);
   assert.equal(readLearningNotifications(vault)[0].nativeDeliveryStatus, "delivered");
+  assert.equal(readLearningNotifications(vault)[0].status, "unread");
+  assert.equal(readLearningNotifications(vault)[0].readAt, "");
   updateLearningNotificationAction(vault, notice.id, "read");
   assert.equal(readLearningNotifications(vault)[0].status, "read");
 });

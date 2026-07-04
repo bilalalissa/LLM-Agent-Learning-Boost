@@ -1012,6 +1012,20 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "POST" && url.pathname === "/api/open-vault-path") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const opened = await openVaultPath(payload.vault, payload.path || payload.file);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ status: "Opened vault file.", ...opened }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
   if (request.method === "GET" && url.pathname === "/api/preflight") {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(preflightStatus(config)));
@@ -1452,6 +1466,18 @@ function openConfigFile(file) {
 function openObsidian() {
   return new Promise((resolve, reject) => {
     execFile("open", ["-a", "Obsidian"], (error) => error ? reject(error) : resolve(""));
+  });
+}
+
+function openVaultPath(vault, file) {
+  const vaultPath = resolveLearningVaultPath(vault);
+  const selected = safeVaultPath(vaultPath, file);
+  if (!fs.existsSync(selected.full)) throw new Error("Vault file not found.");
+  return new Promise((resolve, reject) => {
+    execFile("open", [selected.full], (error) => error ? reject(error) : resolve({
+      vault: vaultName(vaultPath),
+      path: selected.relative
+    }));
   });
 }
 
@@ -2241,8 +2267,12 @@ function renderHtml() {
     .learning-panel > .muted { max-width: 920px; }
     .learning-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
     .learning-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
-    .learning-toolbar select { min-width: 220px; }
+    .learning-toolbar select { min-width: min(220px, 100%); flex: 1 1 220px; }
     .learning-toolbar .copy-feedback { margin-left: auto; }
+    .learning-jump, .learning-target-button { appearance: none; border: 0; background: transparent; color: var(--accent); font: inherit; font-weight: 750; padding: 0; cursor: pointer; text-align: start; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; overflow-wrap: anywhere; }
+    .learning-jump:hover, .learning-target-button:hover { color: var(--accent-2); }
+    .learning-target-highlight { outline: 3px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 3px; box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 12%, transparent); }
+    .learning-scroll-target, .learning-card, .learning-map-panel, .learning-study-card, .learning-notification-center li, tr.learning-target-highlight { scroll-margin-top: 96px; }
     .learning-section { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 14px; }
     .learning-section > summary { cursor: pointer; font-weight: 750; font-size: 15px; }
     .learning-section > summary + * { margin-top: 12px; }
@@ -2252,19 +2282,19 @@ function renderHtml() {
     .learning-action-group:first-child { padding-top: 0; border-top: 0; }
     .learning-action-group h4 { margin: 0; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0; }
     .learning-button-row { display: flex; flex-wrap: wrap; gap: 6px; }
-    .learning-plan-row { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto auto auto auto; gap: 8px; align-items: end; }
+    .learning-plan-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; align-items: end; }
     .learning-plan-row input { width: 100%; min-width: 0; box-sizing: border-box; }
-    .learning-form { display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 12px; margin: 12px 0 0; }
+    .learning-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px; margin: 12px 0 0; }
     .learning-form input, .learning-form select { width: 100%; min-width: 0; box-sizing: border-box; }
     .learning-field { display: grid; gap: 5px; min-width: 0; }
     .learning-field > span { color: var(--muted); font-size: 12px; font-weight: 700; }
     .learning-field.full { grid-column: 1 / -1; }
-    .learning-toggle-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); gap: 8px; }
+    .learning-toggle-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); gap: 8px; }
     .learning-toggle-grid .inline-toggle { align-items: flex-start; white-space: normal; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); color: var(--text); line-height: 1.25; }
     .learning-form .inline-toggle { min-width: 0; white-space: normal; }
     .learning-form .primary { grid-column: 1 / -1; justify-self: end; min-width: 220px; }
     .learning-overview { min-height: 160px; }
-    .learning-boost-grid { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 12px; margin: 12px 0; }
+    .learning-boost-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 12px; margin: 12px 0; }
     .learning-card { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 12px; min-width: 0; }
     .learning-card h3 { margin: 0 0 8px; font-size: 15px; }
     .learning-card h4 { margin: 10px 0 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0; }
@@ -2273,7 +2303,8 @@ function renderHtml() {
     .learning-card details { margin-top: 8px; }
     .learning-card summary { cursor: pointer; color: var(--accent); font-weight: 700; }
     .learning-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-    .learning-chip { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font-size: 12px; color: var(--muted); background: var(--soft); }
+    .learning-chip { display: inline-flex; align-items: center; max-width: 100%; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font-size: 12px; color: var(--muted); background: var(--soft); overflow-wrap: anywhere; white-space: normal; }
+    button.learning-chip { cursor: pointer; font: inherit; }
     .learning-chip.capture, .learning-card.capture, .learning-flow-lane.capture, .learning-type-legend .capture, .learning-study-card.capture { --kind: #0f766e; --kind-soft: color-mix(in srgb, #0f766e 13%, var(--panel)); }
     .learning-chip.bit, .learning-card.bit, .learning-flow-lane.bit, .learning-type-legend .bit, .learning-study-card.bit { --kind: #2563eb; --kind-soft: color-mix(in srgb, #2563eb 12%, var(--panel)); }
     .learning-chip.practice, .learning-card.practice, .learning-flow-lane.practice, .learning-type-legend .practice, .learning-study-card.practice { --kind: #7c3aed; --kind-soft: color-mix(in srgb, #7c3aed 12%, var(--panel)); }
@@ -2289,14 +2320,14 @@ function renderHtml() {
     .learning-action-row button { min-width: 0; }
     .learning-card.danger { border-color: color-mix(in srgb, #dc2626 45%, var(--line)); }
     .learning-card.warning { border-color: color-mix(in srgb, #f59e0b 55%, var(--line)); }
-    .learning-flowchart { display: grid; grid-template-columns: repeat(7, minmax(112px, 1fr)); gap: 8px; align-items: stretch; margin: 10px 0 14px; }
+    .learning-flowchart { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(128px, 100%), 1fr)); gap: 8px; align-items: stretch; margin: 10px 0 14px; }
     .learning-flow-node { position: relative; border: 1px solid var(--line); border-radius: 6px; padding: 10px; background: var(--soft); min-height: 86px; display: grid; gap: 4px; align-content: start; }
     .learning-flow-node::after { content: ">"; position: absolute; right: -9px; top: 50%; transform: translateY(-50%); color: var(--muted); font-weight: 800; }
     .learning-flow-node:last-child::after { content: ""; }
     .learning-flow-node strong { font-size: 13px; }
     .learning-flow-node span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .learning-flow-node.active { border-color: var(--accent); background: color-mix(in srgb, var(--mark) 42%, var(--panel)); }
-    .learning-map-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(260px, .9fr); gap: 12px; margin: 12px 0; }
+    .learning-map-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 12px; margin: 12px 0; }
     .learning-map-panel { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 12px; min-width: 0; }
     .learning-map-panel h3 { margin: 0 0 8px; }
     .learning-routing-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
@@ -2312,47 +2343,51 @@ function renderHtml() {
       padding: 16px;
       margin: 12px 0;
     }
-    .learning-autopilot-hero { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(180px, .55fr); gap: 14px; align-items: stretch; overflow: hidden; }
+    .learning-autopilot-hero { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(min(180px, 100%), .55fr); gap: 14px; align-items: stretch; overflow: visible; }
     .learning-autopilot-copy h3, .learning-study-header h3, .learning-plan-guide h3, .learning-notification-center h3 { margin: 0 0 6px; font-size: 20px; }
     .learning-autopilot-copy p, .learning-study-header p, .learning-plan-guide p, .learning-notification-center p { margin: 0 0 10px; color: var(--muted); }
     .learning-kicker { color: var(--accent); font-weight: 800; font-size: 12px; text-transform: uppercase; letter-spacing: 0; }
     .learning-autopilot-meter { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; align-content: center; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
     .learning-autopilot-meter strong { font-size: 24px; line-height: 1; color: var(--accent); }
     .learning-autopilot-meter span { color: var(--muted); font-size: 12px; align-self: center; }
-    .learning-stepper { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 8px; list-style: none; margin: 2px 0 0; padding: 0; }
+    .learning-stepper { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr)); gap: 8px; list-style: none; margin: 2px 0 0; padding: 0; }
     .learning-stepper li { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 7px; align-items: start; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); transition: transform .18s ease, border-color .18s ease, background .18s ease; }
+    .learning-stepper button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 7px; width: 100%; color: inherit; text-decoration: none; }
     .learning-stepper li span { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--soft); color: var(--muted); font-weight: 800; }
     .learning-stepper li strong { font-size: 13px; }
     .learning-stepper li em { grid-column: 2; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: anywhere; }
     .learning-stepper li.active { border-color: var(--accent); background: color-mix(in srgb, var(--mark) 36%, var(--panel)); transform: translateY(-2px); }
     .learning-stepper li.active span { background: var(--accent); color: #fff; }
-    .learning-study-surface { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(260px, .8fr); gap: 14px; }
+    .learning-study-surface { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(min(260px, 100%), .8fr); gap: 14px; }
     .learning-study-header { grid-column: 1 / -1; }
     .learning-card-topic-groups { display: grid; gap: 12px; }
     .learning-card-topic-group { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: color-mix(in srgb, var(--panel) 93%, var(--soft)); }
-    .learning-card-topic-group > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+    .learning-card-topic-group > header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
     .learning-card-topic-group > header h4 { margin: 0; font-size: 15px; }
-    .learning-card-deck { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
-    .learning-study-card { min-height: 210px; perspective: 900px; }
-    .learning-study-card-inner { position: relative; min-height: 210px; transform-style: preserve-3d; transition: transform .28s ease; }
-    .learning-study-card.flipped .learning-study-card-inner { transform: rotateY(180deg); }
-    .learning-study-card-face { position: absolute; inset: 0; display: grid; align-content: space-between; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); backface-visibility: hidden; overflow: hidden; }
+    .learning-card-deck { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 10px; align-items: start; }
+    .learning-study-card { min-height: 0; perspective: 900px; }
+    .learning-study-card-inner { position: relative; min-height: 0; transform-style: preserve-3d; transition: transform .28s ease; }
+    .learning-study-card.flipped .learning-study-card-inner { transform: translateY(-1px); }
+    .learning-study-card-face { display: grid; align-content: space-between; gap: 10px; min-height: 190px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); backface-visibility: hidden; overflow: visible; }
     .learning-study-card.practice .learning-study-card-face, .learning-study-card.capture .learning-study-card-face { border-color: color-mix(in srgb, var(--kind, var(--accent)) 34%, var(--line)); background: var(--kind-soft, var(--panel)); }
     .learning-study-card-face h4 { margin: 0; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
     .learning-study-card-face p { margin: 0; overflow-wrap: anywhere; }
     .learning-study-card-face small { color: var(--muted); overflow-wrap: anywhere; }
-    .learning-study-card-face.back { transform: rotateY(180deg); background: color-mix(in srgb, var(--panel) 85%, var(--soft)); }
+    .learning-study-card-face.back { display: none; background: color-mix(in srgb, var(--panel) 85%, var(--soft)); }
+    .learning-study-card.flipped .learning-study-card-face.front { display: none; }
+    .learning-study-card.flipped .learning-study-card-face.back { display: grid; }
     .learning-bit-explorer { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--soft); }
     .learning-bit-explorer h4 { margin: 0 0 8px; }
     .learning-bit-explorer details { border-top: 1px solid var(--line); padding: 8px 0; }
     .learning-bit-explorer details:first-of-type { border-top: 0; }
     .learning-empty-state { border: 1px dashed var(--line); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--soft); }
-    .learning-flow-lanes { display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 10px; margin: 12px 0; }
+    .learning-flow-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 10px; margin: 12px 0; }
     .learning-flow-lane { border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 32%, var(--line)); border-radius: 8px; padding: 12px; background: var(--kind-soft, var(--panel)); }
     .learning-flow-lane h4 { margin: 0 0 8px; font-size: 15px; }
     .learning-flow-lane ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; }
     .learning-flow-lane li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; align-items: start; }
-    .learning-flow-lane li > span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--kind, var(--accent)) 78%, #fff); color: #fff; font-weight: 800; font-size: 12px; }
+    .learning-flow-lane button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: 100%; color: inherit; text-decoration: none; }
+    .learning-flow-lane button > span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--kind, var(--accent)) 78%, #fff); color: #fff; font-weight: 800; font-size: 12px; }
     .learning-flow-lane strong { display: block; font-size: 13px; }
     .learning-flow-lane em { display: block; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: anywhere; }
     .learning-plan-summary { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
@@ -2366,7 +2401,10 @@ function renderHtml() {
     .learning-plan-timeline p { margin: 4px 0; }
     .learning-plan-timeline em { color: var(--muted); font-style: normal; font-size: 12px; }
     .learning-notification-center ul { display: grid; gap: 8px; padding: 0; margin: 0; list-style: none; }
-    .learning-notification-center li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    .learning-notification-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 10px 0; }
+    .learning-notification-summary span { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--soft); color: var(--muted); overflow-wrap: anywhere; }
+    .learning-notification-summary strong { display: block; color: var(--text); font-size: 18px; }
+    .learning-notification-center li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(min(220px, 100%), auto); gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); overflow-wrap: anywhere; }
     .learning-notification-center li.warning { border-color: color-mix(in srgb, #f59e0b 55%, var(--line)); }
     .learning-notification-center li.critical { border-color: color-mix(in srgb, #dc2626 55%, var(--line)); }
     .learning-notification-center small { color: var(--muted); }
@@ -2792,7 +2830,7 @@ function renderHtml() {
           <div id="learning-status-box" class="answer learning-overview">Loading learning profile...</div>
         </section>
 
-        <details class="learning-section" open>
+        <details id="learning-autopilot-settings" class="learning-section learning-scroll-target" open>
           <summary>Learning Autopilot</summary>
           <form id="learning-automation-form" class="learning-form">
             <div class="learning-toggle-grid">
@@ -2811,7 +2849,7 @@ function renderHtml() {
           </form>
         </details>
 
-        <details class="learning-section" open>
+        <details id="learning-plan-actions-section" class="learning-section learning-scroll-target" open>
           <summary>Plan Actions</summary>
           <div class="learning-actions">
             <div class="learning-plan-row">
@@ -2843,7 +2881,7 @@ function renderHtml() {
           </div>
 	        </details>
 
-        <details class="learning-section">
+        <details id="learning-revise-section" class="learning-section learning-scroll-target">
           <summary>Revise Plans And Goals</summary>
           <div class="learning-actions">
             <div class="learning-plan-row">
@@ -2885,7 +2923,7 @@ function renderHtml() {
           </div>
         </details>
 
-	        <details class="learning-section">
+	        <details id="learning-behavior-section" class="learning-section learning-scroll-target">
 	          <summary>Behavior And Notifications</summary>
 	          <form id="behavior-settings-form" class="learning-form">
 	            <div class="learning-toggle-grid">
@@ -2898,7 +2936,7 @@ function renderHtml() {
 	          </form>
 	        </details>
 
-	        <details class="learning-section" open>
+	        <details id="learning-profile-section" class="learning-section learning-scroll-target" open>
 	          <summary>Learner Profile</summary>
           <form id="learning-profile-form" class="learning-form">
             <label class="learning-field"><span>Profile ID</span><input id="profile-id" autocomplete="off" placeholder="default"></label>
@@ -2935,7 +2973,7 @@ function renderHtml() {
           </form>
         </details>
 
-        <details class="learning-section">
+        <details id="learning-source-capture-section" class="learning-section learning-scroll-target">
           <summary>Source Capture</summary>
           <form id="source-capture-form" class="learning-form">
             <div class="learning-toggle-grid">
@@ -2970,7 +3008,7 @@ function renderHtml() {
           </form>
         </details>
 
-        <details class="learning-section">
+        <details id="learning-manual-resource-section" class="learning-section learning-scroll-target">
           <summary>Add Resource</summary>
           <form id="manual-resource-form" class="learning-form">
             <label class="learning-field"><span>Resource title</span><input id="resource-title" autocomplete="off" placeholder="Resource title"></label>
@@ -3401,22 +3439,30 @@ function renderHtml() {
 
     tabs.forEach((tab) => {
       tab.addEventListener("click", () => {
-        tabs.forEach((item) => item.classList.remove("active"));
-        document.querySelectorAll(".panel").forEach((item) => item.classList.remove("active"));
-        tab.classList.add("active");
-        document.querySelector("#" + tab.dataset.tab + "-panel").classList.add("active");
-        if (tab.dataset.tab === "files") loadFiles();
-        if (tab.dataset.tab === "archives") loadArchives();
-        if (tab.dataset.tab === "topics") {
-          loadTopics();
-          ensureSideTopicsLoaded();
-        }
-        if (tab.dataset.tab === "provider") loadProviderStatus();
-        if (tab.dataset.tab === "learning") loadLearning();
-        if (tab.dataset.tab === "notes") loadNotes();
-        updateAllStickySectionTitles();
+        void activateTab(tab.dataset.tab);
       });
     });
+
+    async function activateTab(name) {
+      const tab = Array.from(tabs).find((item) => item.dataset.tab === name);
+      const panel = document.querySelector("#" + name + "-panel");
+      if (!tab || !panel) return false;
+      tabs.forEach((item) => item.classList.remove("active"));
+      document.querySelectorAll(".panel").forEach((item) => item.classList.remove("active"));
+      tab.classList.add("active");
+      panel.classList.add("active");
+      if (name === "files") await loadFiles();
+      if (name === "archives") await loadArchives();
+      if (name === "topics") {
+        await loadTopics();
+        ensureSideTopicsLoaded();
+      }
+      if (name === "provider") await loadProviderStatus();
+      if (name === "learning") await loadLearning();
+      if (name === "notes") await loadNotes();
+      updateAllStickySectionTitles();
+      return true;
+    }
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -3572,6 +3618,13 @@ function renderHtml() {
     savePlanRevision.addEventListener("click", saveSelectedPlanRevision);
     saveGoalRevision.addEventListener("click", saveSelectedGoalRevision);
     learningStatusBox.addEventListener("click", (event) => {
+      const targetButton = event.target.closest("[data-learning-target]");
+      if (targetButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        void navigateLearningTarget(targetButton);
+        return;
+      }
       const actionButton = event.target.closest("[data-learning-action]");
       if (!actionButton) return;
       const action = actionButton.dataset.learningAction;
@@ -3589,6 +3642,137 @@ function renderHtml() {
       if (action === "mark-notification-read") markLearningNotification(actionButton.dataset.vault, actionButton.dataset.notificationId, "read");
       if (action === "dismiss-notification") markLearningNotification(actionButton.dataset.vault, actionButton.dataset.notificationId, "dismiss");
     });
+
+    async function navigateLearningTarget(button) {
+      const target = button.dataset.learningTarget || "learning-section";
+      if (target === "tab") {
+        await activateTab(button.dataset.tab || "learning");
+        return;
+      }
+      if (target === "provider") {
+        await activateTab("provider");
+        revealElement(providerStatusBox);
+        return;
+      }
+      if (target === "source-page") {
+        await revealSourcePageTarget(button.dataset.vault || selectedLearningVault()?.vault || "", button.dataset.sourcePage || "");
+        return;
+      }
+      if (target === "topic") {
+        await revealTopicTarget(button.dataset.vault || "", button.dataset.topicPath || "", button.dataset.topicTitle || "");
+        return;
+      }
+      if (target === "plan") {
+        await revealPlanTarget(button.dataset.planId || "");
+        return;
+      }
+      if (target === "goal") {
+        await revealGoalTarget(button.dataset.goalId || "");
+        return;
+      }
+      if (target === "notification") {
+        await activateTab("learning");
+        revealElement(document.querySelector("#learning-notification-" + cssEscape(button.dataset.notificationId || "")) || document.querySelector("#learning-notification-center"));
+        return;
+      }
+      if (target === "obsidian-file") {
+        await openVaultPathFromUi(button.dataset.vault || selectedLearningVault()?.vault || "", button.dataset.path || button.dataset.sourcePage || "");
+        return;
+      }
+      await activateTab("learning");
+      revealLearningSection(button.dataset.section || "learning-numbered-flow");
+    }
+
+    function revealLearningSection(id) {
+      const element = document.querySelector("#" + cssEscape(id));
+      revealElement(element || learningStatusBox);
+    }
+
+    async function revealSourcePageTarget(vault, sourcePage) {
+      if (!sourcePage) {
+        await activateTab("learning");
+        revealLearningSection("learning-source-map");
+        return;
+      }
+      await activateTab("files");
+      filesVaultFilter.value = vault || filesVaultFilter.value;
+      filesFilter.value = sourcePage;
+      renderFilesTable();
+      let row = document.querySelector(attrEqualsSelector("data-source-page", sourcePage));
+      if (row) {
+        revealElement(row);
+        return;
+      }
+      await activateTab("topics");
+      topicsVaultFilter.value = vault || topicsVaultFilter.value;
+      topicsFilter.value = sourcePage.replace(/\\.md$/i, "");
+      renderTopicsTable();
+      row = document.querySelector(attrEqualsSelector("data-topic-path", sourcePage.replace(/\\.md$/i, ""))) || Array.from(topicsBody.querySelectorAll("tr")).find((item) => item.textContent.includes(sourcePage.replace(/\\.md$/i, "")));
+      if (row) {
+        revealElement(row);
+        return;
+      }
+      await openVaultPathFromUi(vault, sourcePage);
+    }
+
+    async function revealTopicTarget(vault, topicPath, topicTitle) {
+      await activateTab("topics");
+      topicsVaultFilter.value = vault || topicsVaultFilter.value;
+      topicsFilter.value = topicPath || topicTitle || "";
+      renderTopicsTable();
+      const row = (topicPath && document.querySelector(attrEqualsSelector("data-topic-path", topicPath))) ||
+        Array.from(topicsBody.querySelectorAll("tr")).find((item) => item.textContent.includes(topicTitle || topicPath || ""));
+      revealElement(row || topicsBody);
+    }
+
+    async function revealPlanTarget(planId) {
+      await activateTab("learning");
+      if (planId) {
+        learningPlanId.value = planId;
+        learningPlanSelect.value = planId;
+        syncRevisionFieldsFromSelectedPlan();
+      }
+      revealLearningSection("learning-revise-section");
+    }
+
+    async function revealGoalTarget(goalId) {
+      await activateTab("learning");
+      if (goalId) {
+        learningGoalSelect.value = goalId;
+        syncRevisionFieldsFromSelectedGoal();
+      }
+      revealLearningSection("learning-revise-section");
+    }
+
+    async function openVaultPathFromUi(vault, file) {
+      if (!vault || !file) {
+        learningFeedback.textContent = "No vault file target is available.";
+        return;
+      }
+      try {
+        const data = await postLearningAction("/api/open-vault-path", { vault, path: file });
+        learningFeedback.textContent = data.status || "Opened vault file";
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    function revealElement(element) {
+      if (!element) return;
+      element.closest("details")?.setAttribute("open", "");
+      element.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "center" });
+      element.classList.add("learning-target-highlight");
+      if (typeof element.focus === "function") element.focus({ preventScroll: true });
+      setTimeout(() => element.classList.remove("learning-target-highlight"), 2200);
+    }
+
+    function prefersReducedMotion() {
+      return window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
+    }
+
+    function attrEqualsSelector(name, value) {
+      return "[" + name + "=" + JSON.stringify(String(value || "")) + "]";
+    }
     window.addEventListener("learning-native-notification-status", async (event) => {
       const detail = event.detail || {};
       const nativeStatus = detail.status || "unknown";
@@ -3762,7 +3946,7 @@ function renderHtml() {
       tableSelection.files.visibleKeys = files.map((file) => sourceSelectionKey(file));
       filesBody.innerHTML = files.map((file) => {
         const key = sourceSelectionKey(file);
-        return '<tr class="selectable-row' + (tableSelection.files.selected.has(key) ? " selected" : "") + '" tabindex="0" data-selection-table="files" data-selection-key="' + escapeHtml(key) + '">' +
+        return '<tr class="selectable-row' + (tableSelection.files.selected.has(key) ? " selected" : "") + '" tabindex="0" data-selection-table="files" data-selection-key="' + escapeHtml(key) + '" data-vault="' + escapeHtml(file.vault || "") + '" data-file="' + escapeHtml(file.file || "") + '" data-source-page="' + escapeHtml(file.sourcePage || "") + '">' +
         '<td><input class="source-select" type="checkbox" ' + (tableSelection.files.selected.has(key) ? "checked " : "") + 'data-selection-key="' + escapeHtml(key) + '" data-vault="' + escapeHtml(file.vault) + '" data-file="' + escapeHtml(file.file) + '" data-source-page="' + escapeHtml(file.sourcePage || "") + '"></td>' +
         '<td>' + escapeHtml(file.number) + '</td>' +
         '<td>' + escapeHtml(file.vault) + '</td>' +
@@ -4317,7 +4501,7 @@ function renderHtml() {
         topicsBody.innerHTML = '<tr><td colspan="7" class="muted">No topics match the current filters.</td></tr>';
         return;
       }
-      topicsBody.innerHTML = topics.map((topic, index) => '<tr>' +
+      topicsBody.innerHTML = topics.map((topic, index) => '<tr tabindex="0" data-vault="' + escapeHtml(topic.vault || "") + '" data-topic-path="' + escapeHtml(topic.path || "") + '" data-topic-title="' + escapeHtml(topic.title || "") + '">' +
         '<td>' + escapeHtml(topic.number || index + 1) + '</td>' +
         '<td>' + escapeHtml(topic.title) + '<div class="muted">' + escapeHtml(topic.summary || "") + '</div></td>' +
         '<td>' + escapeHtml(topic.type) + '</td>' +
@@ -4887,7 +5071,7 @@ function renderHtml() {
       const automation = context.automation || {};
       const steps = learningWorkflowSteps(context);
       const activeIndex = Math.max(0, steps.findIndex((step) => step.active));
-      return '<section class="learning-autopilot-hero">' +
+      return '<section id="learning-autopilot-surface" class="learning-autopilot-hero learning-scroll-target" data-learning-anchor="autopilot">' +
         '<div class="learning-autopilot-copy">' +
           '<span class="learning-kicker">Learning Autopilot</span>' +
           '<h3>' + escapeHtml(automationTitle(automation)) + '</h3>' +
@@ -4900,7 +5084,7 @@ function renderHtml() {
           '<strong>' + escapeHtml(String(automation.notificationsUnread || 0)) + '</strong><span>alerts unread</span>' +
         '</div>' +
         '<ol class="learning-stepper" style="--active-step:' + activeIndex + '">' + steps.map((step, index) =>
-          '<li class="' + (step.active ? "active" : "") + '"><span>' + escapeHtml(String(index + 1)) + '</span><strong>' + escapeHtml(step.label) + '</strong><em>' + escapeHtml(step.detail) + '</em></li>'
+          '<li class="' + (step.active ? "active" : "") + '"><button class="learning-target-button" type="button" data-learning-target="learning-section" data-section="' + escapeHtml(step.target || "learning-autopilot-surface") + '"><span>' + escapeHtml(String(index + 1)) + '</span><strong>' + escapeHtml(step.label) + '</strong><em>' + escapeHtml(step.detail) + '</em></button></li>'
         ).join("") + '</ol>' +
       '</section>';
     }
@@ -4909,12 +5093,12 @@ function renderHtml() {
       const resources = context.resourceGroups.reduce((sum, group) => sum + (group.resources || []).length, 0);
       const activePlans = (context.plans || []).filter((plan) => ["active", "approved"].includes(plan.status)).length;
       return [
-        { label: "Capture", detail: resources ? resources + " approved source(s)" : "Clip, import, or drop a file", active: resources > 0 || (context.automation.pendingRawCount || 0) > 0 },
-        { label: "Process", detail: (context.sourceLinks || []).length + " source link(s)", active: (context.automation.pendingRawCount || 0) > 0 },
-        { label: "Understand", detail: (context.stats.bits || 0) + " bit(s)", active: (context.stats.bits || 0) > 0 },
-        { label: "Practice", detail: (context.stats.cards || 0) + " card(s)", active: (context.stats.dueCards || []).length > 0 },
-        { label: "Plan", detail: (context.plans || []).length + " plan(s)", active: activePlans > 0 || (context.updateSuggestions || []).length > 0 },
-        { label: "Review", detail: ((context.stats.dueCards || []).length) + " due", active: (context.stats.dueCards || []).length > 0 }
+        { label: "Capture", detail: resources ? resources + " approved source(s)" : "Clip, import, or drop a file", active: resources > 0 || (context.automation.pendingRawCount || 0) > 0, target: "learning-source-capture-section" },
+        { label: "Process", detail: (context.sourceLinks || []).length + " source link(s)", active: (context.automation.pendingRawCount || 0) > 0, target: "learning-autopilot-settings" },
+        { label: "Understand", detail: (context.stats.bits || 0) + " bit(s)", active: (context.stats.bits || 0) > 0, target: "learning-cards-bits" },
+        { label: "Practice", detail: (context.stats.cards || 0) + " card(s)", active: (context.stats.dueCards || []).length > 0, target: "learning-cards-bits" },
+        { label: "Plan", detail: (context.plans || []).length + " plan(s)", active: activePlans > 0 || (context.updateSuggestions || []).length > 0, target: "learning-plan-guide" },
+        { label: "Review", detail: ((context.stats.dueCards || []).length) + " due", active: (context.stats.dueCards || []).length > 0, target: "learning-cards-bits" }
       ];
     }
 
@@ -4938,10 +5122,10 @@ function renderHtml() {
           kind: "review",
           title: "Today",
           steps: [
-            ["Review due cards", dueCount + " due"],
-            ["Process one pending source", pendingRaw + " pending"],
-            ["Practice newest concept", cardCount + " cards ready"],
-            ["Check next action", (state.nextActions || []).slice(0, 1)[0] || "No action waiting"]
+            ["Review due cards", dueCount + " due", "learning-cards-bits"],
+            ["Process one pending source", pendingRaw + " pending", "learning-autopilot-settings"],
+            ["Practice newest concept", cardCount + " cards ready", "learning-cards-bits"],
+            ["Check next action", (state.nextActions || []).slice(0, 1)[0] || "No action waiting", "learning-boost-grid"]
           ],
           action: dueCount ? "" : "process-pending",
           actionLabel: pendingRaw ? "Process pending now" : ""
@@ -4950,10 +5134,10 @@ function renderHtml() {
           kind: "plan",
           title: "This Week",
           steps: [
-            ["Finish pending sources", pendingRaw + " raw files"],
-            ["Group related concepts", sourceGroups + " group(s)"],
-            ["Review weak cards", dueCount + " due cards"],
-            ["Revise plans/goals", updateCount + " suggestion(s)"]
+            ["Finish pending sources", pendingRaw + " raw files", "learning-autopilot-settings"],
+            ["Group related concepts", sourceGroups + " group(s)", "learning-source-map"],
+            ["Review weak cards", dueCount + " due cards", "learning-cards-bits"],
+            ["Revise plans/goals", updateCount + " suggestion(s)", "learning-revise-section"]
           ],
           action: "draft-plans",
           actionLabel: "Draft plans"
@@ -4962,20 +5146,20 @@ function renderHtml() {
           kind: "bit",
           title: "When A Source Is Processed",
           steps: [
-            ["Read the gist", processedCount + " processed source(s)"],
-            ["Inspect bits", bitCount + " learning bit(s)"],
-            ["Practice cards", cardCount + " card(s)"],
-            ["Link to plan/goal", (context.plans || []).length + " plan(s)"],
-            ["Schedule review/export", "confirmation gated"]
+            ["Read the gist", processedCount + " processed source(s)", "learning-source-map"],
+            ["Inspect bits", bitCount + " learning bit(s)", "learning-cards-bits"],
+            ["Practice cards", cardCount + " card(s)", "learning-cards-bits"],
+            ["Link to plan/goal", (context.plans || []).length + " plan(s)", "learning-plan-guide"],
+            ["Schedule review/export", "confirmation gated", "learning-plan-actions-section"]
           ],
           action: "export-remnote",
           actionLabel: cardCount ? "Export to RemNote" : ""
         }
       ];
-      return '<section class="learning-map-panel"><h3>Numbered Learning Flow</h3><p class="muted">Use these lanes to know what to do now, this week, and immediately after a source finishes processing.</p>' +
+      return '<section id="learning-numbered-flow" class="learning-map-panel learning-scroll-target"><h3>Numbered Learning Flow</h3><p class="muted">Use these lanes to know what to do now, this week, and immediately after a source finishes processing.</p>' +
         '<div class="learning-flow-lanes">' + lanes.map((lane) =>
           '<section class="learning-flow-lane ' + escapeHtml(lane.kind) + '"><h4>' + escapeHtml(lane.title) + '</h4><ol>' +
-            lane.steps.map(([label, detail], index) => '<li><span>' + escapeHtml(String(index + 1)) + '</span><div><strong>' + escapeHtml(label) + '</strong><em>' + escapeHtml(detail) + '</em></div></li>').join("") +
+            lane.steps.map(([label, detail, target], index) => '<li><button class="learning-target-button" type="button" data-learning-target="learning-section" data-section="' + escapeHtml(target || lane.target || "learning-numbered-flow") + '"><span>' + escapeHtml(String(index + 1)) + '</span><div><strong>' + escapeHtml(label) + '</strong><em>' + escapeHtml(detail) + '</em></div></button></li>').join("") +
           '</ol>' + (lane.actionLabel ? '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="' + escapeHtml(lane.action) + '">' + escapeHtml(lane.actionLabel) + '</button></div>' : '') + '</section>'
         ).join("") + '</div></section>';
     }
@@ -4986,31 +5170,31 @@ function renderHtml() {
         .slice(0, 8);
       const bits = (context.stats.recentBits || []).slice(0, 8);
       const groups = groupLearningCardsAndBits(cards, bits);
-      return '<section class="learning-study-surface">' +
+      return '<section id="learning-cards-bits" class="learning-study-surface learning-scroll-target" data-learning-anchor="cards-bits">' +
         '<div class="learning-study-header"><h3>Cards And Bits</h3><p>Practice concept-specific recall first, then inspect the related source-grounded bits when you need context.</p>' + renderLearningLegend() + '</div>' +
         '<div class="learning-card-topic-groups">' + (groups.length ? groups.map((group, groupIndex) =>
-          '<section class="learning-card-topic-group">' +
+          '<section class="learning-card-topic-group learning-scroll-target" data-learning-topic="' + escapeHtml(group.topic) + '">' +
             '<header><h4>' + escapeHtml(group.topic) + '</h4><span class="learning-chip practice">' + escapeHtml(group.cards.length + " card(s)") + '</span></header>' +
             '<div class="learning-card-deck">' + group.cards.map((card, index) => renderLearningStudyCard(card, String(groupIndex) + "-" + String(index))).join("") + '</div>' +
-            (group.bits.length ? '<div class="learning-chip-row">' + group.bits.slice(0, 3).map((bit) => '<span class="learning-chip bit">' + escapeHtml(bit.title || bit.displayTopic || "bit") + '</span>').join("") + '</div>' : '') +
+            (group.bits.length ? '<div class="learning-chip-row">' + group.bits.slice(0, 3).map((bit) => '<button class="learning-chip bit" type="button" data-learning-target="source-page" data-vault="' + escapeHtml(state.vault || "") + '" data-source-page="' + escapeHtml(bit.sourcePage || "") + '">' + escapeHtml(bit.title || bit.displayTopic || "bit") + '</button>').join("") + '</div>' : '') +
           '</section>'
         ).join("") : '<div class="learning-empty-state">No cards yet. Autopilot will create concept-specific cards after a provider successfully processes sources.</div>') + '</div>' +
         '<div class="learning-bit-explorer"><h4>Recent learning bits</h4>' + (bits.length ? bits.map((bit) =>
-          '<details><summary>' + escapeHtml(bit.title || bit.displayTopic || bit.type || "Learning bit") + '</summary><p>' + escapeHtml(bit.body || "") + '</p><div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(bit.level || "core") + '</span><span class="learning-chip capture">' + escapeHtml(bit.displayEvidence || bit.sourcePage || "source pending") + '</span></div></details>'
+          '<details class="learning-scroll-target" data-learning-bit="' + escapeHtml(bit.id || bit.title || "") + '"><summary>' + escapeHtml(bit.title || bit.displayTopic || bit.type || "Learning bit") + '</summary><p>' + escapeHtml(bit.body || "") + '</p><div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(bit.level || "core") + '</span><button class="learning-chip capture" type="button" data-learning-target="source-page" data-vault="' + escapeHtml(state.vault || "") + '" data-source-page="' + escapeHtml(bit.sourcePage || "") + '">' + escapeHtml(bit.displayEvidence || bit.sourcePage || "source pending") + '</button></div></details>'
         ).join("") : '<p class="muted">No recent bits yet. Processed sources will appear here automatically.</p>') + '</div>' +
       '</section>';
     }
 
     function renderLearningStudyCard(card, index) {
       const kind = taxonomyForCard(card);
-      return '<article class="learning-study-card ' + escapeHtml(kind) + '"><div class="learning-study-card-inner">' +
+      return '<article class="learning-study-card learning-scroll-target ' + escapeHtml(kind) + '" data-learning-card="' + escapeHtml(card.id || card.displayPrompt || index) + '"><div class="learning-study-card-inner">' +
         '<div class="learning-study-card-face front">' +
           '<div class="learning-chip-row"><span class="learning-chip ' + escapeHtml(kind) + '">' + escapeHtml(card.displayType || card.type || "card") + '</span><span class="learning-chip bit">' + escapeHtml(card.displayTopic || card.learningFocus || "Key concept") + '</span></div>' +
           '<h4>' + escapeHtml(card.displayPrompt || card.front || card.cloze || "Recall prompt") + '</h4>' +
           (card.hint ? '<p class="muted">' + escapeHtml(card.hint) + '</p>' : '') +
           '<button class="secondary" type="button" data-learning-action="flip-card" data-card-index="' + escapeHtml(index) + '">Show answer</button></div>' +
         '<div class="learning-study-card-face back"><h4>Answer</h4><p>' + escapeHtml(card.back || card.explanation || "No answer text saved yet.") + '</p>' +
-          '<div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(card.learningFocus || card.displayTopic || "concept") + '</span><span class="learning-chip capture">' + escapeHtml(card.displayEvidence || card.sourcePage || "No source link") + '</span></div>' +
+          '<div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(card.learningFocus || card.displayTopic || "concept") + '</span><button class="learning-chip capture" type="button" data-learning-target="source-page" data-vault="' + escapeHtml(card.sourceVault || "") + '" data-source-page="' + escapeHtml(card.sourcePage || "") + '">' + escapeHtml(card.displayEvidence || card.sourcePage || "No source link") + '</button></div>' +
           (card.displayQuality === "repaired" ? '<small>Prompt clarified for display; stored card was not rewritten.</small>' : '') +
           '<button class="secondary" type="button" data-learning-action="flip-card" data-card-index="' + escapeHtml(index) + '">Back to prompt</button></div>' +
       '</div></article>';
@@ -5077,19 +5261,20 @@ function renderHtml() {
       const plan = (context.plans || []).slice().reverse().find((item) => ["active", "approved", "proposed", "scheduled"].includes(item.status)) || {};
       const goal = (context.goals || []).find((item) => item.id === plan.goalId) || (context.goals || [])[0] || {};
       const stages = (plan.stages || []).slice(0, 7);
-      return '<section class="learning-plan-guide">' +
+      return '<section id="learning-plan-guide" class="learning-plan-guide learning-scroll-target">' +
         '<div><h3>Plan And Goal Guide</h3><p>Autopilot may draft plans, but activation and external writes stay confirmation-gated.</p></div>' +
-        '<div class="learning-plan-summary"><strong>' + escapeHtml(goal.title || "No goal drafted yet") + '</strong><span>' + escapeHtml(goal.description || "Approved captured resources will become proposed goals automatically.") + '</span><span class="learning-chip">' + escapeHtml(goal.status || "waiting") + '</span></div>' +
+        '<div class="learning-plan-summary" data-learning-goal="' + escapeHtml(goal.id || "") + '"><button class="learning-target-button" type="button" data-learning-target="goal" data-goal-id="' + escapeHtml(goal.id || "") + '"><strong>' + escapeHtml(goal.title || "No goal drafted yet") + '</strong></button><span>' + escapeHtml(goal.description || "Approved captured resources will become proposed goals automatically.") + '</span><span class="learning-chip plan">' + escapeHtml(goal.status || "waiting") + '</span></div>' +
         '<ol class="learning-plan-timeline">' + (stages.length ? stages.map((stage, index) =>
-          '<li><span>' + escapeHtml(String(index + 1)) + '</span><div><strong>' + escapeHtml(stage.title || stage.stage || "Stage") + '</strong><p>' + escapeHtml(stage.goal || stage.description || "Work in a small, reviewable step.") + '</p><em>' + escapeHtml(stage.status || plan.status || "proposed") + '</em></div></li>'
+          '<li><span>' + escapeHtml(String(index + 1)) + '</span><div><button class="learning-target-button" type="button" data-learning-target="plan" data-plan-id="' + escapeHtml(plan.id || "") + '"><strong>' + escapeHtml(stage.title || stage.stage || "Stage") + '</strong></button><p>' + escapeHtml(stage.goal || stage.description || "Work in a small, reviewable step.") + '</p><em>' + escapeHtml(stage.status || plan.status || "proposed") + '</em></div></li>'
         ).join("") : '<li><span>1</span><div><strong>Waiting for plan draft</strong><p>Autopilot drafts a proposed plan after resources are processed.</p><em>safe automatic step</em></div></li>') + '</ol>' +
         '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="approve-plan">Approve selected plan</button><button class="secondary" type="button" data-learning-action="schedule-plan">Schedule approved plan</button></div>' +
       '</section>';
     }
 
     function renderLearningNotificationCenter(state, context) {
-      const notices = (context.notifications || []).slice(0, 8);
-      const alerts = (context.coachAlerts || []).slice(0, Math.max(0, 8 - notices.length)).map((alert, index) => ({
+      const notices = (context.notifications || []).slice(0, 12);
+      const deliverySummary = notificationStackSummary(context.notifications || []);
+      const alerts = (context.coachAlerts || []).slice(0, Math.max(0, 12 - notices.length)).map((alert, index) => ({
         id: "coach-alert-" + index,
         vault: state.vault,
         severity: alert.severity || "warning",
@@ -5099,15 +5284,40 @@ function renderHtml() {
         created: "",
         readAt: "coach"
       }));
-      const rows = [...notices.map((item) => ({ ...item, vault: state.vault })), ...alerts].slice(0, 8);
-      return '<section class="learning-notification-center">' +
+      const rows = [...notices.map((item) => ({ ...item, vault: state.vault })), ...alerts].slice(0, 12);
+      return '<section id="learning-notification-center" class="learning-notification-center learning-scroll-target">' +
         '<div class="learning-study-header"><h3>Notification Center</h3><p>macOS notifications carry important learning alerts; this list remains visible if Focus or system settings hide them.</p></div>' +
+        '<div class="learning-notification-summary" aria-label="Notification delivery stack">' +
+          '<span><strong>' + escapeHtml(String(deliverySummary.unread)) + '</strong>Unread</span>' +
+          '<span><strong>' + escapeHtml(String(deliverySummary.pendingNative)) + '</strong>Pending macOS</span>' +
+          '<span><strong>' + escapeHtml(String(deliverySummary.delivered)) + '</strong>Delivered</span>' +
+          '<span><strong>' + escapeHtml(String(deliverySummary.blocked)) + '</strong>Blocked/failed</span>' +
+        '</div>' +
         '<ul>' + (rows.length ? rows.map((item) =>
-          '<li class="' + escapeHtml(item.severity || "info") + '"><div><strong>' + escapeHtml(item.title || "Learning Boost") + '</strong><p>' + escapeHtml(item.body || item.detail || "") + '</p><small>' + escapeHtml([shortEventTime(item.created), item.detail, notificationDeliveryLabel(item)].filter(Boolean).join(" · ")) + '</small></div>' +
+          '<li id="learning-notification-' + escapeHtml(item.id || "") + '" class="learning-scroll-target ' + escapeHtml(item.severity || "info") + '" data-learning-notification="' + escapeHtml(item.id || "") + '"><div><button class="learning-target-button" type="button" data-learning-target="' + escapeHtml(notificationTargetType(item)) + '" data-vault="' + escapeHtml(item.vault || state.vault) + '" data-source-page="' + escapeHtml(item.sourcePage || "") + '" data-plan-id="' + escapeHtml(item.planId || "") + '" data-goal-id="' + escapeHtml(item.goalId || "") + '"><strong>' + escapeHtml(item.title || "Learning Boost") + '</strong></button><p>' + escapeHtml(item.body || item.detail || "") + '</p><small>' + escapeHtml([shortEventTime(item.created), item.detail, notificationDeliveryLabel(item)].filter(Boolean).join(" · ")) + '</small></div>' +
           (!item.readAt ? '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="mark-notification-read" data-vault="' + escapeHtml(item.vault || state.vault) + '" data-notification-id="' + escapeHtml(item.id || "") + '">Mark read</button><button class="secondary" type="button" data-learning-action="dismiss-notification" data-vault="' + escapeHtml(item.vault || state.vault) + '" data-notification-id="' + escapeHtml(item.id || "") + '">Dismiss</button></div>' : '') +
           '</li>'
         ).join("") : '<li><div><strong>No alerts right now</strong><p>Autopilot will notify you when a source is processed, a provider blocks work, or a plan needs confirmation.</p></div></li>') + '</ul>' +
       '</section>';
+    }
+
+    function notificationStackSummary(notifications) {
+      return (notifications || []).reduce((summary, item) => {
+        const status = item.nativeDeliveryStatus || (item.deliveredAt ? "delivered" : "pending");
+        if (!item.readAt && item.status !== "dismissed") summary.unread += 1;
+        if (status === "pending" || (status === "failed" && (item.deliveryAttempts || 0) < 3)) summary.pendingNative += 1;
+        if (status === "delivered") summary.delivered += 1;
+        if (status === "permission_denied" || status === "failed") summary.blocked += 1;
+        return summary;
+      }, { unread: 0, pendingNative: 0, delivered: 0, blocked: 0 });
+    }
+
+    function notificationTargetType(item) {
+      if (item.sourcePage) return "source-page";
+      if (item.planId) return "plan";
+      if (item.goalId) return "goal";
+      if (item.type === "provider_blocked") return "provider";
+      return "learning-section";
     }
 
     function notificationDeliveryLabel(item) {
@@ -5144,20 +5354,20 @@ function renderHtml() {
       const links = (context.sourceLinks || []).slice(-6).reverse();
       const groups = (context.sourceGroups || []).slice(0, 6);
       const events = (context.coach?.recentEvents || []).slice(0, 8);
-      return '<div class="learning-map-grid">' +
+      return '<div id="learning-source-map" class="learning-map-grid learning-scroll-target">' +
         '<section class="learning-map-panel"><h3>Source-To-Plan Map</h3>' +
           '<ul class="learning-routing-list">' + (links.length ? links.map((link) =>
-            '<li><strong>' + escapeHtml(link.title || "Source") + '</strong>' +
+            '<li class="learning-scroll-target" data-learning-source-page="' + escapeHtml(link.sourcePage || "") + '"><button class="learning-target-button" type="button" data-learning-target="source-page" data-vault="' + escapeHtml(state.vault || "") + '" data-source-page="' + escapeHtml(link.sourcePage || "") + '"><strong>' + escapeHtml(link.title || "Source") + '</strong></button>' +
             '<div class="muted">' + escapeHtml(link.group || "Ungrouped") + '</div>' +
             '<div class="learning-chip-row">' +
-              '<span class="learning-chip">' + escapeHtml((link.linkedGoals || []).length + " goals") + '</span>' +
-              '<span class="learning-chip">' + escapeHtml((link.linkedPlans || []).length + " plans") + '</span>' +
+              '<button class="learning-chip plan" type="button" data-learning-target="goal" data-goal-id="' + escapeHtml((link.linkedGoals || [])[0]?.id || (link.linkedGoals || [])[0]?.goalId || "") + '">' + escapeHtml((link.linkedGoals || []).length + " goals") + '</button>' +
+              '<button class="learning-chip plan" type="button" data-learning-target="plan" data-plan-id="' + escapeHtml((link.linkedPlans || [])[0]?.id || (link.linkedPlans || [])[0]?.planId || "") + '">' + escapeHtml((link.linkedPlans || []).length + " plans") + '</button>' +
               '<span class="learning-chip">' + escapeHtml((link.cardsCreated || 0) + " cards") + '</span>' +
             '</div></li>'
           ).join("") : '<li>No processed sources have been routed yet.</li>') + '</ul></section>' +
         '<section class="learning-map-panel"><h3>Groups And Notifications</h3>' +
           '<div class="learning-chip-row">' + (groups.length ? groups.map((group) =>
-            '<span class="learning-chip">' + escapeHtml(group.group + " · " + group.count) + '</span>'
+            '<button class="learning-chip bit" type="button" data-learning-target="learning-section" data-section="learning-cards-bits">' + escapeHtml(group.group + " · " + group.count) + '</button>'
           ).join("") : '<span class="learning-chip">No source groups yet</span>') + '</div>' +
           '<h3>Event Feed</h3><ul class="learning-event-feed">' + (events.length ? events.map((event) =>
             '<li><time>' + escapeHtml(shortEventTime(event.created)) + '</time><span>' + escapeHtml(eventLabel(event)) + '</span></li>'
@@ -5255,19 +5465,33 @@ function renderHtml() {
           "Expanded monitoring: " + (context.coachSettings.expandedMonitoringEnabled === true)
         ])
       ];
-      return '<div class="learning-boost-grid">' + cards.join("") + '</div>';
+      return '<div id="learning-boost-grid" class="learning-boost-grid learning-scroll-target">' + cards.join("") + '</div>';
     }
 
     function learningCard(title, why, actions, details, extra = "", tone = "") {
       const safeActions = (actions || []).filter(Boolean).slice(0, 3);
       const safeDetails = (details || []).filter(Boolean);
+      const target = targetForLearningCard(title);
       return '<section class="learning-card ' + escapeHtml(tone || "") + '">' +
-        '<h3>' + escapeHtml(title) + '</h3>' +
+        '<h3><button class="learning-target-button" type="button" data-learning-target="' + escapeHtml(target.type) + '" data-section="' + escapeHtml(target.section || "") + '" data-tab="' + escapeHtml(target.tab || "") + '">' + escapeHtml(title) + '</button></h3>' +
         '<h4>Why this matters</h4><p>' + escapeHtml(why) + '</p>' +
         '<h4>Do now</h4><ul>' + safeActions.map((item) => '<li>' + escapeHtml(item) + '</li>').join("") + '</ul>' +
         extra +
         '<details><summary>More details</summary><ul>' + safeDetails.map((item) => '<li>' + escapeHtml(item) + '</li>').join("") + '</ul></details>' +
         '</section>';
+    }
+
+    function targetForLearningCard(title) {
+      const text = String(title || "").toLowerCase();
+      if (text.includes("source")) return { type: "learning-section", section: "learning-source-map" };
+      if (text.includes("plan") || text.includes("goal")) return { type: "learning-section", section: "learning-plan-guide" };
+      if (text.includes("review") || text.includes("today")) return { type: "learning-section", section: "learning-cards-bits" };
+      if (text.includes("remnote")) return { type: "learning-section", section: "learning-plan-actions-section" };
+      if (text.includes("language") || text.includes("profile")) return { type: "learning-section", section: "learning-profile-section" };
+      if (text.includes("behavior") || text.includes("alert") || text.includes("system")) return { type: "learning-section", section: "learning-notification-center" };
+      if (text.includes("provider")) return { type: "provider" };
+      if (text.includes("internet")) return { type: "tab", tab: "chat" };
+      return { type: "learning-section", section: "learning-numbered-flow" };
     }
 
     async function saveLearningProfile(event) {

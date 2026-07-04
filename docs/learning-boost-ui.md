@@ -27,6 +27,18 @@ Each card uses the same structure:
 
 The app shows at most three suggested actions per card.
 
+## Navigation Targets
+
+Most Learning elements are clickable. Use them to jump directly to the target instead of hunting through tabs:
+
+- Flow steps jump to the relevant Learning section.
+- Source evidence chips jump to Files or Topics, then highlight the matching source when indexed.
+- Plan and goal chips load the matching item in Revise Plans And Goals.
+- Provider cards open the Provider tab.
+- Notification rows jump to their source, plan, goal, or provider blocker.
+
+When a target is only a vault file, the app opens that file safely from the known vault root.
+
 ## Cards And Bits
 
 Cards are grouped by the concept or topic they teach. The front of a card shows the card type, the topic/concept chip, and the prompt. The back shows the answer, related learning focus, and source evidence.
@@ -51,6 +63,14 @@ The numbered flow lanes answer three recurring user questions:
 - When a Source Is Processed: what to inspect and practice after Autopilot finishes a source.
 
 These flows show live counts and use existing safe local buttons such as Process pending now, Draft plans, and Export to RemNote.
+
+## Flexible Layout
+
+Learning panels use wrapping grids and natural-height cards. Controls, chips, notification rows, plan timelines, and card backs should wrap inside their containers instead of overlapping or hiding content. Routed targets receive a temporary highlight after the app scrolls to them.
+
+## Notification Stack
+
+The Notification Center has a stack summary for unread, pending macOS delivery, delivered, and blocked/failed alerts. Delivered alerts stay visible until you choose Mark read or Dismiss.
 
 For the full user flow, see [Learning Flow and Notifications](learning-flow-and-notifications.md).
 

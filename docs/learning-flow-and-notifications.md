@@ -77,6 +77,17 @@ The Learning tab shows three step-by-step lanes:
 
 Each lane shows current counts from the selected vault and includes one action button when the app already has a safe local action for that step.
 
+## Click-Through Targets
+
+Learning UI items are meant to move you to the related target instead of leaving you to navigate manually.
+
+- Flow steps jump to the matching Learning section.
+- Source chips jump to the Files or Topics tab and highlight the matching source row when it is indexed.
+- Plan and goal chips open the revision controls with the selected plan or goal loaded.
+- Provider alerts open the Provider tab.
+- Notification rows jump to the related source, plan, goal, or provider state when that target exists.
+- If a target is a real vault file that is not represented in the current UI, Learning Boost opens only files under a known vault root.
+
 ## Plans And Goals
 
 Plans and goals are based on gathered learning context, not one isolated source.
@@ -132,6 +143,10 @@ Detailed notifications are off by default. Privacy-safe notifications avoid sour
 The in-app Notification Center is the durable alert log. It remains useful when macOS Focus, Notification Settings, or device sync hide a banner.
 
 Each notification shows whether native delivery is pending, delivered, blocked by permission, or failed after retry attempts.
+
+The Notification Center keeps delivered-but-unread notifications visible. macOS delivery means the system accepted the banner; it does not mean you read it. Use `Mark read` when the alert is handled, or `Dismiss` when it should leave the in-app stack.
+
+The stack summary shows unread alerts, pending native deliveries, delivered alerts, and blocked or failed deliveries.
 
 ## macOS Notifications
 
