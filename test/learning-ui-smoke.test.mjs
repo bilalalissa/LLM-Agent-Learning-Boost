@@ -76,6 +76,17 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /displayQuality === "repaired"/);
   assert.match(serverSource, /groupLearningCardsAndBits/);
   assert.match(serverSource, /renderLearningStepByStepFlow/);
+  assert.match(serverSource, /data-learning-target="cards"/);
+  assert.match(serverSource, /learning-filter-banner/);
+  assert.match(serverSource, /clear-card-filter/);
+  assert.match(serverSource, /No linked goals yet/);
+  assert.match(serverSource, /No linked plans yet/);
+  assert.match(serverSource, /renderSourceMapChips/);
+  assert.match(serverSource, /button\.learning-chip:disabled/);
+  assert.ok(serverSource.includes(".learning-stepper li { position: relative; display: block;"));
+  assert.ok(serverSource.includes(".learning-flow-lane li { display: block;"));
+  assert.ok(!serverSource.includes(".learning-stepper li { position: relative; display: grid; grid-template-columns: 28px"));
+  assert.ok(!serverSource.includes(".learning-flow-lane li { display: grid; grid-template-columns: 28px"));
   assert.match(serverSource, /Review due cards/);
   assert.match(serverSource, /Finish pending sources/);
   assert.match(serverSource, /Read the gist/);
@@ -94,6 +105,17 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /api\/learning\/process-pending/);
   assert.match(serverSource, /api\/learning\/notifications/);
   assert.match(serverSource, /api\/native\/notification-test/);
+  assert.match(serverSource, /api\/learning\/export-preview/);
+  assert.match(serverSource, /api\/learning\/export-confirm/);
+  assert.match(serverSource, /learning-export-review/);
+  assert.match(serverSource, /Confirm export/);
+  assert.match(serverSource, /Editable export preview/);
+  assert.match(serverSource, /api\/learning\/capture-scan/);
+  assert.match(serverSource, /Scan capture sources now/);
+  assert.match(serverSource, /capture-scan-status/);
+  assert.match(serverSource, /runLearningCaptureScan/);
+  assert.match(serverSource, /collectWatchFolderResources/);
+  assert.match(serverSource, /collectScreenshots/);
   assert.match(serverSource, /learningNotification/);
   assert.match(serverSource, /learning-native-notification-status/);
   assert.match(serverSource, /notificationDeliveryLabel/);
@@ -208,10 +230,10 @@ test("Stage 8 confirmation gates are present in the app UI", () => {
     "Enable expanded monitoring",
     "Allow non-sensitive captured sources to use cloud processing",
     "Allow chat to access the internet automatically",
-    "Export approved plan stages to an iCalendar file",
-    "Export approved plan reminders",
     "Activate this learning plan now",
-    "Confirm large RemNote export"
+    "Confirm large RemNote export",
+    "Review export content before confirming",
+    "Nothing has been written yet"
   ]) {
     assert.match(serverSource, new RegExp(message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }

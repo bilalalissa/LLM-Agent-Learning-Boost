@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { exportPlanIcs, generateIcs } from "../src/calendar-integration.mjs";
+import { exportPlanIcs, generateIcs, previewPlanIcs } from "../src/calendar-integration.mjs";
 import {
   activateLearningPlan,
   approveLearningPlan,
@@ -21,7 +21,7 @@ import {
 } from "../src/learning-planner.mjs";
 import { ensureLearningScaffold, learningPaths } from "../src/learning-store.mjs";
 import { readPlanUpdateSuggestions, recordPlanUpdateChoice, suggestPlanUpdates } from "../src/plan-update-suggester.mjs";
-import { exportPlanRemindersMarkdown } from "../src/reminders-integration.mjs";
+import { exportPlanRemindersMarkdown, previewPlanRemindersMarkdown } from "../src/reminders-integration.mjs";
 import { captureResource } from "../src/source-capture.mjs";
 
 function makeVault() {
@@ -246,6 +246,23 @@ test("calendar integration generates valid .ics only after plan approval and con
   assert.equal(fs.existsSync(path.join(learningPaths(vault).dir, "external-write-log.jsonl")), true);
 });
 
+test("calendar export preview is editable and does not write files", () => {
+  const { vault } = makeVault();
+  seedResources(vault);
+  const draft = draftLearningPlans(vault, { now: "2026-06-29T12:00:00.000Z" });
+  const planId = draft.plans[0].id;
+  approveLearningPlan(vault, planId, { confirmed: true });
+
+  const preview = previewPlanIcs(vault, planId, { start: "2026-07-01T09:00:00.000Z" });
+  assert.equal(preview.preview, true);
+  assert.equal(preview.eventCount, 7);
+  assert.match(preview.editableContent, /BEGIN:VCALENDAR/);
+  assert.equal(fs.existsSync(path.join(vault, preview.destination)), false);
+
+  const exported = exportPlanIcs(vault, planId, { confirmed: true, editedContent: "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n" });
+  assert.equal(fs.readFileSync(path.join(vault, exported.file), "utf8"), "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n");
+});
+
 test("generateIcs escapes text for iCalendar consumers", () => {
   const ics = generateIcs(
     { id: "plan-1", title: "A, B; C" },
@@ -280,6 +297,23 @@ test("reminder export is approval and confirmation gated with markdown fallback"
   assert.equal(exported.exported, true);
   assert.match(markdown, /# Reminders:/);
   assert.match(markdown, /Review 20 due cards/);
+});
+
+test("reminder export preview is editable and does not write files", () => {
+  const { vault } = makeVault();
+  seedResources(vault);
+  const draft = draftLearningPlans(vault, { now: "2026-06-29T12:00:00.000Z" });
+  const planId = draft.plans[0].id;
+  approveLearningPlan(vault, planId, { confirmed: true });
+
+  const preview = previewPlanRemindersMarkdown(vault, planId);
+  assert.equal(preview.preview, true);
+  assert.ok(preview.reminderCount > 0);
+  assert.match(preview.editableContent, /# Reminders:/);
+  assert.equal(fs.existsSync(path.join(vault, preview.destination)), false);
+
+  const exported = exportPlanRemindersMarkdown(vault, planId, { confirmed: true, editedContent: "# Edited reminders\n" });
+  assert.equal(fs.readFileSync(path.join(vault, exported.file), "utf8"), "# Edited reminders\n");
 });
 
 test("plan update suggestions are stored and never auto-applied", () => {

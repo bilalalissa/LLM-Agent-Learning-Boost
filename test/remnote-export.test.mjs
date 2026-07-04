@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { exportRemnoteBundle, exportRemnoteForVault, formatRemnoteCard, renderRemnoteText } from "../src/remnote-export.mjs";
+import { exportRemnoteBundle, exportRemnoteForVault, formatRemnoteCard, previewRemnoteForVault, renderRemnoteText } from "../src/remnote-export.mjs";
 
 function makeVault() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "learning-boost-remnote-"));
@@ -79,6 +79,26 @@ test("exportRemnoteForVault requires confirmation for large exports", () => {
   const result = exportRemnoteForVault({ vaultsRoot: root }, "Research-vault");
   assert.equal(result.requiresConfirmation, true);
   assert.equal(result.cardCount, 101);
+});
+
+test("previewRemnoteForVault does not write export files and confirm can write edited content", () => {
+  const { root, vault } = makeVault();
+  const cardsFile = path.join(vault, ".llm-wiki", "learning", "cards.jsonl");
+  fs.writeFileSync(cardsFile, JSON.stringify({ id: "card-1", front: "What is retrieval practice?", back: "Recall before rereading." }) + "\n");
+
+  const preview = previewRemnoteForVault({ vaultsRoot: root }, "Research-vault");
+  const exportsDir = path.join(vault, ".llm-wiki", "learning", "exports");
+  assert.equal(preview.preview, true);
+  assert.equal(preview.cardCount, 1);
+  assert.match(preview.editableContent, /What is retrieval practice\?/);
+  assert.equal(fs.existsSync(path.join(exportsDir, "remnote-import.md")), false);
+
+  const exported = exportRemnoteForVault({ vaultsRoot: root }, "Research-vault", {
+    confirmLarge: true,
+    editedContent: "# Edited RemNote\n"
+  });
+  assert.equal(exported.requiresConfirmation, false);
+  assert.equal(fs.readFileSync(path.join(exportsDir, "remnote-import.md"), "utf8"), "# Edited RemNote\n");
 });
 
 test("renderRemnoteText keeps cards separated for copy paste", () => {

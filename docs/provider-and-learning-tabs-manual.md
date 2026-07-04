@@ -194,6 +194,8 @@ Use Overview as your "what now?" area. If it says provider health needs attentio
 
 Most Overview, flow, card, source, plan, goal, provider, and notification items are clickable targets. A click should move you to the matching Learning section, Files/Topics row, Provider tab, or plan/goal editor and briefly highlight the destination. If the destination is only a vault file, the app opens that file from the known vault root.
 
+In Source-To-Plan Map, source titles open or highlight the source target. `N goals` and `N plans` chips load revision controls when links exist; zero-count chips are disabled and explain that no linked item exists yet. `N cards` and group chips filter Cards And Bits, where a banner shows the active filter and a Clear filter button.
+
 ### Learning Autopilot
 
 Learning Autopilot is the normal automatic flow. When it is on, Learning Boost watches `raw/`, `raw/inbox/`, `raw/input/`, and approved captured resources. If the selected provider can answer, the app processes pending sources into source pages, multiple learning bits, active-recall cards, source links, and dashboards. If the provider cannot answer, the file stays pending and the Notification Center records the blocker.
@@ -222,9 +224,11 @@ Approve plan marks a plan as approved. Approval means "this plan is acceptable."
 
 Activate plan makes the approved plan the current active plan.
 
-Export calendar creates an iCalendar file only after confirmation.
+Export calendar opens Export Review first. Review the selected vault, plan, destination, event count, warnings, and editable `.ics` text. Nothing is written until you click Confirm export.
 
-Export reminders creates a Reminders-ready Markdown export only after confirmation.
+Export reminders opens Export Review first. Review the selected vault, plan, destination, reminder count, warnings, and editable Markdown task text. Nothing is written until you click Confirm export.
+
+Export RemNote also opens Export Review. Inspect the card/media counts and editable RemNote Markdown or text before confirming.
 
 Suggest updates looks for changes that may improve a plan. Suggestions are stored; they are not automatically applied.
 
@@ -263,6 +267,8 @@ Safe default:
 - Cloud policy: ask each time or never.
 
 Full Local Capture Mode is intentionally confirmation-gated. Enable it only if you want broader local activity capture and understand what sources may be indexed locally.
+
+Click Scan capture sources now to see what enabled local collectors can find. The scan reports enabled collectors, last scan time, captured count, duplicates, skipped items with reasons, and the next safe action. It checks configured watch folders, screenshot folders when explicitly enabled, ResourceInbox status, and preview-safe opened-document metadata when explicitly enabled. It does not silently start live screen recording, broad browser history import, clipboard monitoring, or full monitoring.
 
 ### Add Resource
 
@@ -329,8 +335,10 @@ Use this if privacy matters and you want deliberate capture.
 2. Select the vault.
 3. Read Overview for card count.
 4. Click Export RemNote.
-5. Confirm if the export is large.
-6. Use the generated Markdown/text files and media bundle for manual RemNote import.
+5. Review the Export Review panel.
+6. Edit the preview content if needed.
+7. Click Confirm export.
+8. Use the generated Markdown/text files and media bundle for manual RemNote import.
 
 ## Common Problems
 

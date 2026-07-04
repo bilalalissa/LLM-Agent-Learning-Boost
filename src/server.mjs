@@ -7,7 +7,7 @@ import { deleteArchivedItems } from "./archive-delete.mjs";
 import { restoreArchivedItems } from "./archive-restore.mjs";
 import { backfillLearningSections } from "./backfill-learning-sections.mjs";
 import { clearBehaviorData, exportBehaviorData, trackBehaviorEvent, updateBehaviorSettings } from "./behavior-tracker.mjs";
-import { createCalendarEvents, exportPlanIcs } from "./calendar-integration.mjs";
+import { createCalendarEvents, exportPlanIcs, previewPlanIcs } from "./calendar-integration.mjs";
 import { getConfig, readProviderConfigForUi, setConfigFilePath, updateProviderConfig } from "./config.mjs";
 import { answerQuestion } from "./chat-lib.mjs";
 import { saveChatAsRawSource } from "./chat-source.mjs";
@@ -41,8 +41,8 @@ import {
   saveRemoteSourcesToResourceInbox,
   updateRemoteResearchSettings
 } from "./remote-research.mjs";
-import { createReminders, exportPlanRemindersMarkdown } from "./reminders-integration.mjs";
-import { exportRemnoteForVault } from "./remnote-export.mjs";
+import { createReminders, exportPlanRemindersMarkdown, previewPlanRemindersMarkdown } from "./reminders-integration.mjs";
+import { exportRemnoteForVault, previewRemnoteForVault } from "./remnote-export.mjs";
 import { listBridgeVaults, sharedSettingsForVault, sharedSettingsSummary, updateSharedSettingsForVault } from "./shared-settings.mjs";
 import { deleteSources } from "./source-delete.mjs";
 import { mergeSources } from "./source-merge.mjs";
@@ -57,6 +57,8 @@ import {
   stageResourcesForIngest,
   updateSourceCaptureSettings
 } from "./source-capture.mjs";
+import { collectScreenshots } from "./source-collectors/screenshots-collector.mjs";
+import { collectWatchFolderResources } from "./source-collectors/watch-folder-collector.mjs";
 import { topicContentAsync } from "./topic-content.mjs";
 import { listRawCandidates, listVaults, vaultName } from "./vaults.mjs";
 import { bootstrapVault } from "./vault-bootstrap.mjs";
@@ -96,6 +98,7 @@ const tabDataCache = {
 };
 const tabDataWorkers = new Map();
 const learningAutomationRuntime = new Map();
+const captureScanRuntime = new Map();
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
@@ -521,6 +524,21 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "POST" && url.pathname === "/api/learning/capture-scan") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = runLearningCaptureScan(vaultPath);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/api/learning/resource-capture") {
     try {
       const body = await readBody(request);
@@ -711,6 +729,37 @@ const server = http.createServer(async (request, response) => {
       const payload = JSON.parse(body || "{}");
       const vaultPath = resolveLearningVaultPath(payload.vault);
       const result = reviseLearningGoal(vaultPath, payload.goalId, payload.patch || {});
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/export-preview") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = learningExportPreview(vaultPath, payload);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/export-confirm") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      if (payload.confirmed !== true) throw new Error("Export confirmation is required.");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = learningExportConfirm(vaultPath, payload);
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
     } catch (error) {
@@ -1308,6 +1357,7 @@ function enrichLearningRuntime(data) {
       return {
         ...item,
         automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)),
+        captureScan: captureScanRuntime.get(vaultName(vaultPath)) || null,
         notifications: readLearningNotifications(vaultPath, { limit: 30 })
       };
     })
@@ -1986,6 +2036,115 @@ function resolveLearningVaultPath(name) {
   return vaultPath;
 }
 
+function learningExportPreview(vaultPath, payload = {}) {
+  const type = String(payload.type || payload.format || "").toLowerCase();
+  if (type === "calendar" || type === "ics" || type === "apple_calendar") {
+    const preview = previewPlanIcs(vaultPath, payload.planId, { start: payload.start });
+    if (type === "apple_calendar") {
+      return {
+        ...preview,
+        type: "apple_calendar",
+        format: "ics",
+        externalTarget: "Apple Calendar events",
+        warnings: [
+          ...preview.warnings,
+          "Confirming Apple Calendar export will create events only when the native bridge is available; otherwise an iCalendar file is written."
+        ]
+      };
+    }
+    return preview;
+  }
+  if (type === "reminders" || type === "markdown" || type === "apple_reminders") {
+    const preview = previewPlanRemindersMarkdown(vaultPath, payload.planId);
+    if (type === "apple_reminders") {
+      return {
+        ...preview,
+        type: "apple_reminders",
+        externalTarget: "Apple Reminders",
+        warnings: [
+          ...preview.warnings,
+          "Confirming Apple Reminders export will create reminders only when the native bridge is available; otherwise a Markdown file is written."
+        ]
+      };
+    }
+    return preview;
+  }
+  if (type === "remnote") return previewRemnoteForVault(config, vaultName(vaultPath), { format: payload.format || "markdown" });
+  throw new Error("Choose calendar, reminders, or remnote export.");
+}
+
+function learningExportConfirm(vaultPath, payload = {}) {
+  const type = String(payload.type || payload.format || "").toLowerCase();
+  const options = {
+    confirmed: payload.confirmed === true,
+    start: payload.start,
+    confirmLarge: payload.confirmLarge === true || payload.confirmed === true,
+    editedContent: payload.editedContent
+  };
+  if (type === "calendar" || type === "ics") return exportPlanIcs(vaultPath, payload.planId, options);
+  if (type === "apple_calendar") return createCalendarEvents(vaultPath, payload.planId, options);
+  if (type === "reminders" || type === "markdown") return exportPlanRemindersMarkdown(vaultPath, payload.planId, options);
+  if (type === "apple_reminders") return createReminders(vaultPath, payload.planId, options);
+  if (type === "remnote") return exportRemnoteForVault(config, vaultName(vaultPath), { confirmLarge: true, editedContent: payload.editedContent });
+  throw new Error("Choose calendar, reminders, or remnote export.");
+}
+
+function runLearningCaptureScan(vaultPath) {
+  const settings = readSourceCaptureSettings(vaultPath);
+  const started = new Date().toISOString();
+  const collectors = [];
+  const results = [];
+  const skipped = [];
+  if (!settings.enabled) {
+    skipped.push({ collector: "source_capture", reason: "Source capture is disabled." });
+  } else {
+    if ((settings.watchFolders || []).length) {
+      collectors.push("watch_folders");
+      results.push(...collectWatchFolderResources(vaultPath, { settings, previewApproved: true }));
+    } else {
+      skipped.push({ collector: "watch_folders", reason: "No watch folders are configured." });
+    }
+    if (settings.screenshots === true) {
+      collectors.push("screenshots");
+      results.push(...collectScreenshots(vaultPath, { settings, previewApproved: true }));
+    } else {
+      skipped.push({ collector: "screenshots", reason: "Screenshot capture is disabled." });
+    }
+    if (settings.browserClipper !== false) {
+      skipped.push({ collector: "browser_clipper", reason: "Browser clipper is extension-driven; use Arc clipper actions for page content." });
+    }
+    if (settings.openedDocuments === true) {
+      skipped.push({ collector: "opened_documents", reason: "Opened-document metadata has no approved local preview source in this scan." });
+    }
+    for (const [key, label] of [
+      ["browserHistoryImport", "browser_history"],
+      ["clipboard", "clipboard"],
+      ["visitedWebPages", "visited_web_pages"],
+      ["frontmostAppMetadata", "frontmost_app_metadata"]
+    ]) {
+      if (settings[key] === true) skipped.push({ collector: label, reason: "Broad monitoring is opt-in and not scanned silently by this safe local scan." });
+    }
+  }
+  const captured = results.filter((item) => item.captured).length;
+  const duplicates = results.filter((item) => item.duplicate).length;
+  const blocked = results.filter((item) => !item.captured && !item.duplicate).map((item) => ({ collector: "capture", reason: item.reason || "Capture blocked." }));
+  const summary = {
+    status: captured ? "captured" : "scanned",
+    lastScanAt: started,
+    collectors,
+    captured,
+    duplicates,
+    skipped: skipped.concat(blocked),
+    skippedCount: skipped.length + blocked.length + duplicates,
+    nextAction: captured
+      ? "Review ResourceInbox or process captured sources into learning insights."
+      : "No new approved local files were captured. Check watch folders or use the Arc clipper/manual import."
+  };
+  captureScanRuntime.set(vaultName(vaultPath), summary);
+  invalidateTabData("learning");
+  return summary;
+}
+
 function recordProviderFallbackIfNeeded(status) {
   if (config.provider !== "local_auto") return;
   if (!["red", "orange"].includes(status.statusColor)) return;
@@ -2305,6 +2464,7 @@ function renderHtml() {
     .learning-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .learning-chip { display: inline-flex; align-items: center; max-width: 100%; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font-size: 12px; color: var(--muted); background: var(--soft); overflow-wrap: anywhere; white-space: normal; }
     button.learning-chip { cursor: pointer; font: inherit; }
+    button.learning-chip:disabled { cursor: not-allowed; opacity: .58; text-decoration: none; }
     .learning-chip.capture, .learning-card.capture, .learning-flow-lane.capture, .learning-type-legend .capture, .learning-study-card.capture { --kind: #0f766e; --kind-soft: color-mix(in srgb, #0f766e 13%, var(--panel)); }
     .learning-chip.bit, .learning-card.bit, .learning-flow-lane.bit, .learning-type-legend .bit, .learning-study-card.bit { --kind: #2563eb; --kind-soft: color-mix(in srgb, #2563eb 12%, var(--panel)); }
     .learning-chip.practice, .learning-card.practice, .learning-flow-lane.practice, .learning-type-legend .practice, .learning-study-card.practice { --kind: #7c3aed; --kind-soft: color-mix(in srgb, #7c3aed 12%, var(--panel)); }
@@ -2351,10 +2511,10 @@ function renderHtml() {
     .learning-autopilot-meter strong { font-size: 24px; line-height: 1; color: var(--accent); }
     .learning-autopilot-meter span { color: var(--muted); font-size: 12px; align-self: center; }
     .learning-stepper { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr)); gap: 8px; list-style: none; margin: 2px 0 0; padding: 0; }
-    .learning-stepper li { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 7px; align-items: start; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); transition: transform .18s ease, border-color .18s ease, background .18s ease; }
+    .learning-stepper li { position: relative; display: block; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); transition: transform .18s ease, border-color .18s ease, background .18s ease; }
     .learning-stepper button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 7px; width: 100%; color: inherit; text-decoration: none; }
     .learning-stepper li span { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--soft); color: var(--muted); font-weight: 800; }
-    .learning-stepper li strong { font-size: 13px; }
+    .learning-stepper li strong { min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
     .learning-stepper li em { grid-column: 2; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: anywhere; }
     .learning-stepper li.active { border-color: var(--accent); background: color-mix(in srgb, var(--mark) 36%, var(--panel)); transform: translateY(-2px); }
     .learning-stepper li.active span { background: var(--accent); color: #fff; }
@@ -2373,6 +2533,12 @@ function renderHtml() {
     .learning-study-card-face h4 { margin: 0; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
     .learning-study-card-face p { margin: 0; overflow-wrap: anywhere; }
     .learning-study-card-face small { color: var(--muted); overflow-wrap: anywhere; }
+    .learning-evidence-label { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; max-width: 100%; word-break: normal; overflow-wrap: anywhere; }
+    .learning-filter-banner, .learning-capture-status, .learning-export-review { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--soft); color: var(--muted); overflow-wrap: anywhere; }
+    .learning-filter-banner { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+    .learning-export-review textarea { width: 100%; min-height: 280px; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre; overflow: auto; }
+    .learning-export-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 8px; margin: 8px 0; }
+    .learning-export-meta span { border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: var(--panel); overflow-wrap: anywhere; }
     .learning-study-card-face.back { display: none; background: color-mix(in srgb, var(--panel) 85%, var(--soft)); }
     .learning-study-card.flipped .learning-study-card-face.front { display: none; }
     .learning-study-card.flipped .learning-study-card-face.back { display: grid; }
@@ -2385,7 +2551,7 @@ function renderHtml() {
     .learning-flow-lane { border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 32%, var(--line)); border-radius: 8px; padding: 12px; background: var(--kind-soft, var(--panel)); }
     .learning-flow-lane h4 { margin: 0 0 8px; font-size: 15px; }
     .learning-flow-lane ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; }
-    .learning-flow-lane li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; align-items: start; }
+    .learning-flow-lane li { display: block; min-width: 0; }
     .learning-flow-lane button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: 100%; color: inherit; text-decoration: none; }
     .learning-flow-lane button > span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--kind, var(--accent)) 78%, #fff); color: #fff; font-weight: 800; font-size: 12px; }
     .learning-flow-lane strong { display: block; font-size: 13px; }
@@ -2408,6 +2574,11 @@ function renderHtml() {
     .learning-notification-center li.warning { border-color: color-mix(in srgb, #f59e0b 55%, var(--line)); }
     .learning-notification-center li.critical { border-color: color-mix(in srgb, #dc2626 55%, var(--line)); }
     .learning-notification-center small { color: var(--muted); }
+    @media (max-width: 760px) {
+      .learning-card-deck { grid-template-columns: 1fr; }
+      .learning-stepper { grid-template-columns: 1fr; }
+      .learning-export-review textarea { min-height: 220px; }
+    }
     @media (prefers-reduced-motion: reduce) {
       .learning-stepper li, .learning-study-card-inner { transition: none; }
       .learning-stepper li.active { transform: none; }
@@ -2881,6 +3052,22 @@ function renderHtml() {
           </div>
 	        </details>
 
+        <section id="learning-export-review" class="learning-export-review learning-scroll-target" hidden>
+          <h3 id="learning-export-title">Review Export</h3>
+          <p id="learning-export-summary" class="muted"></p>
+          <div id="learning-export-meta" class="learning-export-meta"></div>
+          <div id="learning-export-warnings"></div>
+          <label class="learning-field full">
+            <span>Editable export preview</span>
+            <textarea id="learning-export-content" spellcheck="false"></textarea>
+          </label>
+          <div class="learning-button-row">
+            <button id="confirm-learning-export" class="primary" type="button">Confirm export</button>
+            <button id="edit-learning-export-plan" class="secondary" type="button">Edit plan</button>
+            <button id="cancel-learning-export" class="secondary" type="button">Cancel</button>
+          </div>
+        </section>
+
         <details id="learning-revise-section" class="learning-section learning-scroll-target">
           <summary>Revise Plans And Goals</summary>
           <div class="learning-actions">
@@ -3004,7 +3191,11 @@ function renderHtml() {
               <option value="allow_non_sensitive">Allow non-sensitive</option>
             </select></label>
             <label class="learning-field"><span>Retention days</span><input id="retention-days" type="number" min="1" step="1" placeholder="90"></label>
-            <button class="primary" type="submit">Save capture settings</button>
+            <div class="learning-button-row">
+              <button class="primary" type="submit">Save capture settings</button>
+              <button id="scan-capture-sources" class="secondary" type="button">Scan capture sources now</button>
+            </div>
+            <div id="capture-scan-status" class="learning-capture-status full">No capture scan has run in this session.</div>
           </form>
         </details>
 
@@ -3225,6 +3416,15 @@ function renderHtml() {
     const activateLearningPlanButton = document.querySelector("#activate-learning-plan");
     const exportPlanCalendar = document.querySelector("#export-plan-calendar");
     const exportPlanReminders = document.querySelector("#export-plan-reminders");
+    const learningExportReview = document.querySelector("#learning-export-review");
+    const learningExportTitle = document.querySelector("#learning-export-title");
+    const learningExportSummary = document.querySelector("#learning-export-summary");
+    const learningExportMeta = document.querySelector("#learning-export-meta");
+    const learningExportWarnings = document.querySelector("#learning-export-warnings");
+    const learningExportContent = document.querySelector("#learning-export-content");
+    const confirmLearningExport = document.querySelector("#confirm-learning-export");
+    const editLearningExportPlan = document.querySelector("#edit-learning-export-plan");
+    const cancelLearningExport = document.querySelector("#cancel-learning-export");
     const suggestPlanUpdatesButton = document.querySelector("#suggest-plan-updates");
     const learningPlanId = document.querySelector("#learning-plan-id");
     const learningPlanSelect = document.querySelector("#learning-plan-select");
@@ -3273,6 +3473,8 @@ function renderHtml() {
     const languageBridgeToggle = document.querySelector("#language-bridge-toggle");
     const demographicPersonalizationToggle = document.querySelector("#demographic-personalization-toggle");
     const sourceCaptureForm = document.querySelector("#source-capture-form");
+    const scanCaptureSources = document.querySelector("#scan-capture-sources");
+    const captureScanStatus = document.querySelector("#capture-scan-status");
     const manualResourceForm = document.querySelector("#manual-resource-form");
     const sourceCaptureEnabled = document.querySelector("#source-capture-enabled");
     const autoInsightsToggle = document.querySelector("#auto-insights-toggle");
@@ -3353,6 +3555,8 @@ function renderHtml() {
     let archivesCache = [];
     let topicsCache = [];
     let learningCache = null;
+    let learningCardsFilter = null;
+    let pendingLearningExport = null;
     let providerStatusCache = null;
     let providerConfigOptions = {};
     let sideTopicsLoaded = false;
@@ -3598,7 +3802,7 @@ function renderHtml() {
     learningAutomationForm.addEventListener("submit", saveLearningAutomationSettings);
     processPendingLearning.addEventListener("click", processPendingLearningNow);
     testNativeNotification.addEventListener("click", sendNativeNotificationTest);
-    exportRemnote.addEventListener("click", () => exportRemnoteBundle(false));
+    exportRemnote.addEventListener("click", () => openLearningExportReview("remnote"));
     pauseBehavior.addEventListener("click", toggleBehaviorPause);
     exportBehavior.addEventListener("click", exportBehaviorData);
     clearBehavior.addEventListener("click", clearBehaviorData);
@@ -3611,6 +3815,14 @@ function renderHtml() {
     activateLearningPlanButton.addEventListener("click", activateSelectedLearningPlan);
     exportPlanCalendar.addEventListener("click", exportSelectedPlanCalendar);
     exportPlanReminders.addEventListener("click", exportSelectedPlanReminders);
+    confirmLearningExport.addEventListener("click", confirmPendingLearningExport);
+    cancelLearningExport.addEventListener("click", closeLearningExportReview);
+    editLearningExportPlan.addEventListener("click", () => {
+      const planId = pendingLearningExport?.planId || selectedLearningPlanId();
+      closeLearningExportReview();
+      void revealPlanTarget(planId);
+    });
+    scanCaptureSources.addEventListener("click", scanCaptureSourcesNow);
     suggestPlanUpdatesButton.addEventListener("click", suggestUpdatesForPlans);
     learningPlanSelect.addEventListener("change", syncRevisionFieldsFromSelectedPlan);
     learningGoalSelect.addEventListener("change", syncRevisionFieldsFromSelectedGoal);
@@ -3641,6 +3853,11 @@ function renderHtml() {
       }
       if (action === "mark-notification-read") markLearningNotification(actionButton.dataset.vault, actionButton.dataset.notificationId, "read");
       if (action === "dismiss-notification") markLearningNotification(actionButton.dataset.vault, actionButton.dataset.notificationId, "dismiss");
+      if (action === "clear-card-filter") {
+        learningCardsFilter = null;
+        renderLearningProfile();
+        revealLearningSection("learning-cards-bits");
+      }
     });
 
     async function navigateLearningTarget(button) {
@@ -3670,6 +3887,10 @@ function renderHtml() {
         await revealGoalTarget(button.dataset.goalId || "");
         return;
       }
+      if (target === "cards") {
+        await revealCardsTarget(button);
+        return;
+      }
       if (target === "notification") {
         await activateTab("learning");
         revealElement(document.querySelector("#learning-notification-" + cssEscape(button.dataset.notificationId || "")) || document.querySelector("#learning-notification-center"));
@@ -3686,6 +3907,18 @@ function renderHtml() {
     function revealLearningSection(id) {
       const element = document.querySelector("#" + cssEscape(id));
       revealElement(element || learningStatusBox);
+    }
+
+    async function revealCardsTarget(button) {
+      await activateTab("learning");
+      learningCardsFilter = {
+        label: button.dataset.filterLabel || button.textContent.trim() || "Filtered cards",
+        sourcePage: button.dataset.sourcePage || "",
+        topic: button.dataset.topic || "",
+        group: button.dataset.group || ""
+      };
+      renderLearningProfile();
+      revealLearningSection("learning-cards-bits");
     }
 
     async function revealSourcePageTarget(vault, sourcePage) {
@@ -4899,6 +5132,7 @@ function renderHtml() {
       capturePageContent.value = sourceSettings.capturePageContent || "ask";
       cloudProcessingPolicy.value = sourceSettings.cloudProcessingPolicy || "ask_each_time";
       retentionDays.value = sourceSettings.retentionDays || 90;
+      renderCaptureScanStatus(state.captureScan || sourceCapture.lastScan || null);
       chatAskBeforeRemote.checked = remoteSettings.askBeforeEachRemoteRequest !== false;
       chatNeverSendLocalCloud.checked = remoteSettings.neverSendLocalNotesToCloudWhenBrowsing !== false;
       chatAllowInternetNeeded.checked = remoteSettings.allowInternetWhenNeeded === true;
@@ -5165,13 +5399,15 @@ function renderHtml() {
     }
 
     function renderLearningStudyTools(state, context) {
-      const cards = [...(context.stats.dueCards || []), ...(context.stats.recentCards || [])]
-        .filter((card, index, list) => list.findIndex((item) => (item.id || item.front || item.cloze) === (card.id || card.front || card.cloze)) === index)
-        .slice(0, 8);
-      const bits = (context.stats.recentBits || []).slice(0, 8);
+      const allCards = [...(context.stats.dueCards || []), ...(context.stats.recentCards || [])]
+        .filter((card, index, list) => list.findIndex((item) => (item.id || item.front || item.cloze) === (card.id || card.front || card.cloze)) === index);
+      const filteredCards = filterLearningItems(allCards, learningCardsFilter);
+      const cards = filteredCards.slice(0, 12);
+      const bits = filterLearningItems(context.stats.recentBits || [], learningCardsFilter).slice(0, 12);
       const groups = groupLearningCardsAndBits(cards, bits);
       return '<section id="learning-cards-bits" class="learning-study-surface learning-scroll-target" data-learning-anchor="cards-bits">' +
         '<div class="learning-study-header"><h3>Cards And Bits</h3><p>Practice concept-specific recall first, then inspect the related source-grounded bits when you need context.</p>' + renderLearningLegend() + '</div>' +
+        renderLearningCardsFilterBanner(cards.length, allCards.length) +
         '<div class="learning-card-topic-groups">' + (groups.length ? groups.map((group, groupIndex) =>
           '<section class="learning-card-topic-group learning-scroll-target" data-learning-topic="' + escapeHtml(group.topic) + '">' +
             '<header><h4>' + escapeHtml(group.topic) + '</h4><span class="learning-chip practice">' + escapeHtml(group.cards.length + " card(s)") + '</span></header>' +
@@ -5185,6 +5421,24 @@ function renderHtml() {
       '</section>';
     }
 
+    function filterLearningItems(items, filter) {
+      if (!filter) return items;
+      const topic = normalizeLearningTopic(filter.topic || filter.group || filter.label || "");
+      const sourcePage = normalizeLearningTopic(filter.sourcePage || "");
+      return (items || []).filter((item) => {
+        const itemTopic = normalizeLearningTopic([item.displayTopic, item.learningFocus, item.topic, item.title, ...(item.tags || [])].filter(Boolean).join(" "));
+        const itemSource = normalizeLearningTopic([item.sourcePage, item.displayEvidence, item.sourceTitle].filter(Boolean).join(" "));
+        return (topic && (itemTopic.includes(topic) || topic.includes(itemTopic))) ||
+          (sourcePage && itemSource.includes(sourcePage)) ||
+          (!topic && !sourcePage);
+      });
+    }
+
+    function renderLearningCardsFilterBanner(visible, total) {
+      if (!learningCardsFilter) return "";
+      return '<div class="learning-filter-banner"><span>Showing ' + escapeHtml(String(visible)) + ' of ' + escapeHtml(String(total)) + ' card(s)/bit(s) for ' + escapeHtml(learningCardsFilter.label || learningCardsFilter.topic || learningCardsFilter.sourcePage || "selected target") + '.</span><button class="secondary" type="button" data-learning-action="clear-card-filter">Clear filter</button></div>';
+    }
+
     function renderLearningStudyCard(card, index) {
       const kind = taxonomyForCard(card);
       return '<article class="learning-study-card learning-scroll-target ' + escapeHtml(kind) + '" data-learning-card="' + escapeHtml(card.id || card.displayPrompt || index) + '"><div class="learning-study-card-inner">' +
@@ -5194,10 +5448,15 @@ function renderHtml() {
           (card.hint ? '<p class="muted">' + escapeHtml(card.hint) + '</p>' : '') +
           '<button class="secondary" type="button" data-learning-action="flip-card" data-card-index="' + escapeHtml(index) + '">Show answer</button></div>' +
         '<div class="learning-study-card-face back"><h4>Answer</h4><p>' + escapeHtml(card.back || card.explanation || "No answer text saved yet.") + '</p>' +
-          '<div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(card.learningFocus || card.displayTopic || "concept") + '</span><button class="learning-chip capture" type="button" data-learning-target="source-page" data-vault="' + escapeHtml(card.sourceVault || "") + '" data-source-page="' + escapeHtml(card.sourcePage || "") + '">' + escapeHtml(card.displayEvidence || card.sourcePage || "No source link") + '</button></div>' +
+          '<div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(card.learningFocus || card.displayTopic || "concept") + '</span><button class="learning-chip capture learning-evidence-label" type="button" title="' + escapeHtml(card.sourcePage || card.displayEvidence || "") + '" data-learning-target="source-page" data-vault="' + escapeHtml(card.sourceVault || "") + '" data-source-page="' + escapeHtml(card.sourcePage || "") + '">' + escapeHtml(shortLearningSourceLabel(card.displayEvidence || card.sourcePage || "No source link")) + '</button></div>' +
           (card.displayQuality === "repaired" ? '<small>Prompt clarified for display; stored card was not rewritten.</small>' : '') +
           '<button class="secondary" type="button" data-learning-action="flip-card" data-card-index="' + escapeHtml(index) + '">Back to prompt</button></div>' +
       '</div></article>';
+    }
+
+    function shortLearningSourceLabel(value) {
+      const text = String(value || "").replace(/\\\\/g, "/").split("/").filter(Boolean).pop() || String(value || "");
+      return text.replace(/\\.md$/i, "").replace(/--browser--media--/g, " · media · ").slice(0, 120);
     }
 
     function groupLearningCardsAndBits(cards, bits) {
@@ -5359,19 +5618,34 @@ function renderHtml() {
           '<ul class="learning-routing-list">' + (links.length ? links.map((link) =>
             '<li class="learning-scroll-target" data-learning-source-page="' + escapeHtml(link.sourcePage || "") + '"><button class="learning-target-button" type="button" data-learning-target="source-page" data-vault="' + escapeHtml(state.vault || "") + '" data-source-page="' + escapeHtml(link.sourcePage || "") + '"><strong>' + escapeHtml(link.title || "Source") + '</strong></button>' +
             '<div class="muted">' + escapeHtml(link.group || "Ungrouped") + '</div>' +
-            '<div class="learning-chip-row">' +
-              '<button class="learning-chip plan" type="button" data-learning-target="goal" data-goal-id="' + escapeHtml((link.linkedGoals || [])[0]?.id || (link.linkedGoals || [])[0]?.goalId || "") + '">' + escapeHtml((link.linkedGoals || []).length + " goals") + '</button>' +
-              '<button class="learning-chip plan" type="button" data-learning-target="plan" data-plan-id="' + escapeHtml((link.linkedPlans || [])[0]?.id || (link.linkedPlans || [])[0]?.planId || "") + '">' + escapeHtml((link.linkedPlans || []).length + " plans") + '</button>' +
-              '<span class="learning-chip">' + escapeHtml((link.cardsCreated || 0) + " cards") + '</span>' +
-            '</div></li>'
+            renderSourceMapChips(state, link) + '</li>'
           ).join("") : '<li>No processed sources have been routed yet.</li>') + '</ul></section>' +
         '<section class="learning-map-panel"><h3>Groups And Notifications</h3>' +
           '<div class="learning-chip-row">' + (groups.length ? groups.map((group) =>
-            '<button class="learning-chip bit" type="button" data-learning-target="learning-section" data-section="learning-cards-bits">' + escapeHtml(group.group + " · " + group.count) + '</button>'
+            '<button class="learning-chip bit" type="button" data-learning-target="cards" data-group="' + escapeHtml(group.group || "") + '" data-filter-label="' + escapeHtml(group.group || "Source group") + '">' + escapeHtml(group.group + " · " + group.count) + '</button>'
           ).join("") : '<span class="learning-chip">No source groups yet</span>') + '</div>' +
           '<h3>Event Feed</h3><ul class="learning-event-feed">' + (events.length ? events.map((event) =>
             '<li><time>' + escapeHtml(shortEventTime(event.created)) + '</time><span>' + escapeHtml(eventLabel(event)) + '</span></li>'
           ).join("") : '<li><time></time><span>No learning events recorded yet.</span></li>') + '</ul></section>' +
+      '</div>';
+    }
+
+    function renderSourceMapChips(state, link) {
+      const goals = link.linkedGoals || [];
+      const plans = link.linkedPlans || [];
+      const cards = Number(link.cardsCreated || 0);
+      const goalId = goals[0]?.id || goals[0]?.goalId || "";
+      const planId = plans[0]?.id || plans[0]?.planId || "";
+      return '<div class="learning-chip-row">' +
+        (goals.length
+          ? '<button class="learning-chip plan" type="button" data-learning-target="goal" data-goal-id="' + escapeHtml(goalId) + '">' + escapeHtml(goals.length + " goals") + '</button>'
+          : '<button class="learning-chip plan" type="button" disabled title="No linked goals yet.">' + escapeHtml("0 goals") + '</button>') +
+        (plans.length
+          ? '<button class="learning-chip plan" type="button" data-learning-target="plan" data-plan-id="' + escapeHtml(planId) + '">' + escapeHtml(plans.length + " plans") + '</button>'
+          : '<button class="learning-chip plan" type="button" disabled title="No linked plans yet.">' + escapeHtml("0 plans") + '</button>') +
+        (cards
+          ? '<button class="learning-chip practice" type="button" data-learning-target="cards" data-vault="' + escapeHtml(state.vault || "") + '" data-source-page="' + escapeHtml(link.sourcePage || "") + '" data-topic="' + escapeHtml(link.group || link.title || "") + '" data-filter-label="' + escapeHtml(link.title || link.group || "Source cards") + '">' + escapeHtml(cards + " cards") + '</button>'
+          : '<button class="learning-chip practice" type="button" disabled title="No cards linked to this source yet.">' + escapeHtml("0 cards") + '</button>') +
       '</div>';
     }
 
@@ -5593,6 +5867,89 @@ function renderHtml() {
       }
     }
 
+    async function openLearningExportReview(type) {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      const planId = type === "remnote" ? "" : selectedLearningPlanId();
+      if (!vault || (type !== "remnote" && !planId)) return;
+      learningFeedback.textContent = "Preparing export preview...";
+      try {
+        const data = await postLearningAction("/api/learning/export-preview", { vault, type, planId, format: type === "remnote" ? "markdown" : undefined });
+        pendingLearningExport = { ...data, vault, type: data.type || type, planId: data.planId || planId };
+        renderLearningExportReview(data);
+        learningFeedback.textContent = "Review export content before confirming.";
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    function renderLearningExportReview(data) {
+      learningExportReview.hidden = false;
+      learningExportTitle.textContent = "Review " + exportTypeLabel(data.type || data.format);
+      learningExportSummary.textContent = "Confirm only after reviewing the generated content. Nothing has been written yet. External writes and large exports stay gated.";
+      const meta = [
+        ["Vault", data.vault || selectedLearningVault()?.vault || ""],
+        ["Plan", data.planTitle || data.planId || "All eligible cards"],
+        ["Destination", data.destination || data.externalTarget || ""],
+        ["Items", data.itemCount ?? data.eventCount ?? data.reminderCount ?? data.cardCount ?? 0],
+        ["Format", data.format || data.type || ""]
+      ];
+      learningExportMeta.innerHTML = meta.map(([label, value]) => '<span><strong>' + escapeHtml(label) + '</strong><br>' + escapeHtml(value) + '</span>').join("");
+      const warnings = data.warnings || [];
+      learningExportWarnings.innerHTML = warnings.length ? '<ul>' + warnings.map((item) => '<li>' + escapeHtml(item) + '</li>').join("") + '</ul>' : '';
+      learningExportContent.value = data.editableContent || data.markdown || data.text || data.content || "";
+      confirmLearningExport.disabled = data.requiresPlanApproval === true;
+      confirmLearningExport.textContent = data.requiresPlanApproval ? "Plan approval required" : "Confirm export";
+      revealElement(learningExportReview);
+    }
+
+    function exportTypeLabel(type) {
+      if (type === "calendar" || type === "ics") return "iCalendar Export";
+      if (type === "apple_calendar") return "Apple Calendar Export";
+      if (type === "reminders" || type === "markdown") return "Reminders Export";
+      if (type === "apple_reminders") return "Apple Reminders Export";
+      if (type === "remnote") return "RemNote Export";
+      return "Learning Export";
+    }
+
+    function closeLearningExportReview() {
+      pendingLearningExport = null;
+      learningExportReview.hidden = true;
+      learningExportContent.value = "";
+    }
+
+    async function confirmPendingLearningExport() {
+      if (!pendingLearningExport) return;
+      confirmLearningExport.disabled = true;
+      learningFeedback.textContent = "Writing confirmed export...";
+      try {
+        const data = await postLearningAction("/api/learning/export-confirm", {
+          vault: pendingLearningExport.vault,
+          type: pendingLearningExport.type,
+          planId: pendingLearningExport.planId,
+          format: pendingLearningExport.format,
+          confirmed: true,
+          confirmLarge: true,
+          editedContent: learningExportContent.value
+        });
+        learningFeedback.textContent = exportConfirmMessage(data);
+        closeLearningExportReview();
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      } finally {
+        confirmLearningExport.disabled = false;
+      }
+    }
+
+    function exportConfirmMessage(data) {
+      if (data.exported) return "Export ready: " + (data.file || data.files?.markdown || "export file");
+      if (data.created) return "External items created: " + (data.events || data.reminders || 0);
+      if (data.files?.markdown) return "Export ready: " + data.files.markdown;
+      if (data.fallback?.file) return "Bridge unavailable; file ready: " + data.fallback.file;
+      if (data.fallback?.files?.markdown) return "Bridge unavailable; file ready: " + data.fallback.files.markdown;
+      return data.message || "Export finished";
+    }
+
     async function toggleBehaviorPause() {
       const state = selectedLearningVault();
       const vault = state?.vault || learningVault.value;
@@ -5799,6 +6156,43 @@ function renderHtml() {
       }
     }
 
+    async function scanCaptureSourcesNow() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      scanCaptureSources.disabled = true;
+      learningFeedback.textContent = "Scanning enabled capture sources...";
+      renderCaptureScanStatus({ status: "running", nextAction: "Scanning watch folders and enabled local collectors..." });
+      try {
+        const data = await postLearningAction("/api/learning/capture-scan", { vault });
+        patchLearningCacheVault(data.vault || vault, { captureScan: data });
+        renderCaptureScanStatus(data);
+        learningFeedback.textContent = "Capture scan finished: " + (data.captured || 0) + " captured, " + (data.skippedCount || 0) + " skipped.";
+        await loadLearning({ preserveDirty: true, excludeForms: [sourceCaptureForm] });
+        if ((data.captured || 0) > 0 && autoInsightsToggle.checked) await processCapturedResources({ manual: false });
+      } catch (error) {
+        renderCaptureScanStatus({ status: "failed", nextAction: error.message, skipped: [{ reason: error.message }] });
+        learningFeedback.textContent = error.message;
+      } finally {
+        scanCaptureSources.disabled = false;
+      }
+    }
+
+    function renderCaptureScanStatus(scan) {
+      if (!captureScanStatus) return;
+      if (!scan) {
+        captureScanStatus.textContent = "No capture scan has run in this session.";
+        return;
+      }
+      const skipped = (scan.skipped || []).slice(0, 4).map((item) => item.collector ? item.collector + ": " + item.reason : item.reason).filter(Boolean);
+      captureScanStatus.innerHTML =
+        '<strong>' + escapeHtml(scan.status || "scan") + '</strong>' +
+        '<div>Last scan: ' + escapeHtml(shortEventTime(scan.lastScanAt) || "now") + '</div>' +
+        '<div>Captured: ' + escapeHtml(String(scan.captured || 0)) + ' · duplicates: ' + escapeHtml(String(scan.duplicates || 0)) + ' · skipped: ' + escapeHtml(String(scan.skippedCount || skipped.length || 0)) + '</div>' +
+        '<div>Collectors: ' + escapeHtml((scan.collectors || []).join(", ") || "none") + '</div>' +
+        (skipped.length ? '<details><summary>Skipped collectors</summary><ul>' + skipped.map((item) => '<li>' + escapeHtml(item) + '</li>').join("") + '</ul></details>' : '') +
+        '<div>' + escapeHtml(scan.nextAction || "Review ResourceInbox for captured sources.") + '</div>';
+    }
+
     function confirmSourceCaptureChanges(current) {
       const confirmations = [];
       if (fullLocalCaptureMode.checked && current.fullLocalCaptureMode !== true) confirmations.push("Enable Full Local Capture Mode?");
@@ -5979,30 +6373,14 @@ function renderHtml() {
       const vault = selectedLearningVault()?.vault || learningVault.value;
       const planId = selectedLearningPlanId();
       if (!vault || !planId) return;
-      if (!window.confirm("Export approved plan stages to an iCalendar file? This is separate from plan approval.")) return;
-      learningFeedback.textContent = "Exporting calendar...";
-      try {
-        const data = await postLearningAction("/api/learning/calendar-export", { vault, planId, confirmed: true, method: "ics" });
-        learningFeedback.textContent = data.exported ? "Calendar export ready: " + data.file : (data.message || "Calendar export skipped");
-        await loadLearning();
-      } catch (error) {
-        learningFeedback.textContent = error.message;
-      }
+      await openLearningExportReview("calendar");
     }
 
     async function exportSelectedPlanReminders() {
       const vault = selectedLearningVault()?.vault || learningVault.value;
       const planId = selectedLearningPlanId();
       if (!vault || !planId) return;
-      if (!window.confirm("Export approved plan reminders to a copyable Markdown file? This is separate from plan approval.")) return;
-      learningFeedback.textContent = "Exporting reminders...";
-      try {
-        const data = await postLearningAction("/api/learning/reminders-export", { vault, planId, confirmed: true, method: "markdown" });
-        learningFeedback.textContent = data.exported ? "Reminders export ready: " + data.file : (data.message || "Reminders export skipped");
-        await loadLearning();
-      } catch (error) {
-        learningFeedback.textContent = error.message;
-      }
+      await openLearningExportReview("reminders");
     }
 
     async function suggestUpdatesForPlans() {

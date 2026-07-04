@@ -33,6 +33,10 @@ Most Learning elements are clickable. Use them to jump directly to the target in
 
 - Flow steps jump to the relevant Learning section.
 - Source evidence chips jump to Files or Topics, then highlight the matching source when indexed.
+- Source-To-Plan Map source titles open or highlight the source target.
+- `N goals` and `N plans` chips load the matching goal or plan revision controls when links exist. Zero-count chips are disabled and explain that no link exists yet.
+- `N cards` chips filter Cards And Bits to that source or topic. The active filter banner shows what is filtered and includes Clear filter.
+- Group chips filter Cards And Bits by topic or source group.
 - Plan and goal chips load the matching item in Revise Plans And Goals.
 - Provider cards open the Provider tab.
 - Notification rows jump to their source, plan, goal, or provider blocker.
@@ -66,7 +70,21 @@ These flows show live counts and use existing safe local buttons such as Process
 
 ## Flexible Layout
 
-Learning panels use wrapping grids and natural-height cards. Controls, chips, notification rows, plan timelines, and card backs should wrap inside their containers instead of overlapping or hiding content. Routed targets receive a temporary highlight after the app scrolls to them.
+Learning panels use wrapping grids and natural-height cards. Stepper items and numbered flow lanes use full-width buttons so labels do not collapse into vertical text. Controls, chips, notification rows, plan timelines, source evidence paths, Arabic/English mixed titles, and card backs wrap or clamp inside their containers instead of overlapping or hiding content.
+
+Long vault paths remain available in hover titles or details, while the visible label is shortened for scanning. Routed targets receive a temporary highlight after the app scrolls to them.
+
+## Export Review
+
+Plan Actions and RemNote export are preview-first. Calendar, Apple Calendar events, Reminders, Apple Reminders, and RemNote buttons open an Export Review panel that shows the selected vault, plan, destination, item counts, warnings, and editable content. Nothing is written until Confirm export is pressed.
+
+Use Cancel to abandon the export, Edit plan to jump to Revise Plans And Goals, or Confirm export after reviewing the generated content.
+
+## Capture Scan Status
+
+Source Capture includes Scan capture sources now. It runs safe local collectors for enabled watch folders, screenshot folders, ResourceInbox staging status, and preview-safe opened-document metadata when explicitly enabled. It shows captured, duplicate, skipped, and last-scan counts so enabled capture controls have visible feedback.
+
+The scan does not silently start live screen recording, broad browser history import, or full monitoring.
 
 ## Notification Stack
 

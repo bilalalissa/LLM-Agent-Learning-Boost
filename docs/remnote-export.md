@@ -11,7 +11,7 @@ Each vault writes exports under `.llm-wiki/learning/exports/`:
 - `remnote-media-index.md`
 - `remnote-media/`
 
-The Learning tab includes an `Export RemNote` button. Large exports require confirmation before writing the bundle.
+The Learning tab includes an `Export RemNote` button. It opens Export Review first, showing the selected vault, export destination, card/media counts, warnings, and editable Markdown/text preview. Nothing is written until `Confirm export` is pressed. Large exports still require explicit confirmation in that review step.
 
 ## Supported Card Syntax
 
@@ -36,3 +36,9 @@ Question >> Answer
 RemNote text import is primarily text-oriented. The app bundles local media files into `remnote-media/` and references them from `remnote-import.md` with relative markdown image links. `remnote-media-index.md` lists each media file, source, location, related card, evidence, and note.
 
 The app does not claim automatic RemNote image upload. Treat the media folder as a reliable manual attachment/reference bundle.
+
+## Review Before Writing
+
+Use Export Review to inspect the generated RemNote content before files are created. You can edit the preview text, cancel the export, or jump back to plan editing before confirming.
+
+Confirming writes the RemNote files under `.llm-wiki/learning/exports/` and records the export in the learning logs. Previewing alone does not write or overwrite export files.

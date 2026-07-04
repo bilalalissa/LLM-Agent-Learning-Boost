@@ -140,6 +140,16 @@ export function captureResource(vaultPath, input = {}, options = {}) {
   }
   const now = new Date();
   const resource = normalizeResource(input, { sourceType, now, vaultPath, settings });
+  const duplicate = resourceInbox(vaultPath).find((item) => resourceIdentity(item) === resourceIdentity(resource));
+  if (duplicate) {
+    return {
+      captured: false,
+      duplicate: true,
+      reason: "This resource is already in ResourceInbox.",
+      resource: duplicate,
+      settings
+    };
+  }
   appendJsonl(resourceInboxPath(vaultPath), resource);
   writeResourcesPage(vaultPath, resourceInbox(vaultPath));
   trackBehaviorEvent(vaultPath, {
@@ -153,6 +163,13 @@ export function captureResource(vaultPath, input = {}, options = {}) {
     }
   });
   return { captured: true, resource, settings };
+}
+
+function resourceIdentity(resource = {}) {
+  return [
+    normalizeSourceType(resource.sourceType || "manual_import"),
+    String(resource.file || resource.url || resource.title || "").trim().toLowerCase()
+  ].join("|");
 }
 
 export function resourceInbox(vaultPath) {

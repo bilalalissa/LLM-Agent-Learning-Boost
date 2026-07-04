@@ -7,6 +7,45 @@ import { listVaults, slugify, vaultName } from "./vaults.mjs";
 
 export const REMNOTE_LARGE_EXPORT_THRESHOLD = 100;
 
+export function previewRemnoteForVault(config, vault, options = {}) {
+  const vaultPath = listVaults(config.vaultsRoot).find((item) => vaultName(item) === vault);
+  if (!vaultPath) throw new Error(`Unknown vault: ${vault}`);
+  const paths = learningPaths(vaultPath);
+  const cards = readJsonl(path.join(paths.dir, "cards.jsonl"));
+  const mediaRefs = cards.flatMap((card) => Array.isArray(card.mediaRefs) ? card.mediaRefs : []);
+  const markdown = renderRemnoteMarkdown(cards, []);
+  const text = renderRemnoteText(cards);
+  const large = cards.length > REMNOTE_LARGE_EXPORT_THRESHOLD;
+  return {
+    preview: true,
+    type: "remnote",
+    format: options.format || "markdown",
+    vault,
+    cardCount: cards.length,
+    mediaRefCount: mediaRefs.length,
+    itemCount: cards.length,
+    destination: ".llm-wiki/learning/exports/remnote-import.md",
+    files: {
+      markdown: ".llm-wiki/learning/exports/remnote-import.md",
+      text: ".llm-wiki/learning/exports/remnote-import.txt",
+      mediaIndex: ".llm-wiki/learning/exports/remnote-media-index.md",
+      mediaDir: ".llm-wiki/learning/exports/remnote-media/"
+    },
+    editableContent: markdown,
+    markdown,
+    text,
+    sample: markdown.split(/\n/).slice(0, 24).join("\n"),
+    warnings: [
+      "Nothing has been written yet. Confirm export after reviewing the RemNote text.",
+      "Media references are listed for manual attachment/reference; automatic RemNote image upload is not claimed.",
+      ...(large ? [`This export contains ${cards.length} cards and requires explicit confirmation.`] : [])
+    ],
+    requiresConfirmation: true,
+    requiresLargeConfirmation: large,
+    threshold: REMNOTE_LARGE_EXPORT_THRESHOLD
+  };
+}
+
 export function exportRemnoteForVault(config, vault, options = {}) {
   const vaultPath = listVaults(config.vaultsRoot).find((item) => vaultName(item) === vault);
   if (!vaultPath) throw new Error(`Unknown vault: ${vault}`);
@@ -28,8 +67,8 @@ export function exportRemnoteBundle(vaultPath, cards, options = {}) {
   fs.mkdirSync(paths.exportsDir, { recursive: true });
   fs.mkdirSync(paths.remnoteMediaDir, { recursive: true });
   const media = prepareMediaBundle(vaultPath, cards, paths.remnoteMediaDir);
-  const markdown = renderRemnoteMarkdown(cards, media);
-  const text = renderRemnoteText(cards);
+  const markdown = options.editedContent ? String(options.editedContent) : renderRemnoteMarkdown(cards, media);
+  const text = options.editedText ? String(options.editedText) : renderRemnoteText(cards);
   const mediaIndex = renderMediaIndex(media);
   fs.writeFileSync(path.join(paths.exportsDir, "remnote-import.md"), `${markdown.trim()}\n`);
   fs.writeFileSync(path.join(paths.exportsDir, "remnote-import.txt"), `${text.trim()}\n`);

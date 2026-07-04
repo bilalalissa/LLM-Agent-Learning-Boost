@@ -66,6 +66,37 @@ export function generateIcs(plan = {}, items = buildCalendarItems(plan), options
   return `${lines.join("\r\n")}\r\n`;
 }
 
+export function previewPlanIcs(vaultPath, planOrId, options = {}) {
+  const plan = resolvePlan(vaultPath, planOrId);
+  const items = buildCalendarItems(plan, options);
+  const ics = generateIcs(plan, items, options);
+  const fileName = `${slugify(plan.title || plan.id || "learning-plan")}.ics`;
+  const rel = path.join(".llm-wiki", "learning", "exports", "calendar", fileName).replace(/\\/g, "/");
+  const eligible = calendarEligible(plan);
+  return {
+    preview: true,
+    type: "calendar",
+    format: "ics",
+    vault: vaultName(vaultPath),
+    planId: plan.id,
+    goalId: plan.goalId,
+    planTitle: plan.title || plan.id || "Learning plan",
+    destination: rel,
+    externalTarget: "iCalendar file",
+    eventCount: items.length,
+    itemCount: items.length,
+    items,
+    editableContent: ics,
+    content: ics,
+    warnings: [
+      "Nothing has been written yet. Confirm export after reviewing this iCalendar text.",
+      ...(eligible ? [] : ["Only approved, active, scheduled, or completed plans can be exported."])
+    ],
+    requiresPlanApproval: !eligible,
+    requiresConfirmation: true
+  };
+}
+
 export function exportPlanIcs(vaultPath, planOrId, options = {}) {
   if (options.confirmed !== true) {
     return {
@@ -83,7 +114,7 @@ export function exportPlanIcs(vaultPath, planOrId, options = {}) {
     };
   }
   const items = buildCalendarItems(plan, options);
-  const ics = generateIcs(plan, items, options);
+  const ics = options.editedContent ? String(options.editedContent) : generateIcs(plan, items, options);
   const dir = calendarExportDir(vaultPath);
   fs.mkdirSync(dir, { recursive: true });
   const fileName = `${slugify(plan.title || plan.id || "learning-plan")}.ics`;

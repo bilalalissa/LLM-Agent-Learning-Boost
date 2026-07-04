@@ -65,6 +65,25 @@ Stage 6 creates:
 - `voice-memos-collector.mjs`
 - `clipboard-collector.mjs`
 
+## Scan Capture Sources Now
+
+The Learning tab has a `Scan capture sources now` button so enabled capture settings have visible feedback.
+
+The scan reports:
+
+- enabled collectors
+- last scan time
+- captured count
+- duplicate count
+- skipped count and reasons
+- the next safe action
+
+Current safe scans include configured watch folders, screenshot folders when screenshots are explicitly enabled, ResourceInbox staging status, and preview-safe opened-document metadata when that option is explicitly enabled.
+
+The scan does not silently start live screen recording, broad browser history import, clipboard monitoring, visited-page monitoring, or frontmost-app monitoring. Those broader collectors remain confirmation-gated by Full Local Capture Mode and expanded monitoring.
+
+If `autoProcessCapturedResources` is enabled, new captured resources can be staged into `raw/input/` and processed after the scan when the selected provider is ready. If it is disabled, captured resources stay visible in ResourceInbox for manual review.
+
 ## ResourceInbox
 
 Resources are stored in `.llm-wiki/learning/resource-inbox.jsonl` and grouped into `wiki/learning/resources.md` by topic, source type, target language relevance, urgency/deadline, evidence quality, processing status, and recommended next action.

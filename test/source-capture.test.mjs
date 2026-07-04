@@ -117,6 +117,27 @@ test("manual resource capture groups resources and writes resources page", () =>
   assert.match(resourcesPage, /LLM Agent Notes/);
 });
 
+test("duplicate captures are reported without appending another ResourceInbox row", () => {
+  const { vault } = makeVault();
+  const first = captureResource(vault, {
+    sourceType: "manual_import",
+    title: "Repeated local note",
+    file: "/tmp/repeated-note.md",
+    userApproved: true
+  });
+  const second = captureResource(vault, {
+    sourceType: "manual_import",
+    title: "Repeated local note again",
+    file: "/tmp/repeated-note.md",
+    userApproved: true
+  });
+
+  assert.equal(first.captured, true);
+  assert.equal(second.captured, false);
+  assert.equal(second.duplicate, true);
+  assert.equal(resourceInbox(vault).length, 1);
+});
+
 test("captured resources can be staged for ingest and marked as ingested", () => {
   const { vault } = makeVault();
   const captured = captureResource(vault, {

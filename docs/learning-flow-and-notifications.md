@@ -83,6 +83,10 @@ Learning UI items are meant to move you to the related target instead of leaving
 
 - Flow steps jump to the matching Learning section.
 - Source chips jump to the Files or Topics tab and highlight the matching source row when it is indexed.
+- Source titles in Source-To-Plan Map open or highlight the source target.
+- `N goals` and `N plans` chips load the linked goal or plan revision controls when links exist. Zero-count chips are disabled so they do not pretend there is a destination.
+- `N cards` chips filter Cards And Bits to the related source or topic. A filter banner appears with `Clear filter`.
+- Group chips filter Cards And Bits by topic or source group.
 - Plan and goal chips open the revision controls with the selected plan or goal loaded.
 - Provider alerts open the Provider tab.
 - Notification rows jump to the related source, plan, goal, or provider state when that target exists.
@@ -130,7 +134,11 @@ Plans begin as `proposed`. Approval and activation require explicit confirmation
 
 Use Add Resource for a URL, file path, topic, and source type. Browser clipper sources and manual resources enter ResourceInbox first, then are staged into `raw/input/` when auto-processing is enabled.
 
-Full Local Capture Mode and expanded monitoring are opt-in. They can include broader local signals, so the app asks before enabling them.
+`Scan capture sources now` runs the enabled safe collectors and shows a visible status: enabled collectors, last scan time, captured count, duplicate count, skipped count with reasons, and the next safe action. Current safe scans cover configured watch folders, screenshot folders when explicitly enabled, ResourceInbox status, and preview-safe opened-document metadata when explicitly enabled.
+
+This scan does not start live screen recording, broad browser history capture, or silent monitoring. Full Local Capture Mode and expanded monitoring are opt-in. They can include broader local signals, so the app asks before enabling them.
+
+If auto-processing is enabled, newly captured resources can be staged and processed after the scan. If it is off, they remain visible in ResourceInbox until you process them.
 
 ### Behavior Coaching
 
@@ -179,3 +187,17 @@ Learning Boost can safely automate routine local work, but these actions require
 - external writes
 
 These gates are intentional. The app should keep learning moving without silently changing external tools or sending sensitive information outside the Mac.
+
+## Export Review
+
+Calendar, Reminders, Apple Calendar events, Apple Reminders, and RemNote exports are preview-first.
+
+When you click an export button, Learning Boost opens an Export Review panel before writing anything. The panel shows:
+
+- selected vault and plan or goal
+- export type and destination or external target
+- event, reminder, card, or item counts
+- warnings and safety gates
+- editable preview content for `.ics`, Reminders Markdown, or RemNote Markdown/text
+
+Nothing is written until you click `Confirm export`. Use `Cancel` to close the review or `Edit plan` to jump back to the plan revision controls.

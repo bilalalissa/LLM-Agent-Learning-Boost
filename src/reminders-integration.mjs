@@ -22,6 +22,37 @@ export function buildReminderItems(plan = {}) {
   }));
 }
 
+export function previewPlanRemindersMarkdown(vaultPath, planOrId, options = {}) {
+  const plan = resolvePlan(vaultPath, planOrId);
+  const items = buildReminderItems(plan);
+  const fileName = `${slugify(plan.title || plan.id || "learning-plan")}-reminders.md`;
+  const rel = path.join(".llm-wiki", "learning", "exports", "reminders", fileName).replace(/\\/g, "/");
+  const eligible = reminderEligible(plan);
+  const content = renderReminders(plan, items);
+  return {
+    preview: true,
+    type: "reminders",
+    format: "markdown",
+    vault: vaultName(vaultPath),
+    planId: plan.id,
+    goalId: plan.goalId,
+    planTitle: plan.title || plan.id || "Learning plan",
+    destination: rel,
+    externalTarget: "Reminders Markdown",
+    reminderCount: items.length,
+    itemCount: items.length,
+    items,
+    editableContent: content,
+    content,
+    warnings: [
+      "Nothing has been written yet. Confirm export after reviewing these reminder tasks.",
+      ...(eligible ? [] : ["Only approved, active, scheduled, or completed plans can be exported."])
+    ],
+    requiresPlanApproval: !eligible,
+    requiresConfirmation: true
+  };
+}
+
 export function exportPlanRemindersMarkdown(vaultPath, planOrId, options = {}) {
   if (options.confirmed !== true) {
     return {
@@ -42,7 +73,7 @@ export function exportPlanRemindersMarkdown(vaultPath, planOrId, options = {}) {
   const dir = path.join(learningPaths(vaultPath).exportsDir, "reminders");
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `${slugify(plan.title || plan.id || "learning-plan")}-reminders.md`);
-  fs.writeFileSync(file, renderReminders(plan, items));
+  fs.writeFileSync(file, options.editedContent ? String(options.editedContent) : renderReminders(plan, items));
   const rel = path.relative(vaultPath, file).replace(/\\/g, "/");
   const log = recordExternalWriteLog(vaultPath, {
     type: "reminders_markdown_export",
