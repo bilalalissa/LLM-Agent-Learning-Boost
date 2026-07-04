@@ -76,6 +76,8 @@ find "$AGENT" -name '.DS_Store' -delete
 test -f "$AGENT/src/server.mjs"
 test -f "$AGENT/package.json"
 
+codesign --force --deep --sign - "$STAGING_APP"
+
 mkdir -p "$BUILD"
 rm -rf "$NEW_APP"
 cp -R "$STAGING_APP" "$NEW_APP"

@@ -110,13 +110,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func handleLearningNotificationMessage(_ body: [String: Any]) {
         let action = body["action"] as? String ?? "notify"
         if action == "requestPermission" {
-            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, error in
-                UNUserNotificationCenter.current().getNotificationSettings { settings in
-                    let status = self.authorizationStatusLabel(settings.authorizationStatus)
-                    self.reportNativeNotificationStatus(status: status, message: error?.localizedDescription ?? "")
-                    if settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional {
-                        self.pollLearningNotifications()
-                    }
+            requestNotificationAuthorizationIfNeeded { status, error in
+                let label = self.authorizationStatusLabel(status)
+                if let error {
+                    self.reportNativeNotificationStatus(
+                        status: error.hasPrefix("permission_denied") ? "permission_denied" : label,
+                        message: error
+                    )
+                } else {
+                    self.reportNativeNotificationStatus(status: label, message: "macOS notification permission is \(label).")
+                    self.pollLearningNotifications()
                 }
             }
             return
@@ -145,19 +148,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                   let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let notifications = json["notifications"] as? [[String: Any]] else { return }
-            for item in notifications {
-                guard let id = item["id"] as? String,
-                      let vault = item["vault"] as? String else { continue }
-                let title = item["title"] as? String ?? "Learning Boost"
-                let body = item["body"] as? String ?? item["detail"] as? String ?? "Learning Boost needs attention."
-                self.postLearningNotification(id: id, title: title, body: body) { error in
-                    if let error {
-                        let action = error.hasPrefix("permission_denied") ? "permission_denied" : "native_failed"
-                        self.markLearningNotification(vault: vault, id: id, action: action, nativeError: error)
-                        self.reportNativeNotificationStatus(status: action == "permission_denied" ? "permission_denied" : "failed", message: error)
-                    } else {
-                        self.markLearningNotification(vault: vault, id: id, action: "delivered")
-                        self.reportNativeNotificationStatus(status: "delivered", message: "macOS accepted the notification.")
+            if notifications.isEmpty { return }
+            self.requestNotificationAuthorizationIfNeeded { _, authorizationError in
+                if let authorizationError {
+                    let action = authorizationError.hasPrefix("permission_denied") ? "permission_denied" : "native_failed"
+                    for item in notifications {
+                        guard let id = item["id"] as? String,
+                              let vault = item["vault"] as? String else { continue }
+                        self.markLearningNotification(vault: vault, id: id, action: action, nativeError: authorizationError)
+                    }
+                    self.reportNativeNotificationStatus(
+                        status: action == "permission_denied" ? "permission_denied" : "failed",
+                        message: authorizationError
+                    )
+                    return
+                }
+                for item in notifications {
+                    guard let id = item["id"] as? String,
+                          let vault = item["vault"] as? String else { continue }
+                    let title = item["title"] as? String ?? "Learning Boost"
+                    let body = item["body"] as? String ?? item["detail"] as? String ?? "Learning Boost needs attention."
+                    self.deliverLearningNotification(id: id, title: title, body: body) { error in
+                        if let error {
+                            let action = error.hasPrefix("permission_denied") ? "permission_denied" : "native_failed"
+                            self.markLearningNotification(vault: vault, id: id, action: action, nativeError: error)
+                            self.reportNativeNotificationStatus(status: action == "permission_denied" ? "permission_denied" : "failed", message: error)
+                        } else {
+                            self.markLearningNotification(vault: vault, id: id, action: "delivered")
+                            self.reportNativeNotificationStatus(status: "delivered", message: "macOS accepted the notification.")
+                        }
                     }
                 }
             }
@@ -165,24 +184,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func postLearningNotification(id: String?, title: String, body: String, completion: @escaping (String?) -> Void) {
-        UNUserNotificationCenter.current().getNotificationSettings { settings in
-            let status = settings.authorizationStatus
-            guard status == .authorized || status == .provisional else {
-                completion("permission_denied: macOS notification authorization is \(self.authorizationStatusLabel(status)).")
+        requestNotificationAuthorizationIfNeeded { _, error in
+            if let error {
+                completion(error)
                 return
             }
-            let content = UNMutableNotificationContent()
-            content.title = title
-            content.body = body
-            content.sound = .default
-            let request = UNNotificationRequest(
-                identifier: id ?? "learning-boost-\(UUID().uuidString)",
-                content: content,
-                trigger: nil
-            )
-            UNUserNotificationCenter.current().add(request) { error in
-                completion(error?.localizedDescription)
+            self.deliverLearningNotification(id: id, title: title, body: body, completion: completion)
+        }
+    }
+
+    private func requestNotificationAuthorizationIfNeeded(completion: @escaping (UNAuthorizationStatus, String?) -> Void) {
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            let status = settings.authorizationStatus
+            if self.isNotificationAuthorized(status) {
+                completion(status, nil)
+                return
             }
+            if status == .denied {
+                completion(status, "permission_denied: macOS notification authorization is denied.")
+                return
+            }
+            if status != .notDetermined {
+                completion(status, "native_failed: macOS notification authorization is \(self.authorizationStatusLabel(status)).")
+                return
+            }
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+                center.requestAuthorization(options: [.alert, .sound, .badge]) { _, requestError in
+                    center.getNotificationSettings { updatedSettings in
+                        let updatedStatus = updatedSettings.authorizationStatus
+                        if let requestError {
+                            completion(updatedStatus, "native_failed: \(requestError.localizedDescription)")
+                            return
+                        }
+                        if self.isNotificationAuthorized(updatedStatus) {
+                            completion(updatedStatus, nil)
+                            return
+                        }
+                        if updatedStatus == .denied {
+                            completion(updatedStatus, "permission_denied: macOS notification authorization is denied.")
+                            return
+                        }
+                        completion(updatedStatus, "native_failed: macOS notification authorization is \(self.authorizationStatusLabel(updatedStatus)).")
+                    }
+                }
+            }
+        }
+    }
+
+    private func isNotificationAuthorized(_ status: UNAuthorizationStatus) -> Bool {
+        status == .authorized || status == .provisional
+    }
+
+    private func deliverLearningNotification(id: String?, title: String, body: String, completion: @escaping (String?) -> Void) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: id ?? "learning-boost-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            completion(error?.localizedDescription)
         }
     }
 
