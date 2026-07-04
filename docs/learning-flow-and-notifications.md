@@ -39,6 +39,10 @@ Each processed source is treated as a learning object, not only a saved note.
 
 For every successfully processed source, the app creates multiple learning bits and cards. Bits are small durable ideas such as definitions, relationships, misconceptions, open questions, source anchors, and details worth keeping. Cards turn those bits into active recall prompts, cloze prompts, target-language practice, or media-linked recall.
 
+Cards should ask about a specific topic or concept, not about an unnamed source. A good card asks, for example, “What is the key idea behind retrieval practice?” rather than “What is important in this source?” Source titles, file paths, and browser clip metadata are kept as evidence on the back of the card, not as the recall target.
+
+Older cards that already exist in `.llm-wiki/learning/cards.jsonl` are not rewritten automatically. The Learning tab display repairs weak prompts at render time by deriving a topic from concept links, tags, related bits, source groups, and finally source title only as a last-resort context label. Browser clipper operational details such as media counts or download status are demoted from the primary practice deck unless they contain a durable learning concept.
+
 The app stores these locally:
 
 ```text
@@ -47,6 +51,31 @@ The app stores these locally:
 ```
 
 The source page keeps the readable Learning Boost sections, while the JSONL files power review, RemNote export, dashboards, and aggregate planning.
+
+## Visual Groups And Legend
+
+The Learning tab groups cards and bits by topic or concept first. Each group shows the practice cards, related bits, and source evidence together so you know why the card exists.
+
+The color legend uses these categories:
+
+- Capture/source: imported files, clips, raw inputs, and source links.
+- Understanding/bit: extracted concepts, definitions, relationships, and details.
+- Practice/card: active recall, cloze, vocabulary, and writing cards.
+- Plan/goal: proposed or active goals, plans, and plan updates.
+- Review: due reviews and spaced-repetition work.
+- Alert/provider: provider blockers, fallback alerts, and notification status.
+
+The colors are visual grouping aids only. They do not change privacy policy, confirmation gates, or source data.
+
+## Numbered Learning Flows
+
+The Learning tab shows three step-by-step lanes:
+
+- Today: review due cards, process one pending source, practice the newest concept, then check the next action.
+- This Week: finish pending sources, group related concepts, review weak cards, then revise plan or goal suggestions.
+- When a Source Is Processed: read the gist, inspect bits, practice cards, link to a plan or goal, then schedule review or export if needed.
+
+Each lane shows current counts from the selected vault and includes one action button when the app already has a safe local action for that step.
 
 ## Plans And Goals
 

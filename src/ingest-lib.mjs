@@ -5,6 +5,7 @@ import { createProvider } from "./provider.mjs";
 import {
   appendLearningOutputs,
   fallbackLearningBoost,
+  learningBoostCardQualityRules,
   learningBoostJsonShape,
   normalizeLearningBoost,
   renderLearningBoostSection
@@ -278,6 +279,9 @@ ${(input.processedSource?.processingNotes || []).join("\n")}
 
 If you can inspect the local media file, extract visible/audible/document insights. If you cannot inspect the file content, use only metadata and clearly say that the content was not visually/audibly analyzed.
 
+Learning card quality rules:
+${learningBoostCardQualityRules()}
+
 Return strict JSON with this shape:
 {
   "language": "detected primary language or multilingual",
@@ -450,6 +454,7 @@ Language rule:
 - Write generated content values in that same primary language.
 - If the source is meaningfully multilingual, preserve the source languages where they carry meaning.
 - Keep JSON keys exactly as requested.
+- Learning card quality rules: ${learningBoostCardQualityRules()}
 
 Return strict JSON with this shape:
 {

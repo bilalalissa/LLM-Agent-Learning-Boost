@@ -2274,6 +2274,17 @@ function renderHtml() {
     .learning-card summary { cursor: pointer; color: var(--accent); font-weight: 700; }
     .learning-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .learning-chip { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font-size: 12px; color: var(--muted); background: var(--soft); }
+    .learning-chip.capture, .learning-card.capture, .learning-flow-lane.capture, .learning-type-legend .capture, .learning-study-card.capture { --kind: #0f766e; --kind-soft: color-mix(in srgb, #0f766e 13%, var(--panel)); }
+    .learning-chip.bit, .learning-card.bit, .learning-flow-lane.bit, .learning-type-legend .bit, .learning-study-card.bit { --kind: #2563eb; --kind-soft: color-mix(in srgb, #2563eb 12%, var(--panel)); }
+    .learning-chip.practice, .learning-card.practice, .learning-flow-lane.practice, .learning-type-legend .practice, .learning-study-card.practice { --kind: #7c3aed; --kind-soft: color-mix(in srgb, #7c3aed 12%, var(--panel)); }
+    .learning-chip.plan, .learning-card.plan, .learning-flow-lane.plan, .learning-type-legend .plan, .learning-study-card.plan { --kind: #a16207; --kind-soft: color-mix(in srgb, #a16207 13%, var(--panel)); }
+    .learning-chip.review, .learning-card.review, .learning-flow-lane.review, .learning-type-legend .review, .learning-study-card.review { --kind: #be123c; --kind-soft: color-mix(in srgb, #be123c 11%, var(--panel)); }
+    .learning-chip.alert, .learning-card.alert, .learning-flow-lane.alert, .learning-type-legend .alert, .learning-study-card.alert { --kind: #b45309; --kind-soft: color-mix(in srgb, #b45309 12%, var(--panel)); }
+    .learning-chip.capture, .learning-chip.bit, .learning-chip.practice, .learning-chip.plan, .learning-chip.review, .learning-chip.alert { color: var(--kind); border-color: color-mix(in srgb, var(--kind) 42%, var(--line)); background: var(--kind-soft); }
+    .learning-card.capture, .learning-card.bit, .learning-card.practice, .learning-card.plan, .learning-card.review, .learning-card.alert { border-color: color-mix(in srgb, var(--kind) 34%, var(--line)); background: var(--kind-soft); }
+    .learning-type-legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
+    .learning-type-legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+    .learning-type-legend span::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--kind, var(--accent)); border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 60%, var(--line)); }
     .learning-action-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .learning-action-row button { min-width: 0; }
     .learning-card.danger { border-color: color-mix(in srgb, #dc2626 45%, var(--line)); }
@@ -2317,11 +2328,16 @@ function renderHtml() {
     .learning-stepper li.active span { background: var(--accent); color: #fff; }
     .learning-study-surface { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(260px, .8fr); gap: 14px; }
     .learning-study-header { grid-column: 1 / -1; }
+    .learning-card-topic-groups { display: grid; gap: 12px; }
+    .learning-card-topic-group { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: color-mix(in srgb, var(--panel) 93%, var(--soft)); }
+    .learning-card-topic-group > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+    .learning-card-topic-group > header h4 { margin: 0; font-size: 15px; }
     .learning-card-deck { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
     .learning-study-card { min-height: 210px; perspective: 900px; }
     .learning-study-card-inner { position: relative; min-height: 210px; transform-style: preserve-3d; transition: transform .28s ease; }
     .learning-study-card.flipped .learning-study-card-inner { transform: rotateY(180deg); }
     .learning-study-card-face { position: absolute; inset: 0; display: grid; align-content: space-between; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); backface-visibility: hidden; overflow: hidden; }
+    .learning-study-card.practice .learning-study-card-face, .learning-study-card.capture .learning-study-card-face { border-color: color-mix(in srgb, var(--kind, var(--accent)) 34%, var(--line)); background: var(--kind-soft, var(--panel)); }
     .learning-study-card-face h4 { margin: 0; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
     .learning-study-card-face p { margin: 0; overflow-wrap: anywhere; }
     .learning-study-card-face small { color: var(--muted); overflow-wrap: anywhere; }
@@ -2331,6 +2347,14 @@ function renderHtml() {
     .learning-bit-explorer details { border-top: 1px solid var(--line); padding: 8px 0; }
     .learning-bit-explorer details:first-of-type { border-top: 0; }
     .learning-empty-state { border: 1px dashed var(--line); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--soft); }
+    .learning-flow-lanes { display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 10px; margin: 12px 0; }
+    .learning-flow-lane { border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 32%, var(--line)); border-radius: 8px; padding: 12px; background: var(--kind-soft, var(--panel)); }
+    .learning-flow-lane h4 { margin: 0 0 8px; font-size: 15px; }
+    .learning-flow-lane ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; }
+    .learning-flow-lane li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; align-items: start; }
+    .learning-flow-lane li > span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--kind, var(--accent)) 78%, #fff); color: #fff; font-weight: 800; font-size: 12px; }
+    .learning-flow-lane strong { display: block; font-size: 13px; }
+    .learning-flow-lane em { display: block; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: anywhere; }
     .learning-plan-summary { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
     .learning-plan-summary strong { font-size: 16px; }
     .learning-plan-summary span:not(.learning-chip) { color: var(--muted); }
@@ -2362,6 +2386,7 @@ function renderHtml() {
       .learning-event-feed li { grid-template-columns: 1fr; }
       .learning-autopilot-hero, .learning-study-surface { grid-template-columns: 1fr; }
       .learning-stepper { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+      .learning-flow-lanes { grid-template-columns: 1fr; }
       .learning-notification-center li { grid-template-columns: 1fr; }
       .learning-plan-row { grid-template-columns: 1fr; }
       .learning-form { grid-template-columns: 1fr; }
@@ -3554,6 +3579,8 @@ function renderHtml() {
       if (action === "schedule-plan") exportPlanCalendar.click();
       if (action === "export-remnote") exportRemnote.click();
       if (action === "process-pending") processPendingLearning.click();
+      if (action === "draft-plans") draftLearningPlans.click();
+      if (action === "suggest-plan-updates") suggestPlanUpdatesButton.click();
       if (action === "test-native-notification") testNativeNotification.click();
       if (action === "flip-card") {
         const card = actionButton.closest(".learning-study-card");
@@ -4740,6 +4767,7 @@ function renderHtml() {
       ];
       learningStatusBox.innerHTML = '<h2>Learning Boost</h2>' +
         renderLearningAutopilotWorkspace(state, { automation, resourceGroups, sourceLinks, sourceGroups, plans, goals, updateSuggestions, coach, stats, notifications }) +
+        renderLearningStepByStepFlow(state, { automation, resourceGroups, sourceLinks, sourceGroups, plans, goals, updateSuggestions, stats }) +
         renderLearningSourceMap(state, { sourceLinks, sourceGroups, plans, goals, coach }) +
         renderLearningStudyTools(state, { stats, sourceLinks }) +
         renderLearningPlanGuide(state, { plans, goals, updateSuggestions }) +
@@ -4897,23 +4925,152 @@ function renderHtml() {
       return "Learning is automatic for safe local work";
     }
 
+    function renderLearningStepByStepFlow(state, context) {
+      const dueCount = (context.stats.dueCards || []).length;
+      const pendingRaw = context.automation.pendingRawCount || 0;
+      const processedCount = (context.sourceLinks || []).length;
+      const sourceGroups = (context.sourceGroups || []).length;
+      const updateCount = (context.updateSuggestions || []).length;
+      const cardCount = context.stats.cards || 0;
+      const bitCount = context.stats.bits || 0;
+      const lanes = [
+        {
+          kind: "review",
+          title: "Today",
+          steps: [
+            ["Review due cards", dueCount + " due"],
+            ["Process one pending source", pendingRaw + " pending"],
+            ["Practice newest concept", cardCount + " cards ready"],
+            ["Check next action", (state.nextActions || []).slice(0, 1)[0] || "No action waiting"]
+          ],
+          action: dueCount ? "" : "process-pending",
+          actionLabel: pendingRaw ? "Process pending now" : ""
+        },
+        {
+          kind: "plan",
+          title: "This Week",
+          steps: [
+            ["Finish pending sources", pendingRaw + " raw files"],
+            ["Group related concepts", sourceGroups + " group(s)"],
+            ["Review weak cards", dueCount + " due cards"],
+            ["Revise plans/goals", updateCount + " suggestion(s)"]
+          ],
+          action: "draft-plans",
+          actionLabel: "Draft plans"
+        },
+        {
+          kind: "bit",
+          title: "When A Source Is Processed",
+          steps: [
+            ["Read the gist", processedCount + " processed source(s)"],
+            ["Inspect bits", bitCount + " learning bit(s)"],
+            ["Practice cards", cardCount + " card(s)"],
+            ["Link to plan/goal", (context.plans || []).length + " plan(s)"],
+            ["Schedule review/export", "confirmation gated"]
+          ],
+          action: "export-remnote",
+          actionLabel: cardCount ? "Export to RemNote" : ""
+        }
+      ];
+      return '<section class="learning-map-panel"><h3>Numbered Learning Flow</h3><p class="muted">Use these lanes to know what to do now, this week, and immediately after a source finishes processing.</p>' +
+        '<div class="learning-flow-lanes">' + lanes.map((lane) =>
+          '<section class="learning-flow-lane ' + escapeHtml(lane.kind) + '"><h4>' + escapeHtml(lane.title) + '</h4><ol>' +
+            lane.steps.map(([label, detail], index) => '<li><span>' + escapeHtml(String(index + 1)) + '</span><div><strong>' + escapeHtml(label) + '</strong><em>' + escapeHtml(detail) + '</em></div></li>').join("") +
+          '</ol>' + (lane.actionLabel ? '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="' + escapeHtml(lane.action) + '">' + escapeHtml(lane.actionLabel) + '</button></div>' : '') + '</section>'
+        ).join("") + '</div></section>';
+    }
+
     function renderLearningStudyTools(state, context) {
       const cards = [...(context.stats.dueCards || []), ...(context.stats.recentCards || [])]
         .filter((card, index, list) => list.findIndex((item) => (item.id || item.front || item.cloze) === (card.id || card.front || card.cloze)) === index)
         .slice(0, 8);
       const bits = (context.stats.recentBits || []).slice(0, 8);
+      const groups = groupLearningCardsAndBits(cards, bits);
       return '<section class="learning-study-surface">' +
-        '<div class="learning-study-header"><h3>Cards And Bits</h3><p>Practice recall first, then inspect source-grounded bits when you need context.</p></div>' +
-        '<div class="learning-card-deck">' + (cards.length ? cards.map((card, index) =>
-          '<article class="learning-study-card"><div class="learning-study-card-inner">' +
-            '<div class="learning-study-card-face front"><span class="learning-chip">' + escapeHtml(card.type || "card") + '</span><h4>' + escapeHtml(card.front || card.cloze || "Recall prompt") + '</h4><button class="secondary" type="button" data-learning-action="flip-card" data-card-index="' + index + '">Show answer</button></div>' +
-            '<div class="learning-study-card-face back"><h4>Answer</h4><p>' + escapeHtml(card.back || card.explanation || "No answer text saved yet.") + '</p><small>' + escapeHtml(card.sourcePage || "No source link") + '</small><button class="secondary" type="button" data-learning-action="flip-card" data-card-index="' + index + '">Back to prompt</button></div>' +
-          '</div></article>'
-        ).join("") : '<div class="learning-empty-state">No cards yet. Autopilot will create cards after a provider successfully processes sources.</div>') + '</div>' +
+        '<div class="learning-study-header"><h3>Cards And Bits</h3><p>Practice concept-specific recall first, then inspect the related source-grounded bits when you need context.</p>' + renderLearningLegend() + '</div>' +
+        '<div class="learning-card-topic-groups">' + (groups.length ? groups.map((group, groupIndex) =>
+          '<section class="learning-card-topic-group">' +
+            '<header><h4>' + escapeHtml(group.topic) + '</h4><span class="learning-chip practice">' + escapeHtml(group.cards.length + " card(s)") + '</span></header>' +
+            '<div class="learning-card-deck">' + group.cards.map((card, index) => renderLearningStudyCard(card, String(groupIndex) + "-" + String(index))).join("") + '</div>' +
+            (group.bits.length ? '<div class="learning-chip-row">' + group.bits.slice(0, 3).map((bit) => '<span class="learning-chip bit">' + escapeHtml(bit.title || bit.displayTopic || "bit") + '</span>').join("") + '</div>' : '') +
+          '</section>'
+        ).join("") : '<div class="learning-empty-state">No cards yet. Autopilot will create concept-specific cards after a provider successfully processes sources.</div>') + '</div>' +
         '<div class="learning-bit-explorer"><h4>Recent learning bits</h4>' + (bits.length ? bits.map((bit) =>
-          '<details><summary>' + escapeHtml(bit.title || bit.type || "Learning bit") + '</summary><p>' + escapeHtml(bit.body || "") + '</p><div class="learning-chip-row"><span class="learning-chip">' + escapeHtml(bit.level || "core") + '</span><span class="learning-chip">' + escapeHtml(bit.sourcePage || "source pending") + '</span></div></details>'
+          '<details><summary>' + escapeHtml(bit.title || bit.displayTopic || bit.type || "Learning bit") + '</summary><p>' + escapeHtml(bit.body || "") + '</p><div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(bit.level || "core") + '</span><span class="learning-chip capture">' + escapeHtml(bit.displayEvidence || bit.sourcePage || "source pending") + '</span></div></details>'
         ).join("") : '<p class="muted">No recent bits yet. Processed sources will appear here automatically.</p>') + '</div>' +
       '</section>';
+    }
+
+    function renderLearningStudyCard(card, index) {
+      const kind = taxonomyForCard(card);
+      return '<article class="learning-study-card ' + escapeHtml(kind) + '"><div class="learning-study-card-inner">' +
+        '<div class="learning-study-card-face front">' +
+          '<div class="learning-chip-row"><span class="learning-chip ' + escapeHtml(kind) + '">' + escapeHtml(card.displayType || card.type || "card") + '</span><span class="learning-chip bit">' + escapeHtml(card.displayTopic || card.learningFocus || "Key concept") + '</span></div>' +
+          '<h4>' + escapeHtml(card.displayPrompt || card.front || card.cloze || "Recall prompt") + '</h4>' +
+          (card.hint ? '<p class="muted">' + escapeHtml(card.hint) + '</p>' : '') +
+          '<button class="secondary" type="button" data-learning-action="flip-card" data-card-index="' + escapeHtml(index) + '">Show answer</button></div>' +
+        '<div class="learning-study-card-face back"><h4>Answer</h4><p>' + escapeHtml(card.back || card.explanation || "No answer text saved yet.") + '</p>' +
+          '<div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(card.learningFocus || card.displayTopic || "concept") + '</span><span class="learning-chip capture">' + escapeHtml(card.displayEvidence || card.sourcePage || "No source link") + '</span></div>' +
+          (card.displayQuality === "repaired" ? '<small>Prompt clarified for display; stored card was not rewritten.</small>' : '') +
+          '<button class="secondary" type="button" data-learning-action="flip-card" data-card-index="' + escapeHtml(index) + '">Back to prompt</button></div>' +
+      '</div></article>';
+    }
+
+    function groupLearningCardsAndBits(cards, bits) {
+      const groups = new Map();
+      for (const card of cards.filter((item) => item.displayDemoted !== true)) {
+        const topic = card.displayTopic || card.learningFocus || "Key concept";
+        const group = groups.get(topic) || { topic, cards: [], bits: [] };
+        group.cards.push(card);
+        groups.set(topic, group);
+      }
+      if (!groups.size) {
+        for (const card of cards) {
+          const topic = card.displayTopic || card.learningFocus || "Key concept";
+          const group = groups.get(topic) || { topic, cards: [], bits: [] };
+          group.cards.push(card);
+          groups.set(topic, group);
+        }
+      }
+      for (const bit of bits) {
+        const topic = bit.displayTopic || bit.learningFocus || bit.title || "Key concept";
+        const group = groups.get(topic) || groups.get(nearestLearningTopic(topic, groups)) || null;
+        if (group) group.bits.push(bit);
+      }
+      return [...groups.values()].slice(0, 5);
+    }
+
+    function nearestLearningTopic(topic, groups) {
+      const normalized = normalizeLearningTopic(topic);
+      for (const key of groups.keys()) {
+        const candidate = normalizeLearningTopic(key);
+        if (candidate && normalized && (candidate.includes(normalized) || normalized.includes(candidate))) return key;
+      }
+      return "";
+    }
+
+    function normalizeLearningTopic(value) {
+      return String(value || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    }
+
+    function taxonomyForCard(card) {
+      if (card.displayDemoted) return "capture";
+      if (card.type === "cloze" || card.cloze || card.type === "qa" || card.type === "vocabulary" || card.type === "writing_prompt") return "practice";
+      return "practice";
+    }
+
+    function renderLearningLegend() {
+      const items = [
+        ["capture", "Capture/source"],
+        ["bit", "Understanding/bit"],
+        ["practice", "Practice/card"],
+        ["plan", "Plan/goal"],
+        ["review", "Review"],
+        ["alert", "Alert/provider"]
+      ];
+      return '<div class="learning-type-legend" aria-label="Learning item color legend">' + items.map(([kind, label]) =>
+        '<span class="' + kind + '">' + escapeHtml(label) + '</span>'
+      ).join("") + '</div>';
     }
 
     function renderLearningPlanGuide(state, context) {

@@ -26,4 +26,6 @@ Every processed source asks the provider for a `learning_boost` object. The app 
 
 Each processed source produces multiple bits and cards when provider output is sparse. Source-level plan suggestions are retained as learning signals, but real goals and plans are drafted from gathered ResourceInbox items plus processed bits, cards, and source links.
 
+Cards should be topic- or concept-specific. The source title and path remain evidence, but prompts should not ask the learner to remember “this source” or raw browser clip metadata. Existing weak cards are repaired for display in the Learning tab without rewriting the vault files by default.
+
 Final RemNote formatting is implemented in Stage 4; see [RemNote Export](remnote-export.md).

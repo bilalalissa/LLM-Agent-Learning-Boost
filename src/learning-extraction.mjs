@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { readBehaviorSettings, trackBehaviorEvent } from "./behavior-tracker.mjs";
+import { deriveLearningTopic, topicQuestion } from "./learning-card-display.mjs";
 import { normalizeLearningBit, normalizeLearningCard, normalizeLearningProfile } from "./learning-model.mjs";
 import { linkProcessedSourceToLearning } from "./learning-planner.mjs";
 import { ensureLearningScaffold, learningPaths } from "./learning-store.mjs";
@@ -36,14 +37,14 @@ export function learningBoostJsonShape() {
       {"level": "expert", "title": "...", "body": "...", "evidence": ["..."]}
     ],
     "learning_bits": [
-      {"type": "concept", "level": "core", "title": "...", "body": "...", "cognitiveLoad": 1, "mediaRefs": [], "evidence": ["source page/location"]}
+      {"type": "concept", "level": "core", "topic": "topic or concept name", "concept": "specific concept", "learningFocus": "what the learner should remember", "title": "...", "body": "...", "cognitiveLoad": 1, "mediaRefs": [], "evidence": ["source page/location"]}
     ],
     "general_cards": [
-      {"type": "qa", "front": "Question?", "back": "Answer", "hint": "optional", "evidence": ["..."]},
-      {"type": "cloze", "cloze": "A {{key term}} is ...", "back": "Explanation", "evidence": ["..."]}
+      {"type": "qa", "topic": "topic or concept name", "concept": "specific concept", "learningFocus": "what the learner should recall", "front": "Question about the concept, not about the source title?", "back": "Answer", "hint": "optional", "evidence": ["..."]},
+      {"type": "cloze", "topic": "topic or concept name", "concept": "specific concept", "learningFocus": "what the learner should recall", "cloze": "A {{key term}} is ...", "back": "Explanation", "evidence": ["..."]}
     ],
     "target_language_cards": [
-      {"target_language": "AUTO", "type": "vocabulary", "front": "word or phrase", "back": "meaning and example", "hint": "pronunciation or grammar note"}
+      {"target_language": "AUTO", "type": "vocabulary", "topic": "topic or concept name", "concept": "specific term", "learningFocus": "word or phrase", "front": "word or phrase", "back": "meaning and example", "hint": "pronunciation or grammar note"}
     ],
     "details_to_keep": [
       {"kind": "definition", "text": "...", "why_it_matters": "...", "evidence": ["..."]}
@@ -65,6 +66,16 @@ export function learningBoostJsonShape() {
 }`;
 }
 
+export function learningBoostCardQualityRules() {
+  return [
+    "Every learning bit and card must include topic, concept, or learningFocus.",
+    "Card prompts must ask about the topic/concept itself, not the source, source title, browser clip, download status, media count, or template artifacts.",
+    "Do not write prompts such as 'What is important in this source?' or 'What did the source detect?'.",
+    "Use source titles and paths only as evidence, never as the recall target.",
+    "Ignore browser clipper operational metadata unless it teaches a durable concept."
+  ].join(" ");
+}
+
 export function normalizeLearningBoost(input = {}, context = {}) {
   const raw = input.learning_boost || input.learningBoost || input;
   const evidence = defaultEvidence(context);
@@ -73,6 +84,9 @@ export function normalizeLearningBoost(input = {}, context = {}) {
   let learningBits = arrayOr(raw.learning_bits || raw.learningBits, []).map((bit, index) => normalizeLearningBit({
     ...bit,
     id: bit.id || stableId("bit", context.sourceRel, bit.title || bit.body || index),
+    topic: bit.topic || bit.concept || bit.learningFocus || "",
+    concept: bit.concept || bit.topic || "",
+    learningFocus: bit.learningFocus || bit.learning_focus || bit.concept || bit.topic || bit.title || "",
     sourceVault: context.vault || bit.sourceVault || "",
     sourcePage: context.sourceRel || bit.sourcePage || "",
     sourceLocation: bit.sourceLocation || evidence[0] || "",
@@ -85,6 +99,9 @@ export function normalizeLearningBoost(input = {}, context = {}) {
   let generalCards = arrayOr(raw.general_cards || raw.generalCards, []).map((card, index) => normalizeLearningCard({
     ...card,
     id: card.id || stableId("card", context.sourceRel, card.front || card.cloze || index),
+    topic: card.topic || card.concept || card.learningFocus || "",
+    concept: card.concept || card.topic || "",
+    learningFocus: card.learningFocus || card.learning_focus || card.concept || card.topic || "",
     sourceVault: context.vault || card.sourceVault || "",
     sourcePage: context.sourceRel || card.sourcePage || "",
     sourceLocation: card.sourceLocation || evidence[0] || "",
@@ -96,6 +113,9 @@ export function normalizeLearningBoost(input = {}, context = {}) {
   let targetLanguageCards = arrayOr(raw.target_language_cards || raw.targetLanguageCards, []).map((card, index) => normalizeLearningCard({
     ...card,
     id: card.id || stableId("lang-card", context.sourceRel, card.front || index),
+    topic: card.topic || card.concept || card.learningFocus || "",
+    concept: card.concept || card.topic || "",
+    learningFocus: card.learningFocus || card.learning_focus || card.concept || card.topic || card.front || "",
     sourceVault: context.vault || card.sourceVault || "",
     sourcePage: context.sourceRel || card.sourcePage || "",
     sourceLocation: card.sourceLocation || evidence[0] || "",
@@ -138,6 +158,9 @@ export function fallbackLearningBoost(analysis = {}, context = {}) {
     ? concepts.map((concept) => ({
       type: "concept",
       level: "core",
+      topic: concept.name || "Concept",
+      concept: concept.name || "Concept",
+      learningFocus: concept.name || "Concept",
       title: concept.name || "Concept",
       body: concept.summary || "",
       evidence
@@ -145,13 +168,19 @@ export function fallbackLearningBoost(analysis = {}, context = {}) {
     : [{
       type: "summary",
       level: "core",
+      topic: context.sourceTitle || "Core idea",
+      concept: context.sourceTitle || "Core idea",
+      learningFocus: analysis.summary || context.summary || context.sourceTitle || "Core idea",
       title: context.sourceTitle || "Source gist",
       body: analysis.summary || context.summary || "",
       evidence
     }];
   const cards = bits.slice(0, 6).map((bit) => ({
     type: "qa",
-    front: `What should you remember about ${bit.title}?`,
+    topic: bit.topic || bit.concept || bit.title,
+    concept: bit.concept || bit.topic || bit.title,
+    learningFocus: bit.learningFocus || bit.title,
+    front: topicQuestion(bit.topic || bit.concept || bit.title, { type: "qa" }),
     back: bit.body || analysis.summary || "Review the source page and evidence before answering.",
     evidence
   }));
@@ -316,6 +345,9 @@ function ensureLearningBitsDensity(bits, raw, context, evidence) {
     ...arrayOr(raw.detail_layers || raw.detailLayers, []).map((item) => ({
       type: "concept",
       level: item.level || "core",
+      topic: item.topic || item.concept || item.title || "",
+      concept: item.concept || item.topic || item.title || "",
+      learningFocus: item.learningFocus || item.learning_focus || item.concept || item.topic || item.title || "",
       title: item.title || "Learning point",
       body: item.body || "",
       evidence: arrayOr(item.evidence, evidence)
@@ -323,6 +355,9 @@ function ensureLearningBitsDensity(bits, raw, context, evidence) {
     ...normalizeDetails(raw.details_to_keep || raw.detailsToKeep, evidence).map((item) => ({
       type: item.kind || "detail",
       level: "detail",
+      topic: item.topic || item.concept || item.kind || "",
+      concept: item.concept || item.topic || item.kind || "",
+      learningFocus: item.learningFocus || item.learning_focus || item.text || item.kind || "",
       title: item.text || item.kind || "Detail to keep",
       body: item.why_it_matters || item.text || "",
       evidence: item.evidence
@@ -330,6 +365,9 @@ function ensureLearningBitsDensity(bits, raw, context, evidence) {
     ...normalizeRelationships(raw.relationships, evidence).map((item) => ({
       type: "relationship",
       level: "core",
+      topic: item.topic || item.from || item.to || "",
+      concept: [item.from, item.to].filter(Boolean).join(" / "),
+      learningFocus: [item.from, item.to].filter(Boolean).join(" and "),
       title: [item.from, item.to].filter(Boolean).join(" -> ") || "Concept relationship",
       body: item.relationship || "",
       evidence: item.evidence
@@ -337,6 +375,9 @@ function ensureLearningBitsDensity(bits, raw, context, evidence) {
     ...normalizeOpenQuestions(raw.open_questions || raw.openQuestions).map((item) => ({
       type: "question",
       level: "detail",
+      topic: item.topic || item.concept || "",
+      concept: item.concept || item.topic || "",
+      learningFocus: item.question || "",
       title: item.question || "Open learning question",
       body: item.current_answer || item.needed_resource || "Track this question during review.",
       evidence
@@ -344,6 +385,9 @@ function ensureLearningBitsDensity(bits, raw, context, evidence) {
     {
       type: "summary",
       level: "core",
+      topic: raw.topic || raw.concept || context.sourceTitle || "Source gist",
+      concept: raw.concept || raw.topic || context.sourceTitle || "Source gist",
+      learningFocus: raw.gist || raw.core_summary || raw.coreSummary || context.summary || context.sourceTitle || "Source gist",
       title: context.sourceTitle || "Source gist",
       body: raw.gist || raw.core_summary || raw.coreSummary || context.summary || "",
       evidence
@@ -372,6 +416,9 @@ function ensureLearningBitsDensity(bits, raw, context, evidence) {
       id: stableId("bit", context.sourceRel, `review-anchor-${index}`),
       type: "review_anchor",
       level: index === 1 ? "core" : "detail",
+      topic: raw.topic || raw.concept || context.sourceTitle || `Review anchor ${index}`,
+      concept: raw.concept || raw.topic || context.sourceTitle || `Review anchor ${index}`,
+      learningFocus: raw.core_summary || raw.gist || context.summary || `Review anchor ${index}`,
       title: index === 1 ? (context.sourceTitle || "Source anchor") : `Review anchor ${index}`,
       body: raw.core_summary || raw.gist || context.summary || "Use the source evidence to decide what should be remembered.",
       sourceVault: context.vault || "",
@@ -391,11 +438,15 @@ function ensureLearningCardsDensity({ generalCards, targetLanguageCards, learnin
   const allCards = () => [...general, ...language];
   for (const bit of learningBits) {
     if (allCards().length >= MIN_LEARNING_CARDS_PER_SOURCE) break;
-    const front = `What should you remember about ${bit.title || bit.type}?`;
+    const topic = deriveLearningTopic(bit, { sourceTitle: context.sourceTitle });
+    const front = topicQuestion(topic, { type: "qa" });
     if (allCards().some((card) => sameText(card.front, front))) continue;
     general.push(normalizeLearningCard({
       id: stableId("card", context.sourceRel, `${front}-${general.length}`),
       type: "qa",
+      topic,
+      concept: bit.concept || bit.topic || topic,
+      learningFocus: bit.learningFocus || bit.title || topic,
       front,
       back: bit.body || raw.core_summary || raw.gist || "Review the source evidence before answering.",
       hint: bit.level || "",
@@ -415,6 +466,9 @@ function ensureLearningCardsDensity({ generalCards, targetLanguageCards, learnin
     general.push(normalizeLearningCard({
       id: stableId("card", context.sourceRel, `misconception-${item.prompt}-${general.length}`),
       type: "qa",
+      topic: item.item_a || item.item_b || "Misconception repair",
+      concept: [item.item_a, item.item_b].filter(Boolean).join(" / "),
+      learningFocus: item.prompt || [item.item_a, item.item_b].filter(Boolean).join(" compared with "),
       front: item.prompt || `How are ${item.item_a} and ${item.item_b} different?`,
       back: item.answer || "Compare the source evidence before answering.",
       sourceVault: context.vault || "",
@@ -430,6 +484,9 @@ function ensureLearningCardsDensity({ generalCards, targetLanguageCards, learnin
     general.push(normalizeLearningCard({
       id: stableId("card", context.sourceRel, `open-question-${item.question}-${general.length}`),
       type: "qa",
+      topic: item.topic || item.concept || item.question || "Open learning question",
+      concept: item.concept || item.topic || "",
+      learningFocus: item.question || "Open learning question",
       front: item.question || "What remains uncertain?",
       back: item.current_answer || item.needed_resource || "Not answered yet. Keep this as a follow-up question.",
       sourceVault: context.vault || "",
@@ -444,7 +501,10 @@ function ensureLearningCardsDensity({ generalCards, targetLanguageCards, learnin
     language.push(normalizeLearningCard({
       id: stableId("lang-card", context.sourceRel, `explain-${firstTargetLanguage}`),
       type: "writing_prompt",
-      front: `Explain the source gist in ${firstTargetLanguage}.`,
+      topic: raw.topic || raw.concept || context.sourceTitle || "Core idea",
+      concept: raw.concept || raw.topic || context.sourceTitle || "Core idea",
+      learningFocus: raw.gist || raw.core_summary || context.sourceTitle || "Core idea",
+      front: `Explain ${deriveLearningTopic(raw, { sourceTitle: context.sourceTitle })} in ${firstTargetLanguage}.`,
       back: raw.gist || raw.core_summary || "Use the source gist and learning bits.",
       sourceVault: context.vault || "",
       sourcePage: context.sourceRel || "",
@@ -457,11 +517,15 @@ function ensureLearningCardsDensity({ generalCards, targetLanguageCards, learnin
   while (allCards().length < MIN_LEARNING_CARDS_PER_SOURCE) {
     const index = allCards().length + 1;
     const bit = learningBits[(index - 1) % Math.max(learningBits.length, 1)] || {};
+    const topic = deriveLearningTopic(bit, { sourceTitle: context.sourceTitle });
     general.push(normalizeLearningCard({
       id: stableId("card", context.sourceRel, `review-card-${index}`),
       type: index % 2 === 0 ? "cloze" : "qa",
-      front: index % 2 === 0 ? "" : `What is one useful takeaway from ${context.sourceTitle || "this source"}?`,
-      cloze: index % 2 === 0 ? `The useful takeaway is {{${bit.title || context.sourceTitle || "the source idea"}}}.` : "",
+      topic,
+      concept: bit.concept || bit.topic || topic,
+      learningFocus: bit.learningFocus || bit.title || topic,
+      front: index % 2 === 0 ? "" : topicQuestion(topic, { type: "qa" }),
+      cloze: index % 2 === 0 ? `A key idea about ${topic} is {{${bit.title || topic}}}.` : "",
       back: bit.body || raw.core_summary || raw.gist || "Answer using the source evidence.",
       sourceVault: context.vault || "",
       sourcePage: context.sourceRel || "",

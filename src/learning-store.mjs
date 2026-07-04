@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { enrichLearningBitForDisplay, enrichLearningCardForDisplay } from "./learning-card-display.mjs";
 import { normalizeLearningProfile } from "./learning-model.mjs";
 import { normalizeUserProfile, onboardingQuestions } from "./user-profile.mjs";
 import { listVaults, vaultName } from "./vaults.mjs";
@@ -292,10 +293,23 @@ function learningStats(paths) {
   const bits = readJsonl(path.join(paths.dir, "bits.jsonl"));
   const plans = readJsonl(path.join(paths.dir, "plans.jsonl"));
   const sourceLinks = readJsonl(path.join(paths.dir, "source-links.jsonl"));
+  const bitsBySource = new Map();
+  for (const bit of bits) {
+    const key = bit.sourcePage || "";
+    if (!key) continue;
+    const list = bitsBySource.get(key) || [];
+    list.push(bit);
+    bitsBySource.set(key, list);
+  }
+  const displayCards = cards
+    .map((card) => enrichLearningCardForDisplay(card, { relatedBits: bitsBySource.get(card.sourcePage || "") || [], sourceLinks }));
+  const primaryCards = displayCards.filter((card) => card.displayDemoted !== true);
+  const fallbackCards = primaryCards.length ? primaryCards : displayCards;
+  const displayBits = bits.map((bit) => enrichLearningBitForDisplay(bit, { sourceLinks }));
   const today = new Date().toISOString().slice(0, 10);
-  const dueCards = cards.filter((card) => !card.due || card.due <= today).slice(0, 10);
-  const recentCards = cards.slice(-10).reverse();
-  const recentBits = bits.slice(-12).reverse();
+  const dueCards = fallbackCards.filter((card) => !card.due || card.due <= today).slice(0, 10);
+  const recentCards = fallbackCards.slice(-10).reverse();
+  const recentBits = displayBits.slice(-12).reverse();
   return {
     bits: bits.length,
     cards: cards.length,

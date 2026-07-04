@@ -8,15 +8,16 @@ The Learning tab shows:
 
 1. Learning Autopilot controls.
 2. Workflow steps: Capture, Process, Understand, Practice, Plan, Review.
-3. Sources to process and processed source groups.
-4. Cards and bits.
-5. Learning plans and goals.
-6. Due reviews and RemNote export.
-7. Profile/onboarding and target languages.
-8. Behavior insights and expanded monitoring.
-9. Provider health.
-10. Internet research controls.
-11. Notification Center and system alert status.
+3. Numbered flows for Today, This Week, and When a Source Is Processed.
+4. Sources to process and processed source groups.
+5. Grouped cards and bits with a type legend.
+6. Learning plans and goals.
+7. Due reviews and RemNote export.
+8. Profile/onboarding and target languages.
+9. Behavior insights and expanded monitoring.
+10. Provider health.
+11. Internet research controls.
+12. Notification Center and system alert status.
 
 Each card uses the same structure:
 
@@ -25,6 +26,31 @@ Each card uses the same structure:
 - `More details`
 
 The app shows at most three suggested actions per card.
+
+## Cards And Bits
+
+Cards are grouped by the concept or topic they teach. The front of a card shows the card type, the topic/concept chip, and the prompt. The back shows the answer, related learning focus, and source evidence.
+
+If an old stored card says “this source” or uses a raw source title as the question, the UI repairs the prompt for display without rewriting the vault JSONL file. Browser clipper metadata cards, such as media-count or download-status cards, are demoted from the main practice deck unless they contain a real learning concept.
+
+The legend maps colors to item types:
+
+- Capture/source.
+- Understanding/bit.
+- Practice/card.
+- Plan/goal.
+- Review.
+- Alert/provider.
+
+## Numbered Flows
+
+The numbered flow lanes answer three recurring user questions:
+
+- Today: what to do in the current session.
+- This Week: what to advance across several sessions.
+- When a Source Is Processed: what to inspect and practice after Autopilot finishes a source.
+
+These flows show live counts and use existing safe local buttons such as Process pending now, Draft plans, and Export to RemNote.
 
 For the full user flow, see [Learning Flow and Notifications](learning-flow-and-notifications.md).
 

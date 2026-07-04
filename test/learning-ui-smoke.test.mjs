@@ -27,6 +27,14 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
     "Internet research controls",
     "System/device alerts",
     "Learning Flow",
+    "Numbered Learning Flow",
+    "This Week",
+    "When A Source Is Processed",
+    "Capture/source",
+    "Understanding/bit",
+    "Practice/card",
+    "Plan/goal",
+    "Alert/provider",
     "Learning Autopilot",
     "Cards And Bits",
     "Plan And Goal Guide",
@@ -47,6 +55,18 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /learning-workspace/);
   assert.match(serverSource, /learning-stepper/);
   assert.match(serverSource, /learning-card-deck/);
+  assert.match(serverSource, /learning-card-topic-groups/);
+  assert.match(serverSource, /learning-card-topic-group/);
+  assert.match(serverSource, /learning-type-legend/);
+  assert.match(serverSource, /displayPrompt/);
+  assert.match(serverSource, /displayTopic/);
+  assert.match(serverSource, /displayQuality === "repaired"/);
+  assert.match(serverSource, /groupLearningCardsAndBits/);
+  assert.match(serverSource, /renderLearningStepByStepFlow/);
+  assert.match(serverSource, /Review due cards/);
+  assert.match(serverSource, /Finish pending sources/);
+  assert.match(serverSource, /Read the gist/);
+  assert.match(serverSource, /Inspect bits/);
   assert.match(serverSource, /learning-bit-explorer/);
   assert.match(serverSource, /learning-notification-center/);
   assert.match(serverSource, /prefers-reduced-motion/);
