@@ -225,6 +225,11 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /renderLearningTimeline/);
   assert.match(serverSource, /groupTimelineItems/);
   assert.match(serverSource, /tabPayloadStatus/);
+  assert.match(serverSource, /loading: status === "loading"/);
+  assert.match(serverSource, /scheduleTabDataRefresh/);
+  assert.match(serverSource, /state\.items\.length && state\.loading/);
+  assert.doesNotMatch(serverSource, /refreshTabData\(kind\);/);
+  assert.doesNotMatch(serverSource, /loading: status === "loading" \|\| status === "stale_refreshing"/);
   assert.match(serverSource, /data-tab-refresh/);
   assert.match(serverSource, /filesLoadPolls <= 8/);
   assert.match(serverSource, /archivesLoadPolls <= 8/);

@@ -162,14 +162,14 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname === "/api/files") {
-    if (url.searchParams.get("refresh") === "1") refreshTabData("files", { force: true });
+    if (url.searchParams.get("refresh") === "1") scheduleTabDataRefresh("files", { force: true });
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(cachedTabPayload("files")));
     return;
   }
 
   if (request.method === "GET" && url.pathname === "/api/archives") {
-    if (url.searchParams.get("refresh") === "1") refreshTabData("archives", { force: true });
+    if (url.searchParams.get("refresh") === "1") scheduleTabDataRefresh("archives", { force: true });
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(cachedTabPayload("archives")));
     return;
@@ -264,7 +264,7 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname === "/api/topics") {
-    if (url.searchParams.get("refresh") === "1") refreshTabData("topics", { force: true });
+    if (url.searchParams.get("refresh") === "1") scheduleTabDataRefresh("topics", { force: true });
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(cachedTabPayload("topics")));
     return;
@@ -1342,12 +1342,12 @@ function cacheState() {
 function cachedTabPayload(kind) {
   const state = tabDataCache[kind] || cacheState();
   const stale = isTabCacheStale(state);
-  if ((!state.ready || stale) && !state.loading) refreshTabData(kind);
+  if ((!state.ready || stale) && !state.loading) scheduleTabDataRefresh(kind);
   const key = kind === "archives" ? "archives" : kind;
   const status = tabPayloadStatus(state, stale);
   return {
     [key]: state.items,
-    loading: status === "loading" || status === "stale_refreshing",
+    loading: status === "loading",
     status,
     stale,
     error: state.error,
@@ -1360,7 +1360,7 @@ function cachedTabPayload(kind) {
 function cachedLearningPayload() {
   const state = tabDataCache.learning || cacheState();
   const stale = isTabCacheStale(state);
-  if ((!state.ready || stale) && !state.loading) refreshTabData("learning");
+  if ((!state.ready || stale) && !state.loading) scheduleTabDataRefresh("learning");
   const data = state.data ? enrichLearningRuntime(state.data) : { vaults: [], appProfileIndex: { schemaVersion: 1, profiles: [] } };
   return {
     ...data,
@@ -1397,10 +1397,12 @@ function isTabCacheStale(state) {
 
 function tabPayloadStatus(state, stale) {
   if (state.error) return "error";
-  if (state.loading && state.ready) return "stale_refreshing";
+  if (state.items.length && state.loading) return "stale_refreshing";
+  if (state.items.length && stale) return "stale_refreshing";
+  if (state.items.length) return "ready";
+  if (state.loading && state.ready && !state.items.length) return "ready_empty";
   if (state.loading || !state.ready) return "loading";
   if (!state.items.length) return "ready_empty";
-  if (stale) return "stale_refreshing";
   return "ready";
 }
 
@@ -1450,9 +1452,13 @@ function invalidateTabData() {
 }
 
 function refreshChangedTabsAfterIngest() {
-  refreshTabData("files");
-  refreshTabData("topics");
-  refreshTabData("learning");
+  scheduleTabDataRefresh("files");
+  scheduleTabDataRefresh("topics");
+  scheduleTabDataRefresh("learning");
+}
+
+function scheduleTabDataRefresh(kind, options = {}) {
+  setImmediate(() => refreshTabData(kind, options));
 }
 
 function refreshTabData(kind = "all", options = {}) {
@@ -1464,7 +1470,6 @@ function refreshTabData(kind = "all", options = {}) {
   if (tabDataWorkers.has(kind)) {
     if (!options.force) return;
     tabDataWorkers.get(kind)?.kill?.("SIGTERM");
-    tabDataWorkers.delete(kind);
   }
   const kinds = [kind];
   const started = Date.now();
@@ -1480,6 +1485,7 @@ function refreshTabData(kind = "all", options = {}) {
     stdio: ["ignore", "ignore", "ignore", "ipc"]
   });
   const timeout = setTimeout(() => {
+    if (tabDataWorkers.get(kind) !== worker) return;
     tabDataCache[kind].loading = false;
     tabDataCache[kind].error = "Tab data scan is taking too long. Try again after iCloud finishes syncing this vault.";
     tabDataCache[kind].lastFinishedAt = new Date().toISOString();
@@ -1519,6 +1525,7 @@ function refreshTabData(kind = "all", options = {}) {
   });
   worker.on("exit", (code) => {
     clearTimeout(timeout);
+    if (tabDataWorkers.get(kind) !== worker) return;
     tabDataWorkers.delete(kind);
     const elapsed = Date.now() - started;
     if (code) {
@@ -1534,6 +1541,7 @@ function refreshTabData(kind = "all", options = {}) {
   });
   worker.on("error", (error) => {
     clearTimeout(timeout);
+    if (tabDataWorkers.get(kind) !== worker) return;
     tabDataWorkers.delete(kind);
     console.warn(`[tab-data] ${kind} refresh failed after ${Date.now() - started}ms: ${error.message}`);
     for (const item of kinds) {
