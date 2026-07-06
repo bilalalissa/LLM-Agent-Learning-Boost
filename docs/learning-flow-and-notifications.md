@@ -77,6 +77,19 @@ The Learning tab shows three step-by-step lanes:
 
 Each lane shows current counts from the selected vault and includes one action button when the app already has a safe local action for that step.
 
+## Dated Learning Timeline
+
+The Learning Timeline is the first dated planning surface in the Learning tab. It groups learning work into:
+
+- Today.
+- Next 7 days.
+- Later.
+- Undated.
+
+Timeline items can come from due cards, plan stages, goal deadlines, recent processed sources, plan-update suggestions, and export/review tasks. Each item is clickable when the app knows a target. For example, a due-card item opens Cards And Bits, a plan-stage item loads the plan revision controls, and a processed-source item opens or highlights the related source.
+
+The timeline is guidance only. It does not create Calendar events by itself. Calendar and Reminders writes still require Export Review and confirmation.
+
 ## Click-Through Targets
 
 Learning UI items are meant to move you to the related target instead of leaving you to navigate manually.
@@ -91,6 +104,30 @@ Learning UI items are meant to move you to the related target instead of leaving
 - Provider alerts open the Provider tab.
 - Notification rows jump to the related source, plan, goal, or provider state when that target exists.
 - If a target is a real vault file that is not represented in the current UI, Learning Boost opens only files under a known vault root.
+
+## Card Read State
+
+Clicking `Show answer` records one local review event for that card. The card then shows a `Read` chip and due/review counts refresh after the next Learning data update.
+
+The original card remains unchanged in `.llm-wiki/learning/cards.jsonl`. Read state is stored as an event in:
+
+```text
+.llm-wiki/learning/review-log.jsonl
+```
+
+This preserves history while still letting the UI track which cards you have already inspected.
+
+## Files, Archive, And Topics Loading
+
+Files, Archive, Topics, and the side Topics list report explicit loading states:
+
+- `loading`: first index scan is running.
+- `ready`: current rows are available.
+- `ready_empty`: the scan finished and no rows exist.
+- `stale_refreshing`: cached rows remain visible while a background refresh runs.
+- `error`: indexing failed or timed out.
+
+The app no longer treats a loading index as “No processed files yet.” If indexing takes too long, a retry control appears instead of polling forever.
 
 ## Plans And Goals
 
@@ -201,3 +238,13 @@ When you click an export button, Learning Boost opens an Export Review panel bef
 - editable preview content for `.ics`, Reminders Markdown, or RemNote Markdown/text
 
 Nothing is written until you click `Confirm export`. Use `Cancel` to close the review or `Edit plan` to jump back to the plan revision controls.
+
+After confirmation, Learning Boost verifies the expected file exists before reporting success. Verified exports show the written vault path in the review panel. If verification fails, the review stays open and shows the expected path and exact failure instead of saying the export finished.
+
+Expected file locations are:
+
+- Calendar `.ics`: `.llm-wiki/learning/exports/calendar/*.ics`
+- Reminders Markdown: `.llm-wiki/learning/exports/reminders/*-reminders.md`
+- RemNote Markdown: `.llm-wiki/learning/exports/remnote-import.md`
+- RemNote text: `.llm-wiki/learning/exports/remnote-import.txt`
+- RemNote media index: `.llm-wiki/learning/exports/remnote-media-index.md`

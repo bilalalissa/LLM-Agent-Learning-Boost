@@ -155,6 +155,32 @@ export function updateVaultProfiles(config, vault, input = {}) {
   };
 }
 
+export function recordLearningCardReview(config, vault, input = {}) {
+  const vaultPath = listVaults(config.vaultsRoot).find((item) => vaultName(item) === vault);
+  if (!vaultPath) throw new Error(`Unknown vault: ${vault}`);
+  ensureLearningScaffold(vaultPath, config);
+  const paths = learningPaths(vaultPath);
+  const cards = readJsonl(path.join(paths.dir, "cards.jsonl"));
+  const requestedKey = String(input.cardId || "").trim();
+  const prompt = String(input.prompt || "").trim();
+  const card = cards.find((item) => cardKey(item) === requestedKey || item.id === requestedKey) ||
+    cards.find((item) => prompt && [item.front, item.cloze].filter(Boolean).some((value) => String(value) === prompt));
+  const event = {
+    id: stableId("review", `${requestedKey || prompt}-${input.action || "read"}-${new Date().toISOString()}`),
+    type: "card_reviewed",
+    action: String(input.action || "read"),
+    created: new Date().toISOString(),
+    cardId: cardKey(card || input),
+    sourcePage: card?.sourcePage || input.sourcePage || "",
+    sourceVault: vaultName(vaultPath),
+    topic: card?.learningFocus || card?.topic || input.topic || "",
+    prompt: card?.front || card?.cloze || prompt || "",
+    grade: input.grade || "read"
+  };
+  appendJsonl(path.join(paths.dir, "review-log.jsonl"), event);
+  return { recorded: true, event };
+}
+
 function profileFromUser(userProfile) {
   return {
     activeProfileId: userProfile.profileId,
@@ -293,6 +319,11 @@ function learningStats(paths) {
   const bits = readJsonl(path.join(paths.dir, "bits.jsonl"));
   const plans = readJsonl(path.join(paths.dir, "plans.jsonl"));
   const sourceLinks = readJsonl(path.join(paths.dir, "source-links.jsonl"));
+  const reviews = readJsonl(path.join(paths.dir, "review-log.jsonl"));
+  const readCardIds = new Set(reviews
+    .filter((event) => event.type === "card_reviewed" || event.action === "read" || event.action === "seen")
+    .map((event) => event.cardId || "")
+    .filter(Boolean));
   const bitsBySource = new Map();
   for (const bit of bits) {
     const key = bit.sourcePage || "";
@@ -302,7 +333,8 @@ function learningStats(paths) {
     bitsBySource.set(key, list);
   }
   const displayCards = cards
-    .map((card) => enrichLearningCardForDisplay(card, { relatedBits: bitsBySource.get(card.sourcePage || "") || [], sourceLinks }));
+    .map((card) => enrichLearningCardForDisplay(card, { relatedBits: bitsBySource.get(card.sourcePage || "") || [], sourceLinks }))
+    .map((card) => ({ ...card, displayKey: cardKey(card), displayRead: readCardIds.has(cardKey(card)) }));
   const primaryCards = displayCards.filter((card) => card.displayDemoted !== true);
   const fallbackCards = primaryCards.length ? primaryCards : displayCards;
   const displayBits = bits.map((bit) => enrichLearningBitForDisplay(bit, { sourceLinks }));
@@ -315,11 +347,32 @@ function learningStats(paths) {
     cards: cards.length,
     plans: plans.length,
     sourceLinks: sourceLinks.length,
+    allCards: fallbackCards,
+    allBits: displayBits,
+    reviewedCards: readCardIds.size,
     recentSourceLinks: sourceLinks.slice(-10).reverse(),
     dueCards,
     recentCards,
     recentBits
   };
+}
+
+function cardKey(card = {}) {
+  return String(card.id || card.displayKey || card.cardId || `${card.sourcePage || ""}|${card.front || card.cloze || card.displayPrompt || ""}`);
+}
+
+function stableId(prefix, value) {
+  let hash = 0;
+  const text = String(value || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+  }
+  return `${prefix}-${Math.abs(hash).toString(36)}`;
+}
+
+function appendJsonl(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${JSON.stringify(value)}\n`);
 }
 
 function readJsonl(file) {

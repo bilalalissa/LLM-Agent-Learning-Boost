@@ -196,6 +196,18 @@ Most Overview, flow, card, source, plan, goal, provider, and notification items 
 
 In Source-To-Plan Map, source titles open or highlight the source target. `N goals` and `N plans` chips load revision controls when links exist; zero-count chips are disabled and explain that no linked item exists yet. `N cards` and group chips filter Cards And Bits, where a banner shows the active filter and a Clear filter button.
 
+### Learning Timeline
+
+The Learning Timeline groups dated work into Today, Next 7 days, Later, and Undated. It pulls from due cards, plan stages, goal deadlines, processed sources, plan-update suggestions, and export/review tasks.
+
+Click a timeline item to jump to the related card group, source, plan, goal, Provider state, or export review control. The timeline is a navigation aid; it does not write Calendar events by itself.
+
+### Cards And Bits
+
+Cards And Bits uses the full display-ready card and bit list, not only a small due-card sample. Source-To-Plan Map card counts should match what the Cards And Bits filter can show.
+
+Clicking `Show answer` records a local review event once, adds a `Read` marker to the visible card, and refreshes review summaries. It does not rewrite the original card JSONL; read state is stored in `.llm-wiki/learning/review-log.jsonl`.
+
 ### Learning Autopilot
 
 Learning Autopilot is the normal automatic flow. When it is on, Learning Boost watches `raw/`, `raw/inbox/`, `raw/input/`, and approved captured resources. If the selected provider can answer, the app processes pending sources into source pages, multiple learning bits, active-recall cards, source links, and dashboards. If the provider cannot answer, the file stays pending and the Notification Center records the blocker.
@@ -229,6 +241,8 @@ Export calendar opens Export Review first. Review the selected vault, plan, dest
 Export reminders opens Export Review first. Review the selected vault, plan, destination, reminder count, warnings, and editable Markdown task text. Nothing is written until you click Confirm export.
 
 Export RemNote also opens Export Review. Inspect the card/media counts and editable RemNote Markdown or text before confirming.
+
+After Confirm export, Learning Boost verifies the expected files exist on disk. Verified paths appear in the review panel. If a file is missing, the panel stays open and shows the exact expected path instead of reporting success.
 
 Suggest updates looks for changes that may improve a plan. Suggestions are stored; they are not automatically applied.
 

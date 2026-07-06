@@ -68,6 +68,12 @@ The numbered flow lanes answer three recurring user questions:
 
 These flows show live counts and use existing safe local buttons such as Process pending now, Draft plans, and Export to RemNote.
 
+## Learning Timeline
+
+The dated Learning Timeline sits near the top of the tab so time-sensitive work is visible before the deeper controls. It groups tasks into Today, Next 7 days, Later, and Undated lanes. Items are built from due cards, processed sources, plan stages, goal deadlines, update suggestions, and export/review actions.
+
+Clicking a timeline item routes to the relevant place: Cards And Bits, Source-To-Plan Map, Revise Plans And Goals, Provider, or the export/review controls. The timeline does not write Calendar events; it is a navigation and awareness surface.
+
 ## Flexible Layout
 
 Learning panels use wrapping grids and natural-height cards. Stepper items and numbered flow lanes use full-width buttons so labels do not collapse into vertical text. Controls, chips, notification rows, plan timelines, source evidence paths, Arabic/English mixed titles, and card backs wrap or clamp inside their containers instead of overlapping or hiding content.
@@ -79,6 +85,24 @@ Long vault paths remain available in hover titles or details, while the visible 
 Plan Actions and RemNote export are preview-first. Calendar, Apple Calendar events, Reminders, Apple Reminders, and RemNote buttons open an Export Review panel that shows the selected vault, plan, destination, item counts, warnings, and editable content. Nothing is written until Confirm export is pressed.
 
 Use Cancel to abandon the export, Edit plan to jump to Revise Plans And Goals, or Confirm export after reviewing the generated content.
+
+After Confirm export, the same panel reports whether the expected output files were actually found on disk. Successful exports show the verified file path buttons. Failed exports keep the panel open with the expected path and error so the user can retry instead of receiving a misleading success message.
+
+Verified outputs are:
+
+- `.llm-wiki/learning/exports/calendar/*.ics`
+- `.llm-wiki/learning/exports/reminders/*-reminders.md`
+- `.llm-wiki/learning/exports/remnote-import.md`
+- `.llm-wiki/learning/exports/remnote-import.txt`
+- `.llm-wiki/learning/exports/remnote-media-index.md`
+
+## Card Read State
+
+`Show answer` is also a review action. The first time a card answer is shown, Learning Boost appends a `card_reviewed` event to `.llm-wiki/learning/review-log.jsonl`, marks the visible card as read, and refreshes review summaries. It does not rewrite the stored card JSONL.
+
+## Tab Loading
+
+Files, Archive, and Topics show explicit index states instead of ambiguous empty tables. During a first scan they show loading. If stale rows exist, those rows stay visible while the refresh runs. If the scan finishes with no rows, the tab shows an empty state. If the scan stalls or fails, the tab shows a retry control.
 
 ## Capture Scan Status
 

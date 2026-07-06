@@ -42,3 +42,13 @@ The app does not claim automatic RemNote image upload. Treat the media folder as
 Use Export Review to inspect the generated RemNote content before files are created. You can edit the preview text, cancel the export, or jump back to plan editing before confirming.
 
 Confirming writes the RemNote files under `.llm-wiki/learning/exports/` and records the export in the learning logs. Previewing alone does not write or overwrite export files.
+
+After confirmation, Learning Boost verifies all required RemNote outputs before reporting success:
+
+```text
+.llm-wiki/learning/exports/remnote-import.md
+.llm-wiki/learning/exports/remnote-import.txt
+.llm-wiki/learning/exports/remnote-media-index.md
+```
+
+If any expected file is missing, the Export Review panel stays open and shows the missing path. A successful export shows the verified paths so you can open the generated files from the app.

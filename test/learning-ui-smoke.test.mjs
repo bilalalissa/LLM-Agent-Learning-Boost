@@ -205,6 +205,47 @@ test("Chat tab exposes controlled remote research controls", () => {
   assert.match(serverSource, /api\/learning\/remote-source-save/);
 });
 
+test("Learning tab has timeline, bounded tab loading, read-state, and verified export hooks", () => {
+  for (const label of [
+    "Learning Timeline",
+    "Next 7 days",
+    "Later",
+    "Undated",
+    "ready_empty",
+    "stale_refreshing",
+    "Retry refresh",
+    "Export verified",
+    "Export failed verification",
+    "Checked file path(s)",
+    "Card marked read",
+    "Learning Profile Summary"
+  ]) {
+    assert.match(serverSource, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  assert.match(serverSource, /renderLearningTimeline/);
+  assert.match(serverSource, /groupTimelineItems/);
+  assert.match(serverSource, /tabPayloadStatus/);
+  assert.match(serverSource, /data-tab-refresh/);
+  assert.match(serverSource, /filesLoadPolls <= 8/);
+  assert.match(serverSource, /archivesLoadPolls <= 8/);
+  assert.match(serverSource, /topicsLoadPolls <= 8/);
+  assert.match(serverSource, /sideTopicsLoadPolls <= 8/);
+  assert.match(serverSource, /api\/learning\/card-review/);
+  assert.match(serverSource, /markLearningCardRead/);
+  assert.match(serverSource, /displayRead/);
+  assert.match(serverSource, /allCards/);
+  assert.match(serverSource, /allBits/);
+  assert.match(serverSource, /countLearningCardsForLink/);
+  assert.match(serverSource, /Showing .* of .* card/);
+  assert.match(serverSource, /verifyLearningExport/);
+  assert.match(serverSource, /verifiedFiles/);
+  assert.match(serverSource, /expectedFile/);
+  assert.match(serverSource, /renderLearningExportResult/);
+  assert.match(serverSource, /learning-export-result/);
+  assert.match(serverSource, /learning-export-files/);
+  assert.match(serverSource, /learningExportReview\.addEventListener/);
+});
+
 test("Learning saves preserve unrelated dirty fields and expose source insight processing", () => {
   assert.match(serverSource, /snapshotDirtyLearningFields/);
   assert.match(serverSource, /restoreDirtyLearningFields/);

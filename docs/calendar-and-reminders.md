@@ -36,6 +36,14 @@ Calendar events are generated for stage types such as first-pass reading, deep p
 
 Before writing an `.ics` file or asking the native bridge to create Apple Calendar events, Learning Boost shows the selected vault, plan, destination, event count, warnings, and editable `.ics` text. Nothing is written until `Confirm export` is pressed.
 
+After confirmation, the app verifies the `.ics` file exists before it reports success. The expected path is:
+
+```text
+.llm-wiki/learning/exports/calendar/<plan-id>.ics
+```
+
+If verification fails, the Export Review panel stays open and shows the expected path and failure reason.
+
 ## Reminders
 
 Reminders export is also local-first:
@@ -46,6 +54,14 @@ Reminders export is also local-first:
 - Reminder export requires an Export Review confirmation after plan approval.
 
 Before writing a Markdown reminder export or asking the native bridge to create Apple Reminders, Learning Boost shows the selected vault, plan, destination, reminder count, warnings, and editable Markdown task text. Nothing is written until `Confirm export` is pressed.
+
+After confirmation, the app verifies the Markdown export exists before it reports success. The expected path is:
+
+```text
+.llm-wiki/learning/exports/reminders/<plan-id>-reminders.md
+```
+
+If Apple Reminders bridge creation is unavailable, the verified Markdown file is the fallback output.
 
 ## Undo and Export Logs
 

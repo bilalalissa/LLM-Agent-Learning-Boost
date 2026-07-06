@@ -28,7 +28,7 @@ import {
   reviseLearningGoal,
   reviseLearningPlan
 } from "./learning-planner.mjs";
-import { updateVaultProfiles } from "./learning-store.mjs";
+import { recordLearningCardReview, updateVaultProfiles } from "./learning-store.mjs";
 import { answerLocallyAsync } from "./local-answer.mjs";
 import { createLocalAiRouterSupervisor } from "./local-ai-router-supervisor.mjs";
 import { addHighlight, addNote, deleteNote, listNotes, saveNoteMedia, updateNote } from "./notes.mjs";
@@ -36,6 +36,7 @@ import { createProvider } from "./provider.mjs";
 import { providerStatus } from "./provider-status.mjs";
 import { recordPlanUpdateChoice, suggestPlanUpdates } from "./plan-update-suggester.mjs";
 import { preflightStatus } from "./preflight.mjs";
+import { queueResourceInboxForIngest } from "./source-capture-ingest.mjs";
 import {
   remoteResearch,
   saveRemoteSourcesToResourceInbox,
@@ -54,7 +55,6 @@ import {
   markResourceIngestResults,
   purgeExpiredResources,
   readSourceCaptureSettings,
-  stageResourcesForIngest,
   updateSourceCaptureSettings
 } from "./source-capture.mjs";
 import { collectScreenshots } from "./source-collectors/screenshots-collector.mjs";
@@ -162,12 +162,14 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname === "/api/files") {
+    if (url.searchParams.get("refresh") === "1") refreshTabData("files", { force: true });
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(cachedTabPayload("files")));
     return;
   }
 
   if (request.method === "GET" && url.pathname === "/api/archives") {
+    if (url.searchParams.get("refresh") === "1") refreshTabData("archives", { force: true });
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(cachedTabPayload("archives")));
     return;
@@ -262,6 +264,7 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname === "/api/topics") {
+    if (url.searchParams.get("refresh") === "1") refreshTabData("topics", { force: true });
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(cachedTabPayload("topics")));
     return;
@@ -565,7 +568,7 @@ const server = http.createServer(async (request, response) => {
       const body = await readBody(request);
       const payload = JSON.parse(body || "{}");
       const vaultPath = resolveLearningVaultPath(payload.vault);
-      const staged = stageResourcesForIngest(vaultPath, { limit: payload.limit || 12 });
+      const staged = queueResourceInboxForIngest(vaultPath, { limit: payload.limit || 12 });
       if (!staged.staged.length) {
         ingestProgress = progressState({
           completed: 0,
@@ -656,6 +659,21 @@ const server = http.createServer(async (request, response) => {
       const result = deleteResource(vaultPath, payload.id);
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/card-review") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const result = recordLearningCardReview(config, payload.vault, payload);
+      refreshTabData("learning", { force: true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: payload.vault, ...result }));
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: error.message }));
@@ -1315,6 +1333,8 @@ function cacheState() {
     ready: false,
     loading: false,
     error: "",
+    lastStartedAt: "",
+    lastFinishedAt: "",
     updatedAt: ""
   };
 }
@@ -1324,11 +1344,15 @@ function cachedTabPayload(kind) {
   const stale = isTabCacheStale(state);
   if ((!state.ready || stale) && !state.loading) refreshTabData(kind);
   const key = kind === "archives" ? "archives" : kind;
+  const status = tabPayloadStatus(state, stale);
   return {
     [key]: state.items,
-    loading: !state.ready || state.loading,
+    loading: status === "loading" || status === "stale_refreshing",
+    status,
     stale,
     error: state.error,
+    lastStartedAt: state.lastStartedAt,
+    lastFinishedAt: state.lastFinishedAt,
     updatedAt: state.updatedAt
   };
 }
@@ -1369,6 +1393,15 @@ function isTabCacheStale(state) {
   const updated = Date.parse(state.updatedAt);
   if (!Number.isFinite(updated)) return false;
   return Date.now() - updated > 30000;
+}
+
+function tabPayloadStatus(state, stale) {
+  if (state.error) return "error";
+  if (state.loading && state.ready) return "stale_refreshing";
+  if (state.loading || !state.ready) return "loading";
+  if (!state.items.length) return "ready_empty";
+  if (stale) return "stale_refreshing";
+  return "ready";
 }
 
 function addNoteToCache(note) {
@@ -1422,17 +1455,23 @@ function refreshChangedTabsAfterIngest() {
   refreshTabData("learning");
 }
 
-function refreshTabData(kind = "all") {
+function refreshTabData(kind = "all", options = {}) {
   if (kind === "all") {
-    for (const item of Object.keys(tabDataCache)) refreshTabData(item);
+    for (const item of Object.keys(tabDataCache)) refreshTabData(item, options);
     return;
   }
-  if (!tabDataCache[kind] || tabDataWorkers.has(kind)) return;
+  if (!tabDataCache[kind]) return;
+  if (tabDataWorkers.has(kind)) {
+    if (!options.force) return;
+    tabDataWorkers.get(kind)?.kill?.("SIGTERM");
+    tabDataWorkers.delete(kind);
+  }
   const kinds = [kind];
   const started = Date.now();
   for (const item of kinds) {
     tabDataCache[item].loading = true;
     tabDataCache[item].error = "";
+    tabDataCache[item].lastStartedAt = new Date(started).toISOString();
   }
   console.log(`[tab-data] ${kind} refresh started.`);
   const worker = fork(path.join(agentRoot, "src", "tab-data-worker.mjs"), [kind], {
@@ -1443,6 +1482,7 @@ function refreshTabData(kind = "all") {
   const timeout = setTimeout(() => {
     tabDataCache[kind].loading = false;
     tabDataCache[kind].error = "Tab data scan is taking too long. Try again after iCloud finishes syncing this vault.";
+    tabDataCache[kind].lastFinishedAt = new Date().toISOString();
     console.warn(`[tab-data] ${kind} refresh timed out after ${Date.now() - started}ms.`);
     worker.kill("SIGTERM");
   }, 25000);
@@ -1461,6 +1501,7 @@ function refreshTabData(kind = "all") {
           ready: true,
           loading: false,
           error: "",
+          lastFinishedAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         };
         continue;
@@ -1471,6 +1512,7 @@ function refreshTabData(kind = "all") {
         ready: true,
         loading: false,
         error: "",
+        lastFinishedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
     }
@@ -1486,6 +1528,7 @@ function refreshTabData(kind = "all") {
     }
     for (const item of kinds) {
       tabDataCache[item].loading = false;
+      tabDataCache[item].lastFinishedAt = new Date().toISOString();
       if (code && !tabDataCache[item].error) tabDataCache[item].error = `Tab data refresh exited with code ${code}.`;
     }
   });
@@ -1496,6 +1539,7 @@ function refreshTabData(kind = "all") {
     for (const item of kinds) {
       tabDataCache[item].loading = false;
       tabDataCache[item].error = error.message;
+      tabDataCache[item].lastFinishedAt = new Date().toISOString();
     }
   });
 }
@@ -1910,6 +1954,7 @@ async function runAutoIngest() {
       if (bootstrapped.length) {
         console.log(`[bootstrap] ${vaultName(vault)}: ${bootstrapped.join(", ")}`);
       }
+      runLearningCaptureScan(vault);
       ingestProgress = progressState({
         completed,
         total,
@@ -2081,12 +2126,48 @@ function learningExportConfirm(vaultPath, payload = {}) {
     confirmLarge: payload.confirmLarge === true || payload.confirmed === true,
     editedContent: payload.editedContent
   };
-  if (type === "calendar" || type === "ics") return exportPlanIcs(vaultPath, payload.planId, options);
-  if (type === "apple_calendar") return createCalendarEvents(vaultPath, payload.planId, options);
-  if (type === "reminders" || type === "markdown") return exportPlanRemindersMarkdown(vaultPath, payload.planId, options);
-  if (type === "apple_reminders") return createReminders(vaultPath, payload.planId, options);
-  if (type === "remnote") return exportRemnoteForVault(config, vaultName(vaultPath), { confirmLarge: true, editedContent: payload.editedContent });
+  if (type === "calendar" || type === "ics") return verifyLearningExport(vaultPath, exportPlanIcs(vaultPath, payload.planId, options), ["file"]);
+  if (type === "apple_calendar") return verifyLearningExport(vaultPath, createCalendarEvents(vaultPath, payload.planId, options), ["fallback.file"]);
+  if (type === "reminders" || type === "markdown") return verifyLearningExport(vaultPath, exportPlanRemindersMarkdown(vaultPath, payload.planId, options), ["file"]);
+  if (type === "apple_reminders") return verifyLearningExport(vaultPath, createReminders(vaultPath, payload.planId, options), ["fallback.file"]);
+  if (type === "remnote") return verifyLearningExport(vaultPath, exportRemnoteForVault(config, vaultName(vaultPath), { confirmLarge: true, editedContent: payload.editedContent }), ["files.markdown", "files.text", "files.mediaIndex"]);
   throw new Error("Choose calendar, reminders, or remnote export.");
+}
+
+function verifyLearningExport(vaultPath, result, requiredPaths) {
+  if (result?.requiresConfirmation || result?.requiresPlanApproval) return result;
+  if (result?.created === true && !result?.fallback) return { ...result, verified: true, verifiedFiles: [] };
+  const checked = [];
+  for (const pointer of requiredPaths) {
+    const rel = nestedValue(result, pointer);
+    if (!rel) continue;
+    const file = safeVaultPath(vaultPath, rel);
+    checked.push(rel);
+    if (!fs.existsSync(file)) {
+      return {
+        ...result,
+        exported: false,
+        verified: false,
+        expectedFile: rel,
+        checkedFiles: checked,
+        message: `Export was confirmed, but the expected file was not found: ${rel}`
+      };
+    }
+  }
+  if (!checked.length && (result?.exported || result?.files || result?.fallback)) {
+    return {
+      ...result,
+      exported: false,
+      verified: false,
+      checkedFiles: [],
+      message: "Export was confirmed, but the server did not return an output file path to verify."
+    };
+  }
+  return { ...result, verified: true, verifiedFiles: checked };
+}
+
+function nestedValue(object, pointer) {
+  return String(pointer || "").split(".").reduce((value, key) => value && value[key], object);
 }
 
 function runLearningCaptureScan(vaultPath) {
@@ -2487,6 +2568,15 @@ function renderHtml() {
     .learning-flow-node strong { font-size: 13px; }
     .learning-flow-node span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .learning-flow-node.active { border-color: var(--accent); background: color-mix(in srgb, var(--mark) 42%, var(--panel)); }
+    .learning-timeline { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px; margin: 12px 0; }
+    .learning-timeline h3 { margin: 0 0 8px; }
+    .learning-timeline-lanes { display: grid; gap: 10px; }
+    .learning-timeline-lane { display: grid; grid-template-columns: minmax(90px, .18fr) minmax(0, 1fr); gap: 10px; align-items: stretch; }
+    .learning-timeline-date { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--soft); font-weight: 800; color: var(--accent); text-align: center; }
+    .learning-timeline-items { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); gap: 8px; min-width: 0; }
+    .learning-timeline-item { display: grid; gap: 4px; min-width: 0; padding: 9px; border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 35%, var(--line)); border-radius: 8px; background: var(--kind-soft, var(--panel)); color: inherit; text-align: start; cursor: pointer; }
+    .learning-timeline-item strong, .learning-timeline-item span { overflow-wrap: anywhere; }
+    .learning-timeline-item span { color: var(--muted); font-size: 12px; }
     .learning-map-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 12px; margin: 12px 0; }
     .learning-map-panel { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 12px; min-width: 0; }
     .learning-map-panel h3 { margin: 0 0 8px; }
@@ -2533,12 +2623,22 @@ function renderHtml() {
     .learning-study-card-face h4 { margin: 0; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
     .learning-study-card-face p { margin: 0; overflow-wrap: anywhere; }
     .learning-study-card-face small { color: var(--muted); overflow-wrap: anywhere; }
+    .learning-study-card.read .learning-study-card-face { opacity: .82; }
+    .learning-study-card-read { justify-self: start; color: #166534; border-color: color-mix(in srgb, #166534 45%, var(--line)); background: color-mix(in srgb, #166534 12%, var(--panel)); }
     .learning-evidence-label { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; max-width: 100%; word-break: normal; overflow-wrap: anywhere; }
     .learning-filter-banner, .learning-capture-status, .learning-export-review { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--soft); color: var(--muted); overflow-wrap: anywhere; }
     .learning-filter-banner { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
     .learning-export-review textarea { width: 100%; min-height: 280px; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre; overflow: auto; }
     .learning-export-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 8px; margin: 8px 0; }
     .learning-export-meta span { border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: var(--panel); overflow-wrap: anywhere; }
+    .learning-export-result { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 8px 0; background: var(--panel); }
+    .learning-export-result.success { border-color: color-mix(in srgb, #15803d 42%, var(--line)); background: color-mix(in srgb, #15803d 10%, var(--panel)); }
+    .learning-export-result.failed { border-color: color-mix(in srgb, #b91c1c 42%, var(--line)); background: color-mix(in srgb, #b91c1c 10%, var(--panel)); }
+    .learning-export-files { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+    .learning-export-files button { max-width: 100%; overflow-wrap: anywhere; text-align: start; }
+    .learning-form button, .learning-form .primary, .learning-form .secondary { align-self: end; min-height: 38px; white-space: normal; }
+    .learning-form select, .learning-form input, .learning-form textarea { min-width: 0; }
+    .learning-capture-status { align-self: start; max-width: 100%; }
     .learning-study-card-face.back { display: none; background: color-mix(in srgb, var(--panel) 85%, var(--soft)); }
     .learning-study-card.flipped .learning-study-card-face.front { display: none; }
     .learning-study-card.flipped .learning-study-card-face.back { display: grid; }
@@ -2577,6 +2677,7 @@ function renderHtml() {
     @media (max-width: 760px) {
       .learning-card-deck { grid-template-columns: 1fr; }
       .learning-stepper { grid-template-columns: 1fr; }
+      .learning-timeline-lane { grid-template-columns: 1fr; }
       .learning-export-review textarea { min-height: 220px; }
     }
     @media (prefers-reduced-motion: reduce) {
@@ -3554,6 +3655,10 @@ function renderHtml() {
     let filesCache = [];
     let archivesCache = [];
     let topicsCache = [];
+    let filesLoadPolls = 0;
+    let archivesLoadPolls = 0;
+    let topicsLoadPolls = 0;
+    let sideTopicsLoadPolls = 0;
     let learningCache = null;
     let learningCardsFilter = null;
     let pendingLearningExport = null;
@@ -3822,6 +3927,13 @@ function renderHtml() {
       closeLearningExportReview();
       void revealPlanTarget(planId);
     });
+    learningExportReview.addEventListener("click", (event) => {
+      const targetButton = event.target.closest("[data-learning-target]");
+      if (!targetButton) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void navigateLearningTarget(targetButton);
+    });
     scanCaptureSources.addEventListener("click", scanCaptureSourcesNow);
     suggestPlanUpdatesButton.addEventListener("click", suggestUpdatesForPlans);
     learningPlanSelect.addEventListener("change", syncRevisionFieldsFromSelectedPlan);
@@ -3850,6 +3962,7 @@ function renderHtml() {
       if (action === "flip-card") {
         const card = actionButton.closest(".learning-study-card");
         card?.classList.toggle("flipped");
+        if (card?.classList.contains("flipped")) void markLearningCardRead(actionButton);
       }
       if (action === "mark-notification-read") markLearningNotification(actionButton.dataset.vault, actionButton.dataset.notificationId, "read");
       if (action === "dismiss-notification") markLearningNotification(actionButton.dataset.vault, actionButton.dataset.notificationId, "dismiss");
@@ -3919,6 +4032,33 @@ function renderHtml() {
       };
       renderLearningProfile();
       revealLearningSection("learning-cards-bits");
+    }
+
+    async function markLearningCardRead(button) {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      const card = button.closest(".learning-study-card");
+      if (!vault || !card || card.dataset.readRecorded === "1" || card.classList.contains("read")) return;
+      card.dataset.readRecorded = "1";
+      try {
+        const data = await postLearningAction("/api/learning/card-review", {
+          vault,
+          cardId: button.dataset.cardId || card.dataset.learningCard || "",
+          prompt: button.dataset.cardPrompt || "",
+          topic: button.dataset.cardTopic || "",
+          sourcePage: button.dataset.sourcePage || "",
+          action: "read"
+        });
+        card.classList.add("read");
+        const chipRow = card.querySelector(".learning-study-card-face.front .learning-chip-row");
+        if (chipRow && !chipRow.querySelector(".learning-study-card-read")) {
+          chipRow.insertAdjacentHTML("beforeend", '<span class="learning-chip learning-study-card-read">Read</span>');
+        }
+        learningFeedback.textContent = data.recorded ? "Card marked read" : "Card read state unchanged";
+        setTimeout(() => { if (learningFeedback.textContent === "Card marked read") learningFeedback.textContent = ""; }, 1500);
+      } catch (error) {
+        delete card.dataset.readRecorded;
+        learningFeedback.textContent = error.message;
+      }
     }
 
     async function revealSourcePageTarget(vault, sourcePage) {
@@ -4084,6 +4224,23 @@ function renderHtml() {
         if (table === "topics") renderTopicsTable();
       });
     });
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-tab-refresh]");
+      if (!button) return;
+      const tab = button.dataset.tabRefresh;
+      if (tab === "files") {
+        filesLoadPolls = 0;
+        void loadFiles({ refresh: true });
+      } else if (tab === "archives") {
+        archivesLoadPolls = 0;
+        void loadArchives({ refresh: true });
+      } else if (tab === "topics") {
+        topicsLoadPolls = 0;
+        sideTopicsLoadPolls = 0;
+        void loadTopics({ refresh: true });
+        void loadSideTopics({ refresh: true });
+      }
+    });
 
     async function saveChatAsSource() {
       const question = input.value.trim();
@@ -4141,18 +4298,29 @@ function renderHtml() {
       if (option) chatSaveVault.value = option.value;
     }
 
-    async function loadFiles() {
-      filesBody.innerHTML = '<tr><td colspan="7" class="muted">Loading...</td></tr>';
+    async function loadFiles(options = {}) {
+      if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Loading vault files...", "files");
       try {
-        const response = await fetch("/api/files");
+        const response = await fetch("/api/files" + (options.refresh ? "?refresh=1" : ""));
         const data = await response.json();
-        if (data.loading && !(data.files || []).length) {
-          filesBody.innerHTML = '<tr><td colspan="7" class="muted">Loading vault files...</td></tr>';
-          setTimeout(loadFiles, 1200);
+        if (data.error) throw new Error(data.error);
+        const nextFiles = data.files || [];
+        if (nextFiles.length) {
+          filesLoadPolls = 0;
+          filesCache = nextFiles;
+          populateSelect(filesVaultFilter, filesCache.map((file) => file.vault), "All vaults");
+          populateSelect(filesStatusFilter, filesCache.map((file) => file.status), "All statuses");
+          renderFilesTable();
           return;
         }
-        if (data.error) throw new Error(data.error);
-        filesCache = data.files || [];
+        if (data.loading || data.status === "loading" || data.status === "stale_refreshing") {
+          filesLoadPolls += 1;
+          filesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Vault files are still being indexed."), "files", filesLoadPolls > 8);
+          if (filesLoadPolls <= 8) setTimeout(() => loadFiles(), 1400);
+          return;
+        }
+        filesLoadPolls = 0;
+        filesCache = nextFiles;
         populateSelect(filesVaultFilter, filesCache.map((file) => file.vault), "All vaults");
         populateSelect(filesStatusFilter, filesCache.map((file) => file.status), "All statuses");
         renderFilesTable();
@@ -4441,18 +4609,29 @@ function renderHtml() {
       });
     }
 
-    async function loadArchives() {
-      archivesBody.innerHTML = '<tr><td colspan="7" class="muted">Loading...</td></tr>';
+    async function loadArchives(options = {}) {
+      if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Loading archive history...", "archives");
       try {
-        const response = await fetch("/api/archives");
+        const response = await fetch("/api/archives" + (options.refresh ? "?refresh=1" : ""));
         const data = await response.json();
-        if (data.loading && !(data.archives || []).length) {
-          archivesBody.innerHTML = '<tr><td colspan="7" class="muted">Loading archive history...</td></tr>';
-          setTimeout(loadArchives, 1200);
+        if (data.error) throw new Error(data.error);
+        const nextArchives = data.archives || [];
+        if (nextArchives.length) {
+          archivesLoadPolls = 0;
+          archivesCache = nextArchives;
+          populateSelect(archivesVaultFilter, archivesCache.map((item) => item.vault), "All vaults");
+          populateSelect(archivesKindFilter, archivesCache.map((item) => item.kind), "All types");
+          renderArchivesTable();
           return;
         }
-        if (data.error) throw new Error(data.error);
-        archivesCache = data.archives || [];
+        if (data.loading || data.status === "loading" || data.status === "stale_refreshing") {
+          archivesLoadPolls += 1;
+          archivesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Archive history is still being indexed."), "archives", archivesLoadPolls > 8);
+          if (archivesLoadPolls <= 8) setTimeout(() => loadArchives(), 1400);
+          return;
+        }
+        archivesLoadPolls = 0;
+        archivesCache = nextArchives;
         populateSelect(archivesVaultFilter, archivesCache.map((item) => item.vault), "All vaults");
         populateSelect(archivesKindFilter, archivesCache.map((item) => item.kind), "All types");
         renderArchivesTable();
@@ -4698,18 +4877,30 @@ function renderHtml() {
       if (row) row.focus({ preventScroll: true });
     }
 
-    async function loadTopics() {
-      topicsBody.innerHTML = '<tr><td colspan="7" class="muted">Loading...</td></tr>';
+    async function loadTopics(options = {}) {
+      if (!topicsCache.length) topicsBody.innerHTML = tabStatusRow(7, "Loading topics...", "topics");
       try {
-        const response = await fetch("/api/topics");
+        const response = await fetch("/api/topics" + (options.refresh ? "?refresh=1" : ""));
         const data = await response.json();
-        if (data.loading && !(data.topics || []).length) {
-          topicsBody.innerHTML = '<tr><td colspan="7" class="muted">Loading topics...</td></tr>';
-          setTimeout(loadTopics, 1200);
+        if (data.error) throw new Error(data.error);
+        const nextTopics = data.topics || [];
+        if (nextTopics.length) {
+          topicsLoadPolls = 0;
+          topicsCache = nextTopics.map((topic, index) => ({ ...topic, number: index + 1, tagsText: (topic.tags || []).join(", ") }));
+          populateSelect(topicsVaultFilter, topicsCache.map((topic) => topic.vault), "All vaults");
+          populateSelect(topicsTypeFilter, topicsCache.map((topic) => topic.type), "All types");
+          renderTopicsTable();
+          if (sideTopicsLoaded && data.updatedAt && data.updatedAt !== sideTopicsUpdatedAt) applySideTopicsPayload(data);
           return;
         }
-        if (data.error) throw new Error(data.error);
-        topicsCache = (data.topics || []).map((topic, index) => ({ ...topic, number: index + 1, tagsText: (topic.tags || []).join(", ") }));
+        if (data.loading || data.status === "loading" || data.status === "stale_refreshing") {
+          topicsLoadPolls += 1;
+          topicsBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Topics are still being indexed."), "topics", topicsLoadPolls > 8);
+          if (topicsLoadPolls <= 8) setTimeout(() => loadTopics(), 1400);
+          return;
+        }
+        topicsLoadPolls = 0;
+        topicsCache = nextTopics.map((topic, index) => ({ ...topic, number: index + 1, tagsText: (topic.tags || []).join(", ") }));
         populateSelect(topicsVaultFilter, topicsCache.map((topic) => topic.vault), "All vaults");
         populateSelect(topicsTypeFilter, topicsCache.map((topic) => topic.type), "All types");
         renderTopicsTable();
@@ -4719,6 +4910,18 @@ function renderHtml() {
       } catch (error) {
         topicsBody.innerHTML = '<tr><td colspan="7">' + escapeHtml(error.message) + '</td></tr>';
       }
+    }
+
+    function tabStatusRow(colspan, message, tab, showRetry = false) {
+      return '<tr><td colspan="' + escapeHtml(String(colspan)) + '" class="muted">' + escapeHtml(message) +
+        (showRetry ? ' <button class="secondary" type="button" data-tab-refresh="' + escapeHtml(tab) + '">Retry refresh</button>' : '') +
+        '</td></tr>';
+    }
+
+    function tabStatusMessage(data, fallback) {
+      if (data.status === "stale_refreshing") return "Showing cached data while refreshing.";
+      if (data.lastStartedAt) return fallback + " Started " + shortEventTime(data.lastStartedAt) + ".";
+      return fallback;
     }
 
     function renderTopicsTable() {
@@ -5185,16 +5388,17 @@ function renderHtml() {
       ];
       learningStatusBox.innerHTML = '<h2>Learning Boost</h2>' +
         renderLearningAutopilotWorkspace(state, { automation, resourceGroups, sourceLinks, sourceGroups, plans, goals, updateSuggestions, coach, stats, notifications }) +
+        renderLearningTimeline(state, { plans, goals, sourceLinks, stats, updateSuggestions }) +
         renderLearningStepByStepFlow(state, { automation, resourceGroups, sourceLinks, sourceGroups, plans, goals, updateSuggestions, stats }) +
-        renderLearningSourceMap(state, { sourceLinks, sourceGroups, plans, goals, coach }) +
+        renderLearningSourceMap(state, { sourceLinks, sourceGroups, plans, goals, coach, stats }) +
         renderLearningStudyTools(state, { stats, sourceLinks }) +
         renderLearningPlanGuide(state, { plans, goals, updateSuggestions }) +
         renderLearningNotificationCenter(state, { notifications, coachAlerts, automation, coachSettings }) +
         renderLearningBoostGrid(state, { rows, resourceGroups, sourceLinks, sourceGroups, plans, goals, updateSuggestions, coachAlerts, coachSettings, sourceSettings, remoteSettings, stats, user, profile }) +
-        '<h2>Learning Profile</h2>' +
+        '<details id="learning-profile-summary" class="learning-section learning-scroll-target"><summary>Learning Profile Summary</summary>' +
         '<table><tbody>' + rows.map(([label, value]) =>
           '<tr><th>' + escapeHtml(label) + '</th><td>' + escapeHtml(value || "") + '</td></tr>'
-        ).join("") + '</tbody></table>' +
+        ).join("") + '</tbody></table></details>' +
         '<h3>Due Reviews</h3><ul>' + (stats.dueCards || []).slice(0, 10).map((card) =>
           '<li>' + escapeHtml(card.front || card.cloze || card.type || "Card") +
           (card.sourcePage ? ' <span class="muted">' + escapeHtml(card.sourcePage) + '</span>' : '') +
@@ -5343,6 +5547,64 @@ function renderHtml() {
       return "Learning is automatic for safe local work";
     }
 
+    function renderLearningTimeline(state, context) {
+      const items = learningTimelineItems(state, context);
+      const lanes = groupTimelineItems(items);
+      return '<section id="learning-timeline" class="learning-timeline learning-scroll-target"><h3>Learning Timeline</h3><p class="muted">Dates are local guidance. Click any item to jump to the related task, plan, source, or cards.</p>' +
+        '<div class="learning-timeline-lanes">' + lanes.map((lane) =>
+          '<div class="learning-timeline-lane"><div class="learning-timeline-date">' + escapeHtml(lane.label) + '</div><div class="learning-timeline-items">' +
+          lane.items.map((item) => '<button class="learning-timeline-item ' + escapeHtml(item.kind || "plan") + '" type="button" data-learning-target="' + escapeHtml(item.target || "learning-section") + '" data-section="' + escapeHtml(item.section || "") + '" data-plan-id="' + escapeHtml(item.planId || "") + '" data-goal-id="' + escapeHtml(item.goalId || "") + '" data-source-page="' + escapeHtml(item.sourcePage || "") + '" data-topic="' + escapeHtml(item.topic || "") + '" data-filter-label="' + escapeHtml(item.filterLabel || item.title || "") + '" data-vault="' + escapeHtml(state.vault || "") + '"><strong>' + escapeHtml(item.title) + '</strong><span>' + escapeHtml(item.detail || "") + '</span></button>').join("") +
+          '</div></div>'
+        ).join("") + '</div></section>';
+    }
+
+    function learningTimelineItems(state, context) {
+      const items = [];
+      const now = new Date();
+      for (const card of (context.stats.allCards || context.stats.dueCards || []).filter((item) => !item.displayRead).slice(0, 8)) {
+        items.push({ date: card.due || now.toISOString(), kind: "review", title: card.displayPrompt || card.front || "Review card", detail: card.displayTopic || "Due review", target: "cards", topic: card.displayTopic || "", sourcePage: card.sourcePage || "", filterLabel: card.displayTopic || "Due cards" });
+      }
+      for (const plan of context.plans || []) {
+        for (const stage of (plan.stages || []).slice(0, 6)) {
+          items.push({ date: stage.start || stage.date || stage.due || plan.deadline || "", kind: "plan", title: stage.title || plan.title || "Learning stage", detail: [plan.status, stage.status].filter(Boolean).join(" · "), target: "plan", planId: plan.id || "", goalId: plan.goalId || "" });
+        }
+      }
+      for (const goal of context.goals || []) {
+        if (goal.deadline) items.push({ date: goal.deadline, kind: "plan", title: goal.title || "Goal deadline", detail: "Goal deadline", target: "goal", goalId: goal.id || "" });
+      }
+      for (const link of (context.sourceLinks || []).slice(-6).reverse()) {
+        items.push({ date: link.created || link.updated || "", kind: "capture", title: link.title || "Processed source", detail: "Inspect source cards and bits", target: "cards", sourcePage: link.sourcePage || "", topic: link.group || link.title || "", filterLabel: link.title || link.group || "Processed source" });
+      }
+      if ((context.updateSuggestions || []).length) items.push({ date: now.toISOString(), kind: "plan", title: "Review plan suggestions", detail: context.updateSuggestions.length + " suggestion(s)", target: "learning-section", section: "learning-revise-section" });
+      if ((context.stats.cards || 0) > 0) items.push({ date: now.toISOString(), kind: "review", title: "Export review set", detail: "RemNote export is confirmation-gated", target: "learning-section", section: "learning-plan-actions-section" });
+      return items.length ? items : [{ date: now.toISOString(), kind: "capture", title: "Add or process one source", detail: "Autopilot will build cards after processing", target: "learning-section", section: "learning-source-capture-section" }];
+    }
+
+    function groupTimelineItems(items) {
+      const today = new Date();
+      const todayKey = dateKey(today);
+      const weekLimit = new Date(today);
+      weekLimit.setDate(weekLimit.getDate() + 7);
+      const lanes = [
+        { label: "Today", items: [] },
+        { label: "Next 7 days", items: [] },
+        { label: "Later", items: [] },
+        { label: "Undated", items: [] }
+      ];
+      for (const item of items) {
+        const date = item.date ? new Date(item.date) : null;
+        if (!date || !Number.isFinite(date.getTime())) lanes[3].items.push(item);
+        else if (dateKey(date) <= todayKey) lanes[0].items.push(item);
+        else if (date <= weekLimit) lanes[1].items.push(item);
+        else lanes[2].items.push(item);
+      }
+      return lanes.filter((lane) => lane.items.length).map((lane) => ({ ...lane, items: lane.items.slice(0, 8) }));
+    }
+
+    function dateKey(date) {
+      return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-");
+    }
+
     function renderLearningStepByStepFlow(state, context) {
       const dueCount = (context.stats.dueCards || []).length;
       const pendingRaw = context.automation.pendingRawCount || 0;
@@ -5399,15 +5661,17 @@ function renderHtml() {
     }
 
     function renderLearningStudyTools(state, context) {
-      const allCards = [...(context.stats.dueCards || []), ...(context.stats.recentCards || [])]
-        .filter((card, index, list) => list.findIndex((item) => (item.id || item.front || item.cloze) === (card.id || card.front || card.cloze)) === index);
+      const allCards = (context.stats.allCards || [...(context.stats.dueCards || []), ...(context.stats.recentCards || [])])
+        .filter((card, index, list) => list.findIndex((item) => (item.displayKey || item.id || item.front || item.cloze) === (card.displayKey || card.id || card.front || card.cloze)) === index);
       const filteredCards = filterLearningItems(allCards, learningCardsFilter);
-      const cards = filteredCards.slice(0, 12);
-      const bits = filterLearningItems(context.stats.recentBits || [], learningCardsFilter).slice(0, 12);
+      const cards = filteredCards.slice(0, 24);
+      const allBits = context.stats.allBits || context.stats.recentBits || [];
+      const filteredBits = filterLearningItems(allBits, learningCardsFilter);
+      const bits = filteredBits.slice(0, 24);
       const groups = groupLearningCardsAndBits(cards, bits);
       return '<section id="learning-cards-bits" class="learning-study-surface learning-scroll-target" data-learning-anchor="cards-bits">' +
         '<div class="learning-study-header"><h3>Cards And Bits</h3><p>Practice concept-specific recall first, then inspect the related source-grounded bits when you need context.</p>' + renderLearningLegend() + '</div>' +
-        renderLearningCardsFilterBanner(cards.length, allCards.length) +
+        renderLearningCardsFilterBanner(filteredCards.length, allCards.length, filteredBits.length) +
         '<div class="learning-card-topic-groups">' + (groups.length ? groups.map((group, groupIndex) =>
           '<section class="learning-card-topic-group learning-scroll-target" data-learning-topic="' + escapeHtml(group.topic) + '">' +
             '<header><h4>' + escapeHtml(group.topic) + '</h4><span class="learning-chip practice">' + escapeHtml(group.cards.length + " card(s)") + '</span></header>' +
@@ -5427,30 +5691,42 @@ function renderHtml() {
       const sourcePage = normalizeLearningTopic(filter.sourcePage || "");
       return (items || []).filter((item) => {
         const itemTopic = normalizeLearningTopic([item.displayTopic, item.learningFocus, item.topic, item.title, ...(item.tags || [])].filter(Boolean).join(" "));
-        const itemSource = normalizeLearningTopic([item.sourcePage, item.displayEvidence, item.sourceTitle].filter(Boolean).join(" "));
+        const itemSource = normalizeLearningTopic([item.sourcePage, sourceBasename(item.sourcePage), item.displayEvidence, item.sourceTitle].filter(Boolean).join(" "));
         return (topic && (itemTopic.includes(topic) || topic.includes(itemTopic))) ||
-          (sourcePage && itemSource.includes(sourcePage)) ||
+          (sourcePage && (itemSource.includes(sourcePage) || sourcePage.includes(itemSource))) ||
           (!topic && !sourcePage);
       });
     }
 
-    function renderLearningCardsFilterBanner(visible, total) {
+    function sourceBasename(value) {
+      return String(value || "").replace(/\\\\/g, "/").split("/").filter(Boolean).pop()?.replace(/\\.md$/i, "") || "";
+    }
+
+    function countLearningCardsForLink(stats, link) {
+      return filterLearningItems(stats.allCards || [], {
+        sourcePage: link.sourcePage || "",
+        topic: link.group || link.title || "",
+        label: link.title || link.group || ""
+      }).length;
+    }
+
+    function renderLearningCardsFilterBanner(visible, total, bitsVisible = 0) {
       if (!learningCardsFilter) return "";
-      return '<div class="learning-filter-banner"><span>Showing ' + escapeHtml(String(visible)) + ' of ' + escapeHtml(String(total)) + ' card(s)/bit(s) for ' + escapeHtml(learningCardsFilter.label || learningCardsFilter.topic || learningCardsFilter.sourcePage || "selected target") + '.</span><button class="secondary" type="button" data-learning-action="clear-card-filter">Clear filter</button></div>';
+      return '<div class="learning-filter-banner"><span>Showing ' + escapeHtml(String(visible)) + ' of ' + escapeHtml(String(total)) + ' card(s), plus ' + escapeHtml(String(bitsVisible)) + ' related bit(s), for ' + escapeHtml(learningCardsFilter.label || learningCardsFilter.topic || learningCardsFilter.sourcePage || "selected target") + '.</span><button class="secondary" type="button" data-learning-action="clear-card-filter">Clear filter</button></div>';
     }
 
     function renderLearningStudyCard(card, index) {
       const kind = taxonomyForCard(card);
-      return '<article class="learning-study-card learning-scroll-target ' + escapeHtml(kind) + '" data-learning-card="' + escapeHtml(card.id || card.displayPrompt || index) + '"><div class="learning-study-card-inner">' +
+      return '<article class="learning-study-card learning-scroll-target ' + escapeHtml(kind) + (card.displayRead ? " read" : "") + '" data-learning-card="' + escapeHtml(card.displayKey || card.id || card.displayPrompt || index) + '"><div class="learning-study-card-inner">' +
         '<div class="learning-study-card-face front">' +
-          '<div class="learning-chip-row"><span class="learning-chip ' + escapeHtml(kind) + '">' + escapeHtml(card.displayType || card.type || "card") + '</span><span class="learning-chip bit">' + escapeHtml(card.displayTopic || card.learningFocus || "Key concept") + '</span></div>' +
+          '<div class="learning-chip-row"><span class="learning-chip ' + escapeHtml(kind) + '">' + escapeHtml(card.displayType || card.type || "card") + '</span><span class="learning-chip bit">' + escapeHtml(card.displayTopic || card.learningFocus || "Key concept") + '</span>' + (card.displayRead ? '<span class="learning-chip learning-study-card-read">Read</span>' : '') + '</div>' +
           '<h4>' + escapeHtml(card.displayPrompt || card.front || card.cloze || "Recall prompt") + '</h4>' +
           (card.hint ? '<p class="muted">' + escapeHtml(card.hint) + '</p>' : '') +
-          '<button class="secondary" type="button" data-learning-action="flip-card" data-card-index="' + escapeHtml(index) + '">Show answer</button></div>' +
+          '<button class="secondary" type="button" data-learning-action="flip-card" data-card-id="' + escapeHtml(card.displayKey || card.id || "") + '" data-card-prompt="' + escapeHtml(card.displayPrompt || card.front || card.cloze || "") + '" data-card-topic="' + escapeHtml(card.displayTopic || card.learningFocus || "") + '" data-source-page="' + escapeHtml(card.sourcePage || "") + '">Show answer</button></div>' +
         '<div class="learning-study-card-face back"><h4>Answer</h4><p>' + escapeHtml(card.back || card.explanation || "No answer text saved yet.") + '</p>' +
           '<div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(card.learningFocus || card.displayTopic || "concept") + '</span><button class="learning-chip capture learning-evidence-label" type="button" title="' + escapeHtml(card.sourcePage || card.displayEvidence || "") + '" data-learning-target="source-page" data-vault="' + escapeHtml(card.sourceVault || "") + '" data-source-page="' + escapeHtml(card.sourcePage || "") + '">' + escapeHtml(shortLearningSourceLabel(card.displayEvidence || card.sourcePage || "No source link")) + '</button></div>' +
           (card.displayQuality === "repaired" ? '<small>Prompt clarified for display; stored card was not rewritten.</small>' : '') +
-          '<button class="secondary" type="button" data-learning-action="flip-card" data-card-index="' + escapeHtml(index) + '">Back to prompt</button></div>' +
+          '<button class="secondary" type="button" data-learning-action="flip-card" data-card-id="' + escapeHtml(card.displayKey || card.id || "") + '">Back to prompt</button></div>' +
       '</div></article>';
     }
 
@@ -5618,7 +5894,7 @@ function renderHtml() {
           '<ul class="learning-routing-list">' + (links.length ? links.map((link) =>
             '<li class="learning-scroll-target" data-learning-source-page="' + escapeHtml(link.sourcePage || "") + '"><button class="learning-target-button" type="button" data-learning-target="source-page" data-vault="' + escapeHtml(state.vault || "") + '" data-source-page="' + escapeHtml(link.sourcePage || "") + '"><strong>' + escapeHtml(link.title || "Source") + '</strong></button>' +
             '<div class="muted">' + escapeHtml(link.group || "Ungrouped") + '</div>' +
-            renderSourceMapChips(state, link) + '</li>'
+            renderSourceMapChips(state, link, context.stats || {}) + '</li>'
           ).join("") : '<li>No processed sources have been routed yet.</li>') + '</ul></section>' +
         '<section class="learning-map-panel"><h3>Groups And Notifications</h3>' +
           '<div class="learning-chip-row">' + (groups.length ? groups.map((group) =>
@@ -5630,10 +5906,10 @@ function renderHtml() {
       '</div>';
     }
 
-    function renderSourceMapChips(state, link) {
+    function renderSourceMapChips(state, link, stats = {}) {
       const goals = link.linkedGoals || [];
       const plans = link.linkedPlans || [];
-      const cards = Number(link.cardsCreated || 0);
+      const cards = countLearningCardsForLink(stats, link) || Number(link.cardsCreated || 0);
       const goalId = goals[0]?.id || goals[0]?.goalId || "";
       const planId = plans[0]?.id || plans[0]?.planId || "";
       return '<div class="learning-chip-row">' +
@@ -5915,6 +6191,7 @@ function renderHtml() {
       pendingLearningExport = null;
       learningExportReview.hidden = true;
       learningExportContent.value = "";
+      learningExportWarnings.innerHTML = "";
     }
 
     async function confirmPendingLearningExport() {
@@ -5932,16 +6209,46 @@ function renderHtml() {
           editedContent: learningExportContent.value
         });
         learningFeedback.textContent = exportConfirmMessage(data);
-        closeLearningExportReview();
+        renderLearningExportResult(data);
         await loadLearning();
       } catch (error) {
         learningFeedback.textContent = error.message;
+        learningExportSummary.textContent = "Export did not finish. Review the error and try again.";
+        learningExportWarnings.innerHTML = '<div class="learning-export-result failed">' + escapeHtml(error.message) + '</div>';
       } finally {
         confirmLearningExport.disabled = false;
       }
     }
 
+    function renderLearningExportResult(data) {
+      const verifiedFiles = Array.isArray(data.verifiedFiles) ? data.verifiedFiles : [];
+      const checkedFiles = Array.isArray(data.checkedFiles) ? data.checkedFiles : [];
+      const fileList = verifiedFiles.length ? verifiedFiles : checkedFiles;
+      const failed = data.verified === false || data.error;
+      const title = failed ? "Export failed verification" : "Export verified";
+      const detail = failed
+        ? (data.message || "The export did not produce the expected file.")
+        : exportConfirmMessage(data);
+      learningExportSummary.textContent = failed
+        ? "No success was recorded. The review stays open so you can fix the plan/content and retry."
+        : "The export was written and verified on disk. You can open the file path below or close this review.";
+      const rows = [
+        '<div class="learning-export-result ' + (failed ? "failed" : "success") + '"><strong>' + escapeHtml(title) + '</strong><p>' + escapeHtml(detail) + '</p></div>'
+      ];
+      if (data.expectedFile) {
+        rows.push('<p><strong>Expected path:</strong> <code>' + escapeHtml(data.expectedFile) + '</code></p>');
+      }
+      if (fileList.length) {
+        rows.push('<div class="learning-export-files"><strong>Checked file path(s)</strong>' +
+          fileList.map((file) => '<button class="secondary" type="button" data-learning-target="obsidian-file" data-vault="' + escapeHtml(pendingLearningExport?.vault || learningVault.value || "") + '" data-path="' + escapeHtml(file) + '">' + escapeHtml(file) + '</button>').join("") +
+          '</div>');
+      }
+      learningExportWarnings.innerHTML = rows.join("");
+      confirmLearningExport.textContent = failed ? "Retry confirm export" : "Confirm export again";
+    }
+
     function exportConfirmMessage(data) {
+      if (data.verified === false) return data.message || "Export failed verification";
       if (data.exported) return "Export ready: " + (data.file || data.files?.markdown || "export file");
       if (data.created) return "External items created: " + (data.events || data.reminders || 0);
       if (data.files?.markdown) return "Export ready: " + data.files.markdown;
@@ -6676,18 +6983,20 @@ function renderHtml() {
       return ["green", "orange", "red", "grey"].includes(color) ? color : "grey";
     }
 
-    async function loadSideTopics() {
+    async function loadSideTopics(options = {}) {
       if (sideTopicsLoading) return;
       sideTopicsLoading = true;
       try {
-        const response = await fetch("/api/topics");
+        const response = await fetch("/api/topics" + (options.refresh ? "?refresh=1" : ""));
         const data = await response.json();
         if (data.loading && !(data.topics || []).length) {
-          topicList.textContent = "Loading topics...";
-          setTimeout(loadSideTopics, 1200);
+          sideTopicsLoadPolls += 1;
+          topicList.innerHTML = "Loading topics..." + (sideTopicsLoadPolls > 8 ? ' <button class="secondary" type="button" data-tab-refresh="topics">Retry refresh</button>' : "");
+          if (sideTopicsLoadPolls <= 8) setTimeout(() => loadSideTopics(), 1400);
           return;
         }
         if (data.error) throw new Error(data.error);
+        sideTopicsLoadPolls = 0;
         applySideTopicsPayload(data);
       } catch (error) {
         sideTopicsLoaded = false;
