@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-learning-boost-pixelshot"
+version = "0.1.0"
+description = "Local pixelshot-compatible screenshot tile CLI for LLM Agent Learning Boost"
+requires-python = ">=3.11"
+dependencies = [
+  "Pillow",
+  "requests",
+  "websockets"
+]
+
+[project.scripts]
+pixelshot = "pixelshot.cli:main"

@@ -17,6 +17,9 @@ if [[ -d "$TARGET" ]]; then
   rm -rf "$TARGET"
 fi
 cp -R "$APP" "$TARGET"
+if command -v xattr >/dev/null 2>&1; then
+  xattr -cr "$TARGET"
+fi
 touch "$TARGET"
 
 echo "Installed: $TARGET"

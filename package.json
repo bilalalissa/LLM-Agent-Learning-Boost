@@ -16,6 +16,7 @@
     "learning:export-remnote": "node src/remnote-export.mjs",
     "learning:plan": "node src/learning-plan-cli.mjs",
     "learning:visual-index": "node src/visual-index.mjs",
+    "install:pixelshot": "python3 -m pip install --user --no-build-isolation -e tools/pixelshot",
     "learning:check": "node src/learning-check.mjs",
     "test": "node --test"
   },

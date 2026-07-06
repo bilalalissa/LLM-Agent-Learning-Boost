@@ -20,6 +20,7 @@ npm test
 npm run learning:check
 npm run learning:backfill
 npm run learning:plan -- --draft
+npm run install:pixelshot
 npm run learning:visual-index
 npm run learning:export-remnote
 ```

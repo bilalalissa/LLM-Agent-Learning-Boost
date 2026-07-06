@@ -41,6 +41,16 @@ When visual capture is enabled, ingest can create local screenshot tiles for PDF
 
 Images are preserved directly as first-class local visual evidence. DOCX, PPTX, ODT, ODP, and EPUB files keep their current local text extraction path; visual rendering for those formats is only recorded when a suitable local conversion/rendering tool is configured in a later stage.
 
+Install the repo-provided compatible `pixelshot` wrapper with:
+
+```bash
+npm run install:pixelshot
+pixelshot --version
+python3 -c "import pixelshot; print(pixelshot.__version__)"
+```
+
+This installs an editable Python package from `tools/pixelshot/` into the current user's Python environment. The CLI launches local Chrome through the Chrome DevTools Protocol, writes `full-page.png`, tile images, and `tiles.json`, and does not call cloud services.
+
 ## Experimental Visual Tile Index
 
 Stage 6 adds an experimental local visual tile index:

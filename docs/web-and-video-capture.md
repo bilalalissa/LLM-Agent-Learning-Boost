@@ -124,6 +124,16 @@ Remote internet research stays behind explicit controls and citations. Browser c
 
 Learning Boost can use the PixelRAG-style pattern of rendering pages/documents into screenshot tiles as local evidence. The app invokes `pixelshot` as an optional local executable; it does not copy PixelRAG code into this repo.
 
+This repo includes a small compatible `pixelshot` Python package under `tools/pixelshot/` because no upstream PyPI/npm package named `pixelshot` is available. Install it for the current user:
+
+```bash
+npm run install:pixelshot
+pixelshot --version
+python3 -m pixelshot --version
+```
+
+The wrapper uses local Chrome/Chromium and CDP to render `http`, `https`, `file://`, and local file inputs into `full-page.png`, tile PNGs, and `tiles.json`.
+
 Configure the Source Capture settings:
 
 - `Visual capture tiles`: enables the local visual capture feature.

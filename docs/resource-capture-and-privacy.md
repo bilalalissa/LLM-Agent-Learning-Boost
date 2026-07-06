@@ -111,7 +111,7 @@ Watch-folder dedupe uses local path, file size, and modified time. Repeated scan
 
 ## Visual Capture Privacy
 
-Visual capture is disabled by default. When enabled, it invokes a local `pixelshot` executable and stores tile evidence under `.llm-wiki/learning/pixel-captures/`. It does not call cloud services.
+Visual capture is disabled by default. When enabled, it invokes a local `pixelshot` executable and stores tile evidence under `.llm-wiki/learning/pixel-captures/`. It does not call cloud services. The repo-provided compatible wrapper in `tools/pixelshot/` can be installed with `npm run install:pixelshot`.
 
 Manual URL/file visual capture requires explicit confirmation. Browser clip visual capture only runs when `visualCapture.captureBrowserClips` is enabled, and it never blocks the text clip if the visual capture fails.
 

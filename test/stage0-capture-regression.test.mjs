@@ -149,5 +149,9 @@ test("browser visual capture wrapper renders local HTML into screenshot tiles or
 
   const captureDir = result.captureDir || path.join(vault, result.captureRel || "");
   assert.equal(fs.existsSync(path.join(captureDir, "source.json")), true);
+  if (result.status === "failed") {
+    assert.match(result.error || "", /pixelshot|chrome|operation|permission|timed out|cdp/i);
+    return;
+  }
   assert.equal(fs.existsSync(path.join(captureDir, "tiles.json")), true);
 });

@@ -28,6 +28,7 @@ export const REQUIRED_SCRIPTS = [
   "learning:export-remnote",
   "learning:plan",
   "learning:visual-index",
+  "install:pixelshot",
   "learning:check"
 ];
 

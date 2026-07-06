@@ -8,6 +8,7 @@ npm run check
 npm run learning:check
 npm run learning:backfill
 npm run learning:plan -- --draft
+npm run install:pixelshot
 npm run learning:visual-index
 npm run learning:export-remnote
 ./scripts/build_macos_app.sh
@@ -22,6 +23,7 @@ npm run learning:export-remnote
 - `src/source-capture.mjs`: ResourceInbox and capture settings.
 - `src/source-capture-ingest.mjs`: queues approved ResourceInbox items into `raw/input/` with local provenance and dedupe metadata.
 - `src/pixel-capture.mjs`: optional local `pixelshot` wrapper for PixelRAG-style screenshot tile evidence.
+- `tools/pixelshot/`: repo-provided compatible Python `pixelshot` CLI/module backed by local Chrome CDP.
 - `src/visual-index.mjs`: experimental local visual tile metadata index and optional PixelRAG availability probe.
 - `src/source-processors/visual-metadata.mjs`: shared visual evidence/provenance shape for processors.
 - `src/source-collectors/opened-documents-collector.mjs`: gated macOS opened-document metadata preview and approval flow.
@@ -34,6 +36,7 @@ npm run learning:export-remnote
 - `learning:backfill`: detects existing source pages, preserves original pages, appends to `log.md`, and generates learning outputs only when a provider is available.
 - `learning:export-remnote`: exports RemNote-ready files, with `--confirm-large` for large exports.
 - `learning:plan`: drafts, approves, activates, and exports plans with confirmation flags.
+- `install:pixelshot`: installs the repo-provided compatible `pixelshot` Python package for the current user.
 - `learning:visual-index`: writes local visual tile metadata under `.llm-wiki/learning/pixel-index/`; optional PixelRAG probing requires explicit flags.
 - `learning:check`: validates required docs, scripts, icon assets, and learning scaffold files.
 

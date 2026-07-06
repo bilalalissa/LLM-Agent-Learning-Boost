@@ -68,10 +68,16 @@ cp "$ROOT/README.md" "$AGENT/README.md"
 cp "$ROOT/config.example.env" "$RESOURCES/config.example.env"
 cp -R "$ROOT/src" "$AGENT/src"
 cp -R "$ROOT/docs" "$AGENT/docs"
+if [ -d "$ROOT/tools" ]; then
+  cp -R "$ROOT/tools" "$AGENT/tools"
+fi
 if [ -d "$ROOT/media" ]; then
   cp -R "$ROOT/media" "$AGENT/media"
 fi
 find "$AGENT" -name '.DS_Store' -delete
+if command -v xattr >/dev/null 2>&1; then
+  xattr -cr "$STAGING_APP"
+fi
 
 test -f "$AGENT/src/server.mjs"
 test -f "$AGENT/package.json"

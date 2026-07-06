@@ -13,6 +13,9 @@
 .tmp/
 .temp/
 build/
+*.egg-info/
+__pycache__/
+*.py[cod]
 
 # Apple platform build artifacts and simulator downloads
 DerivedData/

@@ -53,6 +53,15 @@ macOS may require Automation or Accessibility permission, and some apps do not e
 
 Visual capture is disabled by default and requires a local `pixelshot` executable when rendering pages/PDFs into tiles. Configure `visualCapture.pixelshotPath` or keep `pixelshot` on `PATH`.
 
+Install and verify the repo-provided compatible wrapper:
+
+```bash
+npm run install:pixelshot
+command -v pixelshot
+pixelshot --version
+python3 -c "import pixelshot; print(pixelshot.__version__)"
+```
+
 If `pixelshot` is unavailable, ingest should still complete and the source page should record a visual-capture-unavailable note. Browser text clipping should also continue even if optional visual capture fails.
 
 Dynamic or authenticated browser pages need an explicit CDP attach URL through `PIXELSHOT_CDP_URL` or Source Capture settings. Current-browser/session capture requires Full Local Capture Mode and confirmation.
