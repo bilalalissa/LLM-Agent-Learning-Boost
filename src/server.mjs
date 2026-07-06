@@ -36,6 +36,7 @@ import { createProvider } from "./provider.mjs";
 import { providerStatus } from "./provider-status.mjs";
 import { recordPlanUpdateChoice, suggestPlanUpdates } from "./plan-update-suggester.mjs";
 import { preflightStatus } from "./preflight.mjs";
+import { captureFileToTiles, captureUrlToTiles } from "./pixel-capture.mjs";
 import { queueResourceInboxForIngest } from "./source-capture-ingest.mjs";
 import {
   remoteResearch,
@@ -58,6 +59,7 @@ import {
   updateSourceCaptureSettings
 } from "./source-capture.mjs";
 import { collectScreenshots } from "./source-collectors/screenshots-collector.mjs";
+import { approveOpenedDocumentForIngest, collectCurrentOpenedDocuments } from "./source-collectors/opened-documents-collector.mjs";
 import { collectWatchFolderResources } from "./source-collectors/watch-folder-collector.mjs";
 import { topicContentAsync } from "./topic-content.mjs";
 import { listRawCandidates, listVaults, vaultName } from "./vaults.mjs";
@@ -557,6 +559,24 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "POST" && url.pathname === "/api/learning/opened-document-approve") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = approveOpenedDocumentForIngest(vaultPath, payload.document || payload.resource || {}, {
+        previewApproved: payload.previewApproved === true,
+        contentApproved: payload.contentApproved === true
+      });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/api/learning/process-resources") {
     if (ingestRunning) {
       response.writeHead(409, { "content-type": "application/json" });
@@ -617,6 +637,42 @@ const server = http.createServer(async (request, response) => {
       response.end(JSON.stringify({ error: error.message }));
     } finally {
       ingestRunning = false;
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/visual-capture") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const settings = readSourceCaptureSettings(vaultPath);
+      const mode = String(payload.mode || (payload.file ? "file" : "url"));
+      const confirmed = payload.confirmed === true || payload.previewApproved === true;
+      if (!confirmed) throw new Error("Visual capture requires explicit confirmation.");
+      if (mode === "current_browser_url" && settings.fullLocalCaptureMode !== true) {
+        throw new Error("Full Local Capture Mode is required for current-browser visual capture.");
+      }
+      const visual = settings.visualCapture || {};
+      const common = {
+        vaultPath,
+        title: payload.title || "",
+        sourceType: payload.sourceType || (mode === "file" ? "document" : "web_page"),
+        pixelshotPath: payload.pixelshotPath || visual.pixelshotPath,
+        cdpUrl: payload.cdpUrl || visual.cdpUrl,
+        waitNetworkIdle: payload.waitNetworkIdle ?? visual.waitNetworkIdle,
+        viewportWidth: payload.viewportWidth,
+        tileHeight: payload.tileHeight || visual.tileHeight,
+        quality: payload.quality || visual.quality
+      };
+      const result = mode === "file"
+        ? await captureFileToTiles({ ...common, file: payload.file })
+        : await captureUrlToTiles({ ...common, url: payload.url || payload.currentUrl });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
+    } catch (error) {
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
     }
     return;
   }
@@ -2184,12 +2240,17 @@ function runLearningCaptureScan(vaultPath) {
   const collectors = [];
   const results = [];
   const skipped = [];
+  let watchFolderSummary = null;
+  let openedDocumentsSummary = null;
   if (!settings.enabled) {
     skipped.push({ collector: "source_capture", reason: "Source capture is disabled." });
   } else {
     if ((settings.watchFolders || []).length) {
       collectors.push("watch_folders");
-      results.push(...collectWatchFolderResources(vaultPath, { settings, previewApproved: true }));
+      const watchResults = collectWatchFolderResources(vaultPath, { settings, previewApproved: true });
+      results.push(...watchResults);
+      if (watchResults.summary?.skipped?.length) skipped.push(...watchResults.summary.skipped);
+      watchFolderSummary = watchResults.summary || null;
     } else {
       skipped.push({ collector: "watch_folders", reason: "No watch folders are configured." });
     }
@@ -2203,7 +2264,15 @@ function runLearningCaptureScan(vaultPath) {
       skipped.push({ collector: "browser_clipper", reason: "Browser clipper is extension-driven; use Arc clipper actions for page content." });
     }
     if (settings.openedDocuments === true) {
-      skipped.push({ collector: "opened_documents", reason: "Opened-document metadata has no approved local preview source in this scan." });
+      collectors.push("opened_documents");
+      const opened = collectCurrentOpenedDocuments(vaultPath, { settings, previewApproved: true });
+      results.push(...opened.captured);
+      openedDocumentsSummary = {
+        previews: opened.previews.length,
+        captured: opened.captured.filter((item) => item.captured).length,
+        skipped: opened.skipped.length
+      };
+      if (opened.skipped.length) skipped.push(...opened.skipped);
     }
     for (const [key, label] of [
       ["browserHistoryImport", "browser_history"],
@@ -2225,6 +2294,13 @@ function runLearningCaptureScan(vaultPath) {
     duplicates,
     skipped: skipped.concat(blocked),
     skippedCount: skipped.length + blocked.length + duplicates,
+    watchFoldersScanned: watchFolderSummary?.foldersScanned || 0,
+    watchFilesDiscovered: watchFolderSummary?.filesDiscovered || 0,
+    watchFilesQueued: watchFolderSummary?.filesQueued || 0,
+    watchFilesSkipped: watchFolderSummary?.filesSkipped || 0,
+    openedDocumentPreviews: openedDocumentsSummary?.previews || 0,
+    openedDocumentCaptured: openedDocumentsSummary?.captured || 0,
+    openedDocumentSkipped: openedDocumentsSummary?.skipped || 0,
     nextAction: captured
       ? "Review ResourceInbox or process captured sources into learning insights."
       : "No new approved local files were captured. Check watch folders or use the Arc clipper/manual import."
@@ -3278,6 +3354,9 @@ function renderHtml() {
               <label class="inline-toggle"><input id="full-local-capture-mode" type="checkbox"> Full Local Capture Mode</label>
               <label class="inline-toggle"><input id="manual-import-toggle" type="checkbox"> Manual import</label>
               <label class="inline-toggle"><input id="browser-clipper-toggle" type="checkbox"> Browser clipper</label>
+              <label class="inline-toggle"><input id="visual-capture-enabled" type="checkbox"> Visual capture tiles</label>
+              <label class="inline-toggle"><input id="visual-capture-clips-toggle" type="checkbox"> Visual capture browser clips</label>
+              <label class="inline-toggle"><input id="visual-wait-network-idle" type="checkbox"> Wait for network idle</label>
               <label class="inline-toggle"><input id="browser-history-toggle" type="checkbox"> Browser history import</label>
               <label class="inline-toggle"><input id="opened-documents-toggle" type="checkbox"> Opened-document detection</label>
               <label class="inline-toggle"><input id="screenshots-toggle" type="checkbox"> Screenshots</label>
@@ -3286,8 +3365,18 @@ function renderHtml() {
 	              <label class="inline-toggle"><input id="clipboard-toggle" type="checkbox"> Clipboard</label>
 	              <label class="inline-toggle"><input id="visited-web-pages-toggle" type="checkbox"> Visited web pages</label>
 	              <label class="inline-toggle"><input id="frontmost-app-metadata-toggle" type="checkbox"> Frontmost app metadata</label>
-	            </div>
+            </div>
             <label class="learning-field full"><span>Watch folders</span><input id="watch-folders" autocomplete="off" placeholder="Comma-separated folders"></label>
+            <label class="inline-toggle"><input id="watch-folders-recursive" type="checkbox"> Scan watch folders recursively</label>
+            <label class="learning-field"><span>Watch folder handling</span><select id="watch-folder-ingest-mode">
+              <option value="ready_for_ingest">Queue supported files</option>
+              <option value="needs_review">Needs review first</option>
+            </select></label>
+            <label class="learning-field"><span>Pixelshot path</span><input id="visual-pixelshot-path" autocomplete="off" placeholder="pixelshot"></label>
+            <label class="learning-field"><span>CDP URL</span><input id="visual-cdp-url" autocomplete="off" placeholder="http://127.0.0.1:9222"></label>
+            <label class="learning-field"><span>Tile height</span><input id="visual-tile-height" type="number" min="256" max="4096" step="1" placeholder="1024"></label>
+            <label class="learning-field"><span>Tile quality</span><input id="visual-quality" type="number" min="1" max="100" step="1" placeholder="85"></label>
+            <label class="learning-field full"><span>Opened document file path</span><input id="opened-document-file" autocomplete="off" placeholder="/Users/you/Documents/current.pdf"></label>
             <label class="learning-field"><span>Page content</span><select id="capture-page-content">
               <option value="ask">Ask</option>
               <option value="metadata_only">Metadata only</option>
@@ -3303,6 +3392,7 @@ function renderHtml() {
             <div class="learning-button-row">
               <button class="primary" type="submit">Save capture settings</button>
               <button id="scan-capture-sources" class="secondary" type="button">Scan capture sources now</button>
+              <button id="approve-opened-document" class="secondary" type="button">Approve opened document file</button>
             </div>
             <div id="capture-scan-status" class="learning-capture-status full">No capture scan has run in this session.</div>
           </form>
@@ -3590,6 +3680,13 @@ function renderHtml() {
     const fullLocalCaptureMode = document.querySelector("#full-local-capture-mode");
     const manualImportToggle = document.querySelector("#manual-import-toggle");
     const browserClipperToggle = document.querySelector("#browser-clipper-toggle");
+    const visualCaptureEnabled = document.querySelector("#visual-capture-enabled");
+    const visualCaptureClipsToggle = document.querySelector("#visual-capture-clips-toggle");
+    const visualWaitNetworkIdle = document.querySelector("#visual-wait-network-idle");
+    const visualPixelshotPath = document.querySelector("#visual-pixelshot-path");
+    const visualCdpUrl = document.querySelector("#visual-cdp-url");
+    const visualTileHeight = document.querySelector("#visual-tile-height");
+    const visualQuality = document.querySelector("#visual-quality");
     const browserHistoryToggle = document.querySelector("#browser-history-toggle");
     const openedDocumentsToggle = document.querySelector("#opened-documents-toggle");
     const screenshotsToggle = document.querySelector("#screenshots-toggle");
@@ -3599,6 +3696,10 @@ function renderHtml() {
     const visitedWebPagesToggle = document.querySelector("#visited-web-pages-toggle");
     const frontmostAppMetadataToggle = document.querySelector("#frontmost-app-metadata-toggle");
     const watchFolders = document.querySelector("#watch-folders");
+    const watchFoldersRecursive = document.querySelector("#watch-folders-recursive");
+    const watchFolderIngestMode = document.querySelector("#watch-folder-ingest-mode");
+    const openedDocumentFile = document.querySelector("#opened-document-file");
+    const approveOpenedDocument = document.querySelector("#approve-opened-document");
     const capturePageContent = document.querySelector("#capture-page-content");
     const cloudProcessingPolicy = document.querySelector("#cloud-processing-policy");
     const retentionDays = document.querySelector("#retention-days");
@@ -3922,6 +4023,7 @@ function renderHtml() {
     enableBehaviorAlerts.addEventListener("click", requestBehaviorNotifications);
     exportResources.addEventListener("click", exportResourceInbox);
     processResources.addEventListener("click", () => processCapturedResources({ manual: true }));
+    approveOpenedDocument.addEventListener("click", approveOpenedDocumentFile);
     purgeResources.addEventListener("click", purgeResourceInbox);
     draftLearningPlans.addEventListener("click", draftPlansFromResources);
     approveLearningPlanButton.addEventListener("click", approveSelectedLearningPlan);
@@ -5331,6 +5433,13 @@ function renderHtml() {
       fullLocalCaptureMode.checked = sourceSettings.fullLocalCaptureMode === true;
       manualImportToggle.checked = sourceSettings.manualImport !== false;
       browserClipperToggle.checked = sourceSettings.browserClipper !== false;
+      visualCaptureEnabled.checked = sourceSettings.visualCapture?.enabled === true;
+      visualCaptureClipsToggle.checked = sourceSettings.visualCapture?.captureBrowserClips === true;
+      visualWaitNetworkIdle.checked = sourceSettings.visualCapture?.waitNetworkIdle === true;
+      visualPixelshotPath.value = sourceSettings.visualCapture?.pixelshotPath || "";
+      visualCdpUrl.value = sourceSettings.visualCapture?.cdpUrl || "";
+      visualTileHeight.value = sourceSettings.visualCapture?.tileHeight || 1024;
+      visualQuality.value = sourceSettings.visualCapture?.quality || 85;
       browserHistoryToggle.checked = sourceSettings.browserHistoryImport === true;
       openedDocumentsToggle.checked = sourceSettings.openedDocuments === true;
       screenshotsToggle.checked = sourceSettings.screenshots === true;
@@ -5340,6 +5449,8 @@ function renderHtml() {
       visitedWebPagesToggle.checked = sourceSettings.visitedWebPages === true;
       frontmostAppMetadataToggle.checked = sourceSettings.frontmostAppMetadata === true;
       watchFolders.value = (sourceSettings.watchFolders || []).join(", ");
+      watchFoldersRecursive.checked = sourceSettings.watchFoldersRecursive === true;
+      watchFolderIngestMode.value = sourceSettings.watchFolderIngestMode || "ready_for_ingest";
       capturePageContent.value = sourceSettings.capturePageContent || "ask";
       cloudProcessingPolicy.value = sourceSettings.cloudProcessingPolicy || "ask_each_time";
       retentionDays.value = sourceSettings.retentionDays || 90;
@@ -6440,6 +6551,15 @@ function renderHtml() {
               fullLocalCaptureMode: fullLocalCaptureMode.checked,
               manualImport: manualImportToggle.checked,
               browserClipper: browserClipperToggle.checked,
+              visualCapture: {
+                enabled: visualCaptureEnabled.checked,
+                captureBrowserClips: visualCaptureClipsToggle.checked,
+                waitNetworkIdle: visualWaitNetworkIdle.checked,
+                cdpUrl: visualCdpUrl.value,
+                pixelshotPath: visualPixelshotPath.value,
+                tileHeight: Number(visualTileHeight.value || 1024),
+                quality: Number(visualQuality.value || 85)
+              },
               browserHistoryImport: browserHistoryToggle.checked,
               openedDocuments: openedDocumentsToggle.checked,
               screenshots: screenshotsToggle.checked,
@@ -6449,6 +6569,8 @@ function renderHtml() {
               visitedWebPages: visitedWebPagesToggle.checked,
               frontmostAppMetadata: frontmostAppMetadataToggle.checked,
               watchFolders: listFromInput(watchFolders.value),
+              watchFoldersRecursive: watchFoldersRecursive.checked,
+              watchFolderIngestMode: watchFolderIngestMode.value,
               capturePageContent: capturePageContent.value,
               cloudProcessingPolicy: cloudProcessingPolicy.value,
               retentionDays: Number(retentionDays.value || 90)
@@ -6503,6 +6625,8 @@ function renderHtml() {
         '<strong>' + escapeHtml(scan.status || "scan") + '</strong>' +
         '<div>Last scan: ' + escapeHtml(shortEventTime(scan.lastScanAt) || "now") + '</div>' +
         '<div>Captured: ' + escapeHtml(String(scan.captured || 0)) + ' · duplicates: ' + escapeHtml(String(scan.duplicates || 0)) + ' · skipped: ' + escapeHtml(String(scan.skippedCount || skipped.length || 0)) + '</div>' +
+        '<div>Watch folders: ' + escapeHtml(String(scan.watchFoldersScanned || 0)) + ' scanned · ' + escapeHtml(String(scan.watchFilesDiscovered || 0)) + ' discovered · ' + escapeHtml(String(scan.watchFilesQueued || 0)) + ' queued · ' + escapeHtml(String(scan.watchFilesSkipped || 0)) + ' skipped</div>' +
+        '<div>Opened documents: ' + escapeHtml(String(scan.openedDocumentPreviews || 0)) + ' previewed · ' + escapeHtml(String(scan.openedDocumentCaptured || 0)) + ' captured · ' + escapeHtml(String(scan.openedDocumentSkipped || 0)) + ' skipped</div>' +
         '<div>Collectors: ' + escapeHtml((scan.collectors || []).join(", ") || "none") + '</div>' +
         (skipped.length ? '<details><summary>Skipped collectors</summary><ul>' + skipped.map((item) => '<li>' + escapeHtml(item) + '</li>').join("") + '</ul></details>' : '') +
         '<div>' + escapeHtml(scan.nextAction || "Review ResourceInbox for captured sources.") + '</div>';
@@ -6571,6 +6695,30 @@ function renderHtml() {
         learningFeedback.textContent = "Resource added";
         await loadLearning({ preserveDirty: true, excludeForms: [manualResourceForm] });
         if (autoInsightsToggle.checked) await processCapturedResources({ manual: false });
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function approveOpenedDocumentFile() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      const file = openedDocumentFile.value.trim();
+      if (!vault || !file) return;
+      if (!window.confirm("Approve this opened document file for local ingest?")) return;
+      learningFeedback.textContent = "Approving opened document...";
+      try {
+        const data = await postLearningAction("/api/learning/opened-document-approve", {
+          vault,
+          document: { file, title: pathBasename(file), sourceApp: "Manual file chooser" },
+          previewApproved: true,
+          contentApproved: true
+        });
+        if (data.error) throw new Error(data.error);
+        if (!data.captured && !data.duplicate) throw new Error(data.reason || "Opened document was not approved.");
+        openedDocumentFile.value = "";
+        learningFeedback.textContent = data.duplicate ? "Opened document was already captured." : "Opened document approved for ingest.";
+        await loadLearning({ preserveDirty: true, excludeForms: [sourceCaptureForm] });
+        if (data.captured && autoInsightsToggle.checked) await processCapturedResources({ manual: false });
       } catch (error) {
         learningFeedback.textContent = error.message;
       }

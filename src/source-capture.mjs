@@ -3,6 +3,7 @@ import path from "node:path";
 import { trackBehaviorEvent } from "./behavior-tracker.mjs";
 import { learningPageDir, learningPaths } from "./learning-store.mjs";
 import { slugify, vaultName } from "./vaults.mjs";
+import os from "node:os";
 
 export const SOURCE_CAPTURE_SETTINGS_FILE = "source-capture-settings.json";
 export const RESOURCE_INBOX_FILE = "resource-inbox.jsonl";
@@ -14,7 +15,10 @@ export function defaultSourceCaptureSettings() {
     fullLocalCaptureMode: false,
     manualImport: true,
     watchFolders: [],
+    watchFoldersRecursive: false,
+    watchFolderIngestMode: "ready_for_ingest",
     browserClipper: true,
+    visualCapture: defaultVisualCaptureSettings(),
     autoProcessCapturedResources: true,
     browserHistoryImport: false,
     openedDocuments: false,
@@ -65,8 +69,11 @@ export function normalizeSourceCaptureSettings(input = {}) {
     enabled: input.enabled === true,
     fullLocalCaptureMode: full,
     manualImport: input.manualImport !== false,
-    watchFolders: normalizeList(input.watchFolders),
+    watchFolders: normalizePathList(input.watchFolders),
+    watchFoldersRecursive: input.watchFoldersRecursive === true,
+    watchFolderIngestMode: choice(input.watchFolderIngestMode, ["ready_for_ingest", "needs_review"], "ready_for_ingest"),
     browserClipper: input.browserClipper !== false,
+    visualCapture: normalizeVisualCaptureSettings(input.visualCapture || {}),
     autoProcessCapturedResources,
     browserHistoryImport: full && input.browserHistoryImport === true,
     openedDocuments: full && input.openedDocuments === true,
@@ -83,6 +90,32 @@ export function normalizeSourceCaptureSettings(input = {}) {
     sensitiveSourceHandling: choice(input.sensitiveSourceHandling, ["local_only_redact_or_skip", "local_only", "redact", "skip"], "local_only_redact_or_skip"),
     localProcessingOnly: input.localProcessingOnly !== false || full,
     updated: input.updated || new Date().toISOString()
+  };
+}
+
+function defaultVisualCaptureSettings() {
+  return {
+    enabled: false,
+    pixelshotPath: "",
+    waitNetworkIdle: false,
+    cdpUrl: process.env.PIXELSHOT_CDP_URL || "",
+    tileHeight: 1024,
+    quality: 85,
+    captureBrowserClips: false
+  };
+}
+
+function normalizeVisualCaptureSettings(input = {}) {
+  return {
+    ...defaultVisualCaptureSettings(),
+    ...input,
+    enabled: input.enabled === true,
+    pixelshotPath: String(input.pixelshotPath || "").trim(),
+    waitNetworkIdle: input.waitNetworkIdle === true,
+    cdpUrl: String(input.cdpUrl || process.env.PIXELSHOT_CDP_URL || "").trim(),
+    tileHeight: boundedNumber(input.tileHeight, 1024, 256, 4096),
+    quality: boundedNumber(input.quality, 85, 1, 100),
+    captureBrowserClips: input.captureBrowserClips === true
   };
 }
 
@@ -166,6 +199,7 @@ export function captureResource(vaultPath, input = {}, options = {}) {
 }
 
 function resourceIdentity(resource = {}) {
+  if (resource.dedupeKey) return String(resource.dedupeKey);
   return [
     normalizeSourceType(resource.sourceType || "manual_import"),
     String(resource.file || resource.url || resource.title || "").trim().toLowerCase()
@@ -313,8 +347,9 @@ function normalizeResource(input, { sourceType, now, vaultPath, settings }) {
     targetLanguageRelevance: normalizeList(input.targetLanguageRelevance || input.targetLanguages),
     urgency: choice(input.urgency, ["none", "low", "medium", "high"], "none"),
     deadline: stringOr(input.deadline, ""),
+    dedupeKey: stringOr(input.dedupeKey, ""),
     evidenceQuality: choice(input.evidenceQuality, ["unknown", "low", "medium", "high"], "unknown"),
-    processingStatus: choice(input.processingStatus, ["captured", "needs_review", "ready_for_ingest", "ingested", "deferred", "deleted"], "captured"),
+    processingStatus: choice(input.processingStatus, ["captured", "needs_review", "ready_for_ingest", "queued_for_ingest", "ingested", "deferred", "deleted"], "captured"),
     recommendedNextAction: stringOr(input.recommendedNextAction, nextActionFor(sourceType, input)),
     url: stringOr(input.url, ""),
     file: stringOr(preservedFile || input.file, ""),
@@ -395,6 +430,7 @@ function yamlString(value) {
 function preserveLocalFile(vaultPath, file, sourceType, input) {
   const text = String(file || "").trim();
   if (!text || !path.isAbsolute(text) || !fs.existsSync(text) || !fs.statSync(text).isFile()) return "";
+  if (sourceType === "watch_folder") return text;
   const shouldCopy = input.contentApproved === true || ["screenshot", "voice_memo"].includes(sourceType);
   if (!shouldCopy) return "";
   const dir = path.join(vaultPath, "raw", "assets", "resource-capture");
@@ -530,8 +566,12 @@ function stringOr(value, fallback) {
 }
 
 function normalizeList(value) {
-  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
-  return String(value || "").split(/[,\n]/).map((item) => item.trim()).filter(Boolean);
+  const items = Array.isArray(value) ? value : String(value || "").split(/[,\n]/);
+  return items.map((item) => String(item).trim()).filter(Boolean);
+}
+
+function normalizePathList(value) {
+  return normalizeList(value).map(expandTilde);
 }
 
 function positiveNumber(value, fallback) {
@@ -539,8 +579,20 @@ function positiveNumber(value, fallback) {
   return Number.isFinite(number) && number > 0 ? number : fallback;
 }
 
+function boundedNumber(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(number)));
+}
+
 function stableId(prefix, value) {
   return `${prefix}-${slugify(String(value || "").slice(0, 140))}`;
+}
+
+function expandTilde(value) {
+  if (value === "~") return os.homedir();
+  if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
+  return value;
 }
 
 function sourceTypeLabel(sourceType) {

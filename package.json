@@ -15,6 +15,7 @@
     "learning:rebuild-source-map": "node src/backfill-learning-boost.mjs --rebuild-source-map",
     "learning:export-remnote": "node src/remnote-export.mjs",
     "learning:plan": "node src/learning-plan-cli.mjs",
+    "learning:visual-index": "node src/visual-index.mjs",
     "learning:check": "node src/learning-check.mjs",
     "test": "node --test"
   },

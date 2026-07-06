@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { preflightBrowserClip, saveBrowserClip } from "../src/clip.mjs";
+import { updateSourceCaptureSettings } from "../src/source-capture.mjs";
 
 function makeConfig(root) {
   return {
@@ -42,6 +43,29 @@ test("browser clips are saved as raw input markdown", async () => {
   assert.match(markdown, /tags:\n  - "browser-clip"\n  - "Research"\n  - "meeting-notes"\n  - "ai\/agents"\n  - "bad-tag"/);
   assert.match(markdown, /- Tags: #Research, #meeting-notes, #ai\/agents, #bad-tag/);
   assert.match(markdown, /Selected insight for the wiki\./);
+});
+
+test("browser visual capture failure does not block text clip saving", async () => {
+  const { root, vault } = makeVaultRoot();
+  updateSourceCaptureSettings(vault, {
+    visualCapture: {
+      enabled: true,
+      captureBrowserClips: true,
+      pixelshotPath: path.join(root, "missing-pixelshot")
+    }
+  });
+
+  const result = await saveBrowserClip(makeConfig(root), {
+    vault: "Research-vault",
+    captureType: "page",
+    title: "Visual optional",
+    url: "https://example.test/visual",
+    text: "Text clip still saves."
+  });
+
+  assert.match(result.file, /^raw\/input\/.*browser--page--visual-optional\.md$/);
+  assert.equal(fs.existsSync(path.join(vault, result.file)), true);
+  assert.equal(result.visualCapture.status, "unavailable");
 });
 
 test("browser clip media data URLs are saved as vault assets", async () => {

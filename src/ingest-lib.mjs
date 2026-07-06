@@ -10,6 +10,8 @@ import {
   normalizeLearningBoost,
   renderLearningBoostSection
 } from "./learning-extraction.mjs";
+import { captureFileToTiles } from "./pixel-capture.mjs";
+import { readSourceCaptureSettings } from "./source-capture.mjs";
 import { processSourceFile } from "./source-processors/index.mjs";
 import {
   ensureDir,
@@ -40,8 +42,9 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
   if (isMediaRawFile(sourcePath)) {
     return ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, config);
   }
-  const processedSource = processSourceFile(sourcePath, { ingestMaxChars: config.ingestMaxChars });
+  let processedSource = processSourceFile(sourcePath, { ingestMaxChars: config.ingestMaxChars, vaultPath });
   const sourceText = String(processedSource.text || "").slice(0, config.ingestMaxChars);
+  processedSource = await prepareVisualEvidence(vaultPath, sourcePath, processedSource, sourceText, config);
   const contract = readVaultContract(vaultPath);
   const index = readVaultIndex(vaultPath);
   const sourceTitle = processedSource.title || extractTitle(sourceText, sourcePath);
@@ -122,7 +125,8 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
   fs.renameSync(sourcePath, assetPath);
 
   const media = mediaMetadata(assetPath, assetRel, mediaKind, ext);
-  const processedSource = processSourceFile(assetPath, { ingestMaxChars: config.ingestMaxChars, assetRel });
+  let processedSource = processSourceFile(assetPath, { ingestMaxChars: config.ingestMaxChars, assetRel, vaultPath });
+  processedSource = await prepareVisualEvidence(vaultPath, assetPath, processedSource, String(processedSource.text || ""), config);
   const analysis = await analyzeMediaSource(provider, {
     sourceTitle,
     media,
@@ -195,7 +199,8 @@ async function reprocessPendingMediaPages(vaultPath, provider) {
     const sourceTitle = text.match(/^#\s+(.+)$/m)?.[1]?.trim() || path.basename(assetPath, path.extname(assetPath));
     const ext = path.extname(assetPath).toLowerCase();
     const media = mediaMetadata(assetPath, assetRel, mediaKind, ext);
-    const processedSource = processSourceFile(assetPath, { assetRel });
+    let processedSource = processSourceFile(assetPath, { assetRel, vaultPath });
+    processedSource = await prepareVisualEvidence(vaultPath, assetPath, processedSource, String(processedSource.text || ""), {});
     const analysis = await analyzeMediaSource(provider, { sourceTitle, media, assetPath, processedSource, vault: vaultName(vaultPath) });
     const userNotes = text.match(/\n## User Notes[\s\S]*$/m)?.[0] || "";
     const sourceRel = path.relative(vaultPath, sourcePagePath).replace(/\\/g, "/");
@@ -607,6 +612,7 @@ function extractTitle(text, sourcePath) {
 }
 
 function renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource = {} }) {
+  const visualCaptures = Array.isArray(processedSource.visualCaptures) ? processedSource.visualCaptures : [];
   return `---
 type: source
 status: active
@@ -631,6 +637,8 @@ ${analysis.summary}
 ${bulletList(analysis.key_points)}
 
 ${renderLearningBoostSection(analysis.learning_boost)}
+
+${renderVisualCaptureSection(visualCaptures)}
 
 ## Source Processing
 
@@ -667,8 +675,138 @@ ${bulletList(analysis.contradictions.length ? analysis.contradictions : ["None y
 `;
 }
 
+function renderVisualCaptureSection(visualCaptures = []) {
+  if (!visualCaptures.length) return "";
+  return `## Visual Capture
+
+${visualCaptures.map((capture) => {
+  const lines = [
+    `- Status: ${capture.status || "unknown"}`,
+    capture.sourceJson ? `  - Source manifest: [[${capture.sourceJson}]]` : "",
+    capture.tilesJson ? `  - Tile manifest: [[${capture.tilesJson}]]` : "",
+    ...(capture.mediaRefs || []).slice(0, 12).map((ref) => `  - ![[${ref}]]`),
+    capture.error ? `  - Note: ${capture.error}` : ""
+  ];
+  return lines.filter(Boolean).join("\n");
+}).join("\n")}
+`;
+}
+
+async function prepareVisualEvidence(vaultPath, sourcePath, processedSource = {}, sourceText = "", config = {}) {
+  let next = attachVisualCaptures(vaultPath, sourcePath, processedSource, sourceText);
+  const settings = readSourceCaptureSettings(vaultPath).visualCapture || {};
+  if (settings.enabled !== true || !visualCaptureEligible(sourcePath, next)) return next;
+  if (next.visualCaptures?.some((capture) => capture.status === "captured")) return next;
+  const result = await captureFileToTiles({
+    vaultPath,
+    file: sourcePath,
+    title: next.title || path.basename(sourcePath, path.extname(sourcePath)),
+    sourceType: next.kind || "document",
+    pixelshotPath: config.pixelshotPath || settings.pixelshotPath,
+    waitNetworkIdle: settings.waitNetworkIdle,
+    cdpUrl: settings.cdpUrl,
+    tileHeight: settings.tileHeight,
+    quality: settings.quality
+  });
+  return attachVisualCaptures(vaultPath, sourcePath, {
+    ...next,
+    visualCaptures: [
+      ...(next.visualCaptures || []),
+      visualCaptureSummary(result)
+    ]
+  }, sourceText);
+}
+
+function visualCaptureEligible(sourcePath, processedSource = {}) {
+  const ext = path.extname(sourcePath).toLowerCase();
+  if (processedSource.kind === "image") return false;
+  return [".pdf", ".html", ".htm"].includes(ext);
+}
+
+function visualCaptureSummary(result = {}) {
+  return {
+    status: result.status || "unknown",
+    captureRel: result.captureRel || "",
+    sourceJson: result.sourceJson || "",
+    tilesJson: result.tilesJson || "",
+    mediaRefs: result.mediaRefs || [],
+    error: result.error || result.reason || ""
+  };
+}
+
+function attachVisualCaptures(vaultPath, sourcePath, processedSource = {}, sourceText = "") {
+  const existing = Array.isArray(processedSource.visualCaptures) ? processedSource.visualCaptures : [];
+  const visualCaptures = dedupeVisualCaptures([
+    ...existing,
+    ...visualCapturesForSource(vaultPath, sourcePath, processedSource, sourceText)
+  ]);
+  if (!visualCaptures.length) return processedSource;
+  const mediaRefs = [...new Set([
+    ...(processedSource.mediaRefs || []),
+    ...visualCaptures.flatMap((capture) => capture.mediaRefs || [])
+  ])];
+  return {
+    ...processedSource,
+    visualCaptures,
+    mediaRefs,
+    processingNotes: [
+      ...(processedSource.processingNotes || []),
+      ...visualCaptures.map((capture) => capture.status === "captured"
+        ? `Visual capture tiles available at ${capture.captureRel}.`
+        : capture.status === "preserved"
+          ? `Visual evidence preserved locally${capture.mediaRefs?.length ? ` at ${capture.mediaRefs.join(", ")}` : ""}.`
+          : `Visual capture ${capture.status}: ${capture.error || "not available"}.`)
+    ]
+  };
+}
+
+function dedupeVisualCaptures(captures = []) {
+  const seen = new Set();
+  const result = [];
+  for (const capture of captures) {
+    const key = capture.captureRel || capture.sourceJson || capture.tilesJson || `${capture.status}:${(capture.mediaRefs || []).join("|")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(capture);
+  }
+  return result;
+}
+
+function visualCapturesForSource(vaultPath, sourcePath, processedSource = {}, sourceText = "") {
+  const dir = path.join(vaultPath, ".llm-wiki", "learning", "pixel-captures");
+  if (!fs.existsSync(dir)) return [];
+  const sourceAbs = path.resolve(sourcePath);
+  const text = `${sourceText}\n${processedSource.url || ""}\n${processedSource.metadata?.url || ""}`;
+  const captures = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const manifestFile = path.join(dir, entry.name, "source.json");
+    if (!fs.existsSync(manifestFile)) continue;
+    try {
+      const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
+      const file = manifest.source?.file ? path.resolve(manifest.source.file) : "";
+      const url = manifest.source?.url || "";
+      const matchesFile = file && file === sourceAbs;
+      const matchesUrl = url && text.includes(url);
+      if (!matchesFile && !matchesUrl) continue;
+      captures.push({
+        status: manifest.status || "unknown",
+        captureRel: manifest.captureRel || manifest.provenance?.captureRel || `.llm-wiki/learning/pixel-captures/${entry.name}`,
+        sourceJson: manifest.sourceJson || `.llm-wiki/learning/pixel-captures/${entry.name}/source.json`,
+        tilesJson: manifest.tilesJson || "",
+        mediaRefs: Array.isArray(manifest.mediaRefs) ? manifest.mediaRefs : [],
+        error: manifest.error || manifest.reason || ""
+      });
+    } catch {
+      // Ignore malformed sidecar manifests; source ingest should continue.
+    }
+  }
+  return captures;
+}
+
 function renderMediaSourcePage({ date, sourceTitle, assetRel, mediaKind, ext, media, analysis, processedSource = {} }) {
   const preview = mediaKind === "image" ? `\n![[${assetRel}]]\n` : "";
+  const visualCaptures = Array.isArray(processedSource.visualCaptures) ? processedSource.visualCaptures : [];
   return `---
 type: source
 status: active
@@ -706,6 +844,8 @@ ${media.width && media.height ? `- Dimensions: ${media.width} x ${media.height}`
 ${bulletList(analysis.key_points)}
 
 ${renderLearningBoostSection(analysis.learning_boost)}
+
+${renderVisualCaptureSection(visualCaptures)}
 
 ## Source's Related Learning Questions
 

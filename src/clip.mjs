@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { trackBehaviorEvent } from "./behavior-tracker.mjs";
+import { captureUrlToTiles } from "./pixel-capture.mjs";
 import { collectBrowserClip } from "./source-collectors/browser-clip-collector.mjs";
+import { readSourceCaptureSettings } from "./source-capture.mjs";
 import { ensureDir, listVaults, slugify, vaultName } from "./vaults.mjs";
 
 const maxTextChars = 240000;
@@ -96,7 +98,7 @@ export async function saveBrowserClip(config, payload) {
       mediaItems: savedMedia.length
     }
   });
-  collectBrowserClip(vaultPath, {
+  const captured = collectBrowserClip(vaultPath, {
     title,
     url: payload?.url || "",
     file: relativeVaultPath(vaultPath, file),
@@ -106,11 +108,42 @@ export async function saveBrowserClip(config, payload) {
     recommendedNextAction: "Review the clip and ingest it when ready.",
     evidenceQuality: payload?.text ? "medium" : "unknown"
   });
+  const visualCapture = await maybeCaptureBrowserClipVisual(vaultPath, {
+    title,
+    url: payload?.url || "",
+    sourceType: "browser_clip",
+    resourceId: captured?.resource?.id || ""
+  });
   return {
     vault: vaultName(vaultPath),
     file: relativeVaultPath(vaultPath, file),
-    assets: savedMedia.flatMap((item) => [item.path, item.transcriptPath].filter(Boolean))
+    assets: savedMedia.flatMap((item) => [item.path, item.transcriptPath].filter(Boolean)),
+    visualCapture
   };
+}
+
+async function maybeCaptureBrowserClipVisual(vaultPath, input) {
+  const settings = readSourceCaptureSettings(vaultPath);
+  const visual = settings.visualCapture || {};
+  if (visual.enabled !== true || visual.captureBrowserClips !== true || !input.url) return null;
+  try {
+    return await captureUrlToTiles({
+      vaultPath,
+      url: input.url,
+      title: input.title,
+      sourceType: input.sourceType,
+      pixelshotPath: visual.pixelshotPath,
+      cdpUrl: visual.cdpUrl,
+      waitNetworkIdle: visual.waitNetworkIdle,
+      tileHeight: visual.tileHeight,
+      quality: visual.quality
+    });
+  } catch (error) {
+    return {
+      status: "failed",
+      error: cleanText(error.message || error, 500)
+    };
+  }
 }
 
 function resolveVault(config, requested) {

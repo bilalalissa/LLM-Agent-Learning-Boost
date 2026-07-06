@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { visualCaptureUnavailableNote, visualSourceMetadata } from "./visual-metadata.mjs";
 
 const documentExtensions = new Set([".rtf", ".docx", ".odt", ".pptx", ".odp", ".epub"]);
 
@@ -20,7 +21,9 @@ export function processDocumentSource(file, options = {}) {
     text = `${path.basename(file)} preserved for local review. Text extraction is unavailable without optional local document tools.`;
     notes.push(`Document text extraction fallback used for ${ext}.`);
   }
+  notes.push(visualCaptureUnavailableNote(ext, "conversion to visual tiles requires an explicit local renderer such as pixelshot or a document-to-PDF tool."));
   const maxChars = Number(options.maxChars || options.ingestMaxChars || 60000);
+  const visual = visualSourceMetadata(file, options);
   return {
     kind: "document",
     title: path.basename(file, ext),
@@ -28,8 +31,10 @@ export function processDocumentSource(file, options = {}) {
     extension: ext,
     metadata: { path: file, bytes: fs.statSync(file).size },
     evidence: [path.basename(file)],
-    mediaRefs: [],
-    processingNotes: notes
+    visualCaptures: visual.visualCaptures,
+    mediaRefs: visual.mediaRefs,
+    processingNotes: notes,
+    provenance: visual.provenance
   };
 }
 
@@ -44,11 +49,11 @@ function readRtf(file, notes) {
 
 function unzipXml(file, patterns, notes) {
   try {
-    const listing = execFileSync("unzip", ["-Z1", file], { encoding: "utf8", timeout: 10000 }).split(/\r?\n/).filter(Boolean);
+    const listing = execFileSync("unzip", ["-Z1", file], { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] }).split(/\r?\n/).filter(Boolean);
     const selected = listing.filter((name) => patterns.some((pattern) => globMatch(pattern, name))).slice(0, 80);
     const chunks = [];
     for (const name of selected) {
-      const xml = execFileSync("unzip", ["-p", file, name], { encoding: "utf8", timeout: 10000 });
+      const xml = execFileSync("unzip", ["-p", file, name], { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] });
       chunks.push(xmlToText(xml));
     }
     return chunks.join("\n\n");

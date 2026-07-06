@@ -6,6 +6,7 @@ import test from "node:test";
 import { normalizeLearningBoost, renderLearningBoostSection } from "../src/learning-extraction.mjs";
 import { ingestFile } from "../src/ingest-lib.mjs";
 import { learningPaths } from "../src/learning-store.mjs";
+import { updateSourceCaptureSettings } from "../src/source-capture.mjs";
 import { processSourceFile } from "../src/source-processors/index.mjs";
 import { extractSchemaOrg } from "../src/web-schema-extractor.mjs";
 
@@ -66,6 +67,24 @@ function fakeProvider() {
   };
 }
 
+function fakePixelshot(root) {
+  const command = path.join(root, "pixelshot");
+  fs.writeFileSync(command, `#!/usr/bin/env node
+const fs = require("fs");
+const path = require("path");
+if (process.argv.includes("--version")) {
+  console.log("pixelshot-test 0.0.0");
+  process.exit(0);
+}
+const out = process.argv[process.argv.indexOf("--output") + 1];
+fs.mkdirSync(out, { recursive: true });
+fs.writeFileSync(path.join(out, "tile-000.png"), "fake png");
+fs.writeFileSync(path.join(out, "tiles.json"), JSON.stringify({ schemaVersion: 1, tiles: [{ index: 0, file: "tile-000.png" }] }));
+`);
+  fs.chmodSync(command, 0o755);
+  return command;
+}
+
 test("web processor extracts readable text, schema.org, and media refs", () => {
   const { root } = makeVault();
   const file = path.join(root, "article.html");
@@ -83,6 +102,84 @@ test("web processor extracts readable text, schema.org, and media refs", () => {
   assert.match(source.text, /Keep this paragraph/);
   assert.deepEqual(schema.map((item) => item["@type"]), ["Article"]);
   assert.deepEqual(source.mediaRefs, ["https://example.com/image.png"]);
+});
+
+test("PDF ingest creates local visual tiles when visual capture is enabled", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "input", "visual.pdf");
+  fs.writeFileSync(source, "%PDF-1.4\n% local fixture\n");
+  updateSourceCaptureSettings(vault, {
+    visualCapture: { enabled: true, pixelshotPath: fakePixelshot(root), tileHeight: 700, quality: 75 }
+  });
+
+  const result = await ingestFile(vault, source, config(root), fakeProvider());
+  const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+
+  assert.match(page, /## Visual Capture/);
+  assert.match(page, /Status: captured/);
+  assert.match(page, /tile-000\.png/);
+  assert.equal(fs.existsSync(path.join(vault, ".llm-wiki", "learning", "pixel-captures")), true);
+});
+
+test("PDF visual capture reports unavailable local renderer without blocking text ingest", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "input", "missing-renderer.pdf");
+  fs.writeFileSync(source, "%PDF-1.4\n% local fixture\n");
+  updateSourceCaptureSettings(vault, {
+    visualCapture: { enabled: true, pixelshotPath: path.join(root, "missing-pixelshot") }
+  });
+
+  const result = await ingestFile(vault, source, config(root), fakeProvider());
+  const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+
+  assert.match(page, /## Visual Capture/);
+  assert.match(page, /Status: unavailable/);
+  assert.match(page, /pixelshot is not installed|not on PATH/i);
+  assert.equal(fs.existsSync(path.join(vault, result.processed)), true);
+});
+
+test("HTML ingest creates local screenshot tiles through pixelshot", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "input", "visual-page.html");
+  fs.writeFileSync(source, "<!doctype html><title>Visual Page</title><main><h1>Visual Page</h1><p>Rendered locally.</p></main>");
+  updateSourceCaptureSettings(vault, {
+    visualCapture: { enabled: true, pixelshotPath: fakePixelshot(root), waitNetworkIdle: true }
+  });
+
+  const result = await ingestFile(vault, source, config(root), fakeProvider());
+  const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+
+  assert.match(page, /## Visual Capture/);
+  assert.match(page, /Status: captured/);
+  assert.match(page, /tile-000\.png/);
+  assert.match(page, /Media refs: .*tile-000\.png/);
+});
+
+test("image ingest preserves the image as first-class local visual evidence", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "input", "diagram.png");
+  fs.writeFileSync(source, "fake png");
+
+  const result = await ingestFile(vault, source, config(root), fakeProvider());
+  const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+
+  assert.match(page, /## Visual Capture/);
+  assert.match(page, /Status: preserved/);
+  assert.match(page, /raw\/assets\/.*diagram\.png/);
+});
+
+test("office document processor keeps text path and reports missing visual renderer", () => {
+  const { root } = makeVault();
+  const file = path.join(root, "slides.pptx");
+  fs.writeFileSync(file, "not a real zip fixture");
+
+  const source = processSourceFile(file);
+
+  assert.equal(source.kind, "document");
+  assert.deepEqual(source.visualCaptures, []);
+  assert.deepEqual(source.mediaRefs, []);
+  assert.equal(source.provenance.localOnly, true);
+  assert.match(source.processingNotes.join("\n"), /Visual capture unavailable.*local renderer/i);
 });
 
 test("learning_boost normalization preserves cards, evidence, media, and staging", () => {

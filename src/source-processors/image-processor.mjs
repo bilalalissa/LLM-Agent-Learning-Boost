@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { preservedImageEvidence, visualSourceMetadata } from "./visual-metadata.mjs";
 
 export function canProcessImageSource(file) {
   return new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".heic"]).has(path.extname(file).toLowerCase());
@@ -10,6 +11,9 @@ export function processImageSource(file, options = {}) {
   const ext = path.extname(file).toLowerCase();
   const metadata = imageMetadata(file, ext);
   const manual = String(options.manualDescription || "").trim();
+  const visual = visualSourceMetadata(file, options);
+  const imageRef = options.assetRel || path.basename(file);
+  const preserved = preservedImageEvidence(file, options);
   return {
     kind: "image",
     title: path.basename(file, ext),
@@ -17,10 +21,13 @@ export function processImageSource(file, options = {}) {
     extension: ext,
     metadata,
     evidence: [path.basename(file)],
-    mediaRefs: [options.assetRel || path.basename(file)],
+    visualCaptures: [preserved],
+    mediaRefs: [imageRef],
     processingNotes: [
+      `Image preserved as first-class local visual evidence at ${imageRef}.`,
       manual ? "Image description supplied by user/source text." : "Image content not visually inspected; only metadata was extracted."
-    ]
+    ],
+    provenance: visual.provenance
   };
 }
 

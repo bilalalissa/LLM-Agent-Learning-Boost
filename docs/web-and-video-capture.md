@@ -56,6 +56,16 @@ Clips are saved into the selected vault:
 raw/input/
 ```
 
+If visual capture is enabled for browser clips, the app also attempts a local `pixelshot` capture of the page URL after the text clip is saved. This never blocks the text clip. If `pixelshot` is missing or fails, the clip remains saved and ResourceInbox records a local processing note.
+
+Visual captures are stored under:
+
+```text
+.llm-wiki/learning/pixel-captures/
+```
+
+Each capture directory contains `source.json`, and successful captures also contain `tiles.json` plus tile images. Source pages include a Visual Capture section when matching tile manifests are available.
+
 When media binaries can be downloaded, they are stored locally under:
 
 ```text
@@ -110,6 +120,39 @@ The local web processors can extract:
 
 Remote internet research stays behind explicit controls and citations. Browser clipping remains a local capture action.
 
+## Optional PixelRAG-Style Visual Capture
+
+Learning Boost can use the PixelRAG-style pattern of rendering pages/documents into screenshot tiles as local evidence. The app invokes `pixelshot` as an optional local executable; it does not copy PixelRAG code into this repo.
+
+Configure the Source Capture settings:
+
+- `Visual capture tiles`: enables the local visual capture feature.
+- `Visual capture browser clips`: attempts a page tile capture after a browser clip is saved.
+- `Pixelshot path`: optional path to the local `pixelshot` executable.
+- `Wait for network idle`: passes the local wait option for dynamic pages.
+- `CDP URL`: optional Chrome DevTools Protocol attach URL for an already-running browser session.
+- `Tile height` and `Tile quality`: local tile output settings.
+
+Authenticated or dynamic pages should use an explicit CDP attach URL such as `PIXELSHOT_CDP_URL` or the Source Capture setting. Current-browser/session capture requires explicit confirmation and Full Local Capture Mode.
+
+During ingest, saved HTML files and PDFs can also use this local visual capture path when `visualCapture.enabled` is on. The generated source page links the tile manifest and embeds tile image refs in a Visual Capture section. Images are preserved directly as local visual evidence. Office-style documents keep text extraction and record a local-renderer-unavailable note until a local conversion tool is available.
+
+The experimental visual index command is:
+
+```bash
+npm run learning:visual-index
+```
+
+It builds a local metadata index under `.llm-wiki/learning/pixel-index/`. It does not embed tiles or download models by default. PixelRAG-compatible embedding/index integration is opt-in and requires `--enable-pixelrag --confirm-pixelrag`; even then, the current implementation records local availability and leaves model/index execution to a later reviewed step.
+
+The visual capture endpoint is local:
+
+```text
+POST /api/learning/visual-capture
+```
+
+Payloads can request `mode: "url"` or `mode: "file"` with `confirmed: true`. `mode: "current_browser_url"` is treated as broader browser/session capture and is blocked unless Full Local Capture Mode is enabled.
+
 ## Video And Transcripts
 
 Video processing is transcript-first. YouTube media clips require a transcript before the app saves the source note. The clipper can save transcript-only, video plus transcript into the vault, or a temporary video plus vault transcript. If you choose a video option and the video file cannot be produced, the save fails instead of silently falling back to transcript-only.
@@ -127,12 +170,14 @@ Downloads are bounded so the clipper does not wait forever on stalled media URLs
 The browser clipper is not the only way to bring material into Learning Boost.
 
 - `Add Resource` in the Learning tab: manually add one URL, file path, title, topic, or source type.
-- Watch folders: monitor user-selected local folders after you add them in Source Capture settings.
+- Watch folders: monitor user-selected local folders after you add them in Source Capture settings. The default scan is non-recursive, filters to supported ingest file types, dedupes repeated scans, and reports skipped files in the Learning tab.
 - Screenshots: capture selected screenshot folders only when screenshot capture is explicitly enabled.
 - Meetings: preserve meeting transcript or metadata only when meeting capture is explicitly enabled.
 - Voice memos: preserve local voice memo files only when voice memo capture is explicitly enabled.
 
 Full Local Capture Mode is separate and more sensitive. It is required before broad collectors such as browser history, opened documents, clipboard, visited web pages, or frontmost app metadata can run. Keep it off unless you intentionally want broader local activity capture. Broad collectors should still be previewed and approved before ingest.
+
+Opened-document capture is metadata-first. The app may show the frontmost/source app, document title, and local path if macOS exposes it. Content is not queued until you approve the preview or manually provide the document file path in Source Capture.
 
 Two command-line tools are local vault processing helpers, not browser extension installation steps:
 

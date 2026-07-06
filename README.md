@@ -20,6 +20,7 @@ npm test
 npm run learning:check
 npm run learning:backfill
 npm run learning:plan -- --draft
+npm run learning:visual-index
 npm run learning:export-remnote
 ```
 
@@ -32,8 +33,8 @@ npm run learning:export-remnote
 - [Connect Local AI Router](docs/connect-local-ai-router.md): Automatic same-Mac Local AI Router setup through the localhost integration API, plus direct local provider fallback settings.
 - [User Profile and Onboarding](docs/user-profile-and-onboarding.md): local profile/account, interview questions, demographics, and privacy.
 - [Working-Memory Method](docs/working-memory-method.md): chunking, progressive disclosure, active recall, and overload detection.
-- [Source Ingest](docs/source-ingest.md): text, PDF, documents, images, audio, video, screenshots, transcripts, and approved ResourceInbox queueing into `raw/input/`.
-- [Web and Video Capture](docs/web-and-video-capture.md): install the Arc web clipper, save selections/pages/media references, and use local capture tools.
+- [Source Ingest](docs/source-ingest.md): text, PDF, documents, images, audio, video, screenshots, transcripts, watch-folder files, and approved ResourceInbox queueing into `raw/input/`.
+- [Web and Video Capture](docs/web-and-video-capture.md): install the Arc web clipper, save selections/pages/media references, and optionally create local PixelRAG-style visual tiles with `pixelshot`.
 - [Resource Capture and Privacy](docs/resource-capture-and-privacy.md): capture modes, local ResourceInbox provenance, Full Local Capture Mode, and sensitive/critical handling.
 - [Chat Internet Research](docs/chat-internet-research.md): remote source access, citations, internet controls, and privacy routing.
 - [Behavior Coaching and Alerts](docs/behavior-coaching-and-alerts.md): fallback detection, system/device notifications, and local coaching.

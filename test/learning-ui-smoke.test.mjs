@@ -316,6 +316,7 @@ test("rendered app client script parses", async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "llm-learning-ui-"));
   const vaultsRoot = path.join(tmp, "vaults");
   fs.mkdirSync(vaultsRoot, { recursive: true });
+  fs.mkdirSync(path.join(vaultsRoot, "Research-vault", ".obsidian"), { recursive: true });
   const port = await freePort();
   const child = spawn(process.execPath, ["src/server.mjs"], {
     cwd: path.resolve("."),
@@ -349,6 +350,19 @@ test("rendered app client script parses", async (t) => {
   const providerConfig = await providerConfigResponse.json();
   assert.equal(providerConfig.values.DEFAULT_AI_PROVIDER, "local_auto");
   assert.equal(JSON.stringify(providerConfig).includes("sk-test"), false);
+
+  const visualCaptureResponse = await fetch(`http://127.0.0.1:${port}/api/learning/visual-capture`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      vault: "Research-vault",
+      mode: "current_browser_url",
+      url: "https://example.test/private",
+      confirmed: true
+    })
+  });
+  assert.equal(visualCaptureResponse.status, 400);
+  assert.match(await visualCaptureResponse.text(), /Full Local Capture Mode is required/);
 
   const saveProviderResponse = await fetch(`http://127.0.0.1:${port}/api/provider-config`, {
     method: "POST",

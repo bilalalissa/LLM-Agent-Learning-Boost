@@ -40,6 +40,11 @@ test("source capture settings default to safe normal capture", () => {
   assert.equal(settings.fullLocalCaptureMode, false);
   assert.equal(settings.manualImport, true);
   assert.equal(settings.browserClipper, true);
+  assert.equal(settings.visualCapture.enabled, false);
+  assert.equal(settings.visualCapture.captureBrowserClips, false);
+  assert.equal(settings.visualCapture.waitNetworkIdle, false);
+  assert.equal(settings.visualCapture.tileHeight, 1024);
+  assert.equal(settings.visualCapture.quality, 85);
   assert.equal(settings.autoProcessCapturedResources, true);
   assert.equal(settings.browserHistoryImport, false);
   assert.equal(settings.localProcessingOnly, true);
@@ -83,12 +88,16 @@ test("full local capture gates broad collectors behind explicit mode and preview
 
 test("critical sources are local-only and never cloud eligible", () => {
   const critical = { title: "API key note", text: "password and API key are here" };
+  const sensitive = { title: "Team salary note", text: "private salary planning" };
   const sensitivity = classifySourceSensitivity(critical);
   const decision = cloudProcessingDecision(critical, { cloudProcessingPolicy: "allow_non_sensitive", localProcessingOnly: false });
+  const sensitiveDecision = cloudProcessingDecision(sensitive, { cloudProcessingPolicy: "allow_non_sensitive", localProcessingOnly: false });
 
   assert.equal(sensitivity, "critical");
   assert.equal(decision.allowed, false);
   assert.match(decision.reason, /must never be sent to cloud/i);
+  assert.equal(sensitiveDecision.allowed, false);
+  assert.match(sensitiveDecision.reason, /Sensitive sources remain local/i);
 });
 
 test("manual resource capture groups resources and writes resources page", () => {

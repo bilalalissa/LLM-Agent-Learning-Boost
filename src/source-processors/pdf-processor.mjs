@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { visualSourceMetadata } from "./visual-metadata.mjs";
 
 export function canProcessPdfSource(file) {
   return path.extname(file).toLowerCase() === ".pdf";
@@ -14,6 +15,7 @@ export function processPdfSource(file, options = {}) {
     ? pages.map((page) => `p. ${page.page}\n${page.text}`).join("\n\n")
     : `${path.basename(file)} preserved for local review. PDF text extraction is unavailable without optional local tools such as pdftotext.`;
   if (!pages.length) notes.push("PDF text extraction fallback used; no page text was inspected.");
+  const visual = visualSourceMetadata(file, options);
   return {
     kind: "pdf",
     title: pdfTitle(file),
@@ -21,14 +23,16 @@ export function processPdfSource(file, options = {}) {
     extension: ".pdf",
     metadata: { path: file, bytes: fs.statSync(file).size, pages: pages.length || undefined },
     evidence: pages.length ? pages.slice(0, 12).map((page) => `p. ${page.page}`) : [path.basename(file)],
-    mediaRefs: [],
-    processingNotes: notes
+    visualCaptures: visual.visualCaptures,
+    mediaRefs: visual.mediaRefs,
+    processingNotes: notes,
+    provenance: visual.provenance
   };
 }
 
 function extractPdfText(file, notes) {
   try {
-    const output = execFileSync("pdftotext", ["-layout", "-enc", "UTF-8", file, "-"], { encoding: "utf8", timeout: 30000 });
+    const output = execFileSync("pdftotext", ["-layout", "-enc", "UTF-8", file, "-"], { encoding: "utf8", timeout: 30000, stdio: ["ignore", "pipe", "ignore"] });
     return output.split(/\f/).map((text, index) => ({ page: index + 1, text: text.trim() })).filter((page) => page.text);
   } catch (error) {
     notes.push(`pdftotext unavailable or failed: ${error.message}`);

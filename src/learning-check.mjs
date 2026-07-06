@@ -27,6 +27,7 @@ export const REQUIRED_SCRIPTS = [
   "learning:backfill",
   "learning:export-remnote",
   "learning:plan",
+  "learning:visual-index",
   "learning:check"
 ];
 
