@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 export function canProcessImageSource(file) {
-  return new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".heic"]).has(path.extname(file).toLowerCase());
+  return new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif"]).has(path.extname(file).toLowerCase());
 }
 
 export function processImageSource(file, options = {}) {

@@ -10,15 +10,18 @@ import { canProcessWebSource, processWebSource } from "./web-processor.mjs";
 
 export const STAGE_3_SOURCE_EXTENSIONS = new Set([
   ".md", ".markdown", ".txt", ".html", ".htm", ".rtf", ".csv", ".tsv", ".json", ".jsonl",
-  ".docx", ".odt", ".pptx", ".odp", ".epub", ".pdf",
-  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".heic",
-  ".mp3", ".wav", ".m4a", ".aiff", ".aac", ".mp4", ".mov", ".m4v", ".webm",
+  ".log", ".xml", ".yaml", ".yml", ".docx", ".doc", ".xlsx", ".xls", ".odt", ".pptx", ".ppt",
+  ".odp", ".pages", ".numbers", ".key", ".epub", ".eml", ".ics", ".webarchive", ".pdf",
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif",
+  ".mp3", ".wav", ".m4a", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr",
+  ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi",
   ".vtt", ".srt", ".url"
 ]);
 
 export const ASSET_SOURCE_EXTENSIONS = new Set([
-  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".heic",
-  ".mp3", ".wav", ".m4a", ".aiff", ".aac", ".mp4", ".mov", ".m4v", ".webm"
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif",
+  ".mp3", ".wav", ".m4a", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr",
+  ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"
 ]);
 
 export function isStage3Ingestible(file) {

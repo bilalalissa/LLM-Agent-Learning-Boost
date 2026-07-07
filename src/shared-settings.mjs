@@ -78,7 +78,7 @@ export function writeSharedSettings(vaultPath, config, input) {
 export function sharedSettingsSummary(config) {
   return listVaults(config.vaultsRoot).map((vaultPath) => ({
     vault: vaultName(vaultPath),
-    settings: ensureSharedSettings(vaultPath, config)
+    settings: defaultSharedSettings(config)
   }));
 }
 
@@ -101,7 +101,7 @@ export function updateSharedSettingsForVault(config, name, input) {
 export function listBridgeVaults(config) {
   return listVaults(config.vaultsRoot).map((vaultPath) => ({
     name: vaultName(vaultPath),
-    sharedSettings: ensureSharedSettings(vaultPath, config)
+    sharedSettings: defaultSharedSettings(config)
   }));
 }
 

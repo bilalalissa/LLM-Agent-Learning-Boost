@@ -5,7 +5,7 @@ import { isIngestibleRawFile, listVaults, readIfExists, vaultName } from "./vaul
 export function listFileHistory(config) {
   const records = [];
   for (const vaultPath of listVaults(config.vaultsRoot)) {
-    records.push(...recordsFromVault(vaultPath));
+    records.push(...recordsFromLog(vaultPath));
   }
   return records
     .sort((a, b) => b.processedAtMs - a.processedAtMs)
@@ -20,7 +20,7 @@ export function listFileHistory(config) {
 export function listArchiveHistory(config) {
   const records = [];
   for (const vaultPath of listVaults(config.vaultsRoot)) {
-    records.push(...archiveRecordsFromVault(vaultPath));
+    records.push(...archiveRecordsFromLog(vaultPath));
   }
   return records
     .sort((a, b) => b.archivedAtMs - a.archivedAtMs)
@@ -31,11 +31,68 @@ export function listArchiveHistory(config) {
     }));
 }
 
+function recordsFromLog(vaultPath) {
+  const log = readIfExists(path.join(vaultPath, "log.md"));
+  if (!log) return [];
+  const records = [];
+  const sections = log.split(/\n(?=## \[\d{4}-\d{2}-\d{2}\] )/);
+  for (const section of sections) {
+    const header = section.match(/^## \[(\d{4}-\d{2}-\d{2})\]\s+ingest\s+\|\s+(.+)$/m);
+    if (!header) continue;
+    const date = header[1];
+    const title = header[2].trim();
+    const sourcePage = matchFirst(section, /source summary `([^`]+)`/i);
+    const processedRel = matchFirst(section, /Sources:\s*\n-\s*`([^`]+)`/i) ||
+      matchFirst(section, /moved to `([^`]+)`/i);
+    if (!processedRel) continue;
+    const receivedAt = matchFirst(section, /Received at:\s*([^\n]+)/i);
+    const processedAt = matchFirst(section, /Processed at:\s*([^\n]+)/i);
+    const processedAtMs = parseLocalDateMs(processedAt) || Date.parse(date) || 0;
+    const receivedAtMs = parseLocalDateMs(receivedAt) || Date.parse(date) || processedAtMs;
+    records.push({
+      vault: vaultName(vaultPath),
+      file: processedRel,
+      sourcePage: sourcePage || sourcePageFromProcessedRel(processedRel, title),
+      status: sourcePage ? "processed" : "processed from log",
+      receivedAtMs,
+      processedAtMs
+    });
+  }
+  return dedupeBy(records, (record) => `${record.vault}|${record.file}`);
+}
+
+function archiveRecordsFromLog(vaultPath) {
+  const log = readIfExists(path.join(vaultPath, "log.md"));
+  if (!log) return [];
+  const records = [];
+  const sections = log.split(/\n(?=## \[\d{4}-\d{2}-\d{2}\] )/);
+  for (const section of sections) {
+    const header = section.match(/^## \[(\d{4}-\d{2}-\d{2})\]\s+maintenance\s+\|\s+(Archive|Permanently delete|Restore)\b.*$/im);
+    if (!header) continue;
+    const archivedAtMs = Date.parse(header[1]) || 0;
+    const archivedLines = [...section.matchAll(/(?:Archived|Deleted archived file|Restored archived file)[^`]*`([^`]+)`(?:\s+to\s+`([^`]+)`)*/gi)];
+    for (const match of archivedLines) {
+      const from = match[1];
+      const to = match[2] || "";
+      const file = to || from;
+      if (!isArchiveRel(file) && !isArchiveRel(from)) continue;
+      records.push({
+        vault: vaultName(vaultPath),
+        kind: archiveKindFromRel(file || from),
+        file,
+        relation: archiveRelationFromRel(file || from),
+        archivedAtMs
+      });
+    }
+  }
+  return dedupeBy(records, (record) => `${record.vault}|${record.file}`);
+}
+
 function recordsFromVault(vaultPath) {
   const sourcePages = mapSourcePages(vaultPath);
   const files = [];
   for (const dir of [path.join(vaultPath, "raw", "processed"), path.join(vaultPath, "raw", "assets")]) {
-    if (fs.existsSync(dir)) walk(dir, files);
+    if (fs.existsSync(dir)) walk(dir, files, { maxFiles: 500, deadlineMs: Date.now() + 2500 });
   }
   return files
     .filter((file) => isIngestibleRawFile(file))
@@ -70,7 +127,7 @@ function mapSourcePages(vaultPath) {
   const sourceDir = path.join(vaultPath, "wiki", "sources");
   const map = new Map();
   const files = [];
-  if (fs.existsSync(sourceDir)) walk(sourceDir, files);
+  if (fs.existsSync(sourceDir)) walk(sourceDir, files, { maxFiles: 1000, deadlineMs: Date.now() + 2500 });
   for (const file of files.filter((item) => item.endsWith(".md"))) {
     const text = readIfExists(file);
     const match = text.match(/^source_path:\s*(.+)$/m);
@@ -90,7 +147,7 @@ function archiveRecordsFromVault(vaultPath) {
   const records = [];
   for (const root of roots) {
     const files = [];
-    if (fs.existsSync(root.dir)) walk(root.dir, files);
+    if (fs.existsSync(root.dir)) walk(root.dir, files, { maxFiles: 500, deadlineMs: Date.now() + 2500 });
     for (const file of files.filter((item) => isIngestibleRawFile(item))) {
       const stats = fs.statSync(file);
       records.push({
@@ -103,6 +160,61 @@ function archiveRecordsFromVault(vaultPath) {
     }
   }
   return records;
+}
+
+function matchFirst(text, pattern) {
+  return text.match(pattern)?.[1]?.trim() || "";
+}
+
+function sourcePageFromProcessedRel(processedRel, title) {
+  const base = path.basename(processedRel, path.extname(processedRel));
+  return `wiki/sources/${base || slugTitle(title)}.md`;
+}
+
+function slugTitle(value) {
+  return String(value || "source")
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120) || "source";
+}
+
+function parseLocalDateMs(value) {
+  const text = String(value || "").trim();
+  if (!text) return 0;
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{2}):(\d{2}):(\d{2}))?/);
+  if (!match) return Date.parse(text) || 0;
+  const [, year, month, day, hour = "00", minute = "00", second = "00"] = match;
+  return new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second)).getTime();
+}
+
+function dedupeBy(records, keyFn) {
+  const seen = new Set();
+  return records.filter((record) => {
+    const key = keyFn(record);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function isArchiveRel(rel) {
+  return String(rel || "").includes("/archive/") || String(rel || "").startsWith("wiki/archive/");
+}
+
+function archiveKindFromRel(rel) {
+  const value = String(rel || "");
+  if (value.startsWith("wiki/")) return "wiki page";
+  if (value.startsWith("raw/assets/")) return "media source";
+  return "raw source";
+}
+
+function archiveRelationFromRel(rel) {
+  const value = String(rel || "");
+  if (value.startsWith("wiki/archive/sources/")) return sourceSetLabel(value);
+  if (value.startsWith("raw/processed/archive/")) return sourceSetLabel(value);
+  return "Archive-only item";
 }
 
 function archiveRelation(vaultPath, file, kind) {
@@ -123,11 +235,21 @@ function sourceSetLabel(value) {
   return base ? `Source set: ${base}` : "Archive-only item";
 }
 
-function walk(dir, result) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+function walk(dir, result, options = {}) {
+  if (options.deadlineMs && Date.now() > options.deadlineMs) return;
+  if (options.maxFiles && result.length >= options.maxFiles) return;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (options.deadlineMs && Date.now() > options.deadlineMs) return;
+    if (options.maxFiles && result.length >= options.maxFiles) return;
     const file = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      walk(file, result);
+      walk(file, result, options);
     } else {
       result.push(file);
     }

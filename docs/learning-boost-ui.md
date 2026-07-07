@@ -102,11 +102,15 @@ Verified outputs are:
 
 ## Tab Loading
 
-Files, Archive, and Topics show explicit index states instead of ambiguous empty tables. During a first scan they show loading. If stale rows exist, those rows stay visible while the refresh runs. If the scan finishes with no rows, the tab shows an empty state. If the scan stalls or fails, the tab shows a retry control.
+Files, Archive, and Topics show explicit index states instead of ambiguous empty tables. During a first scan they show loading. If stale rows exist, those rows stay visible while the refresh runs. If the scan finishes with no rows, the tab shows an empty state. If the scan stalls or fails, the tab shows a retry control instead of polling forever.
+
+The file-list endpoints return `ready`, `ready_empty`, `stale_refreshing`, `loading`, or `error`. The UI uses fetch timeouts so slow capture scans or background ingest work do not leave a table stuck on `Loading...`.
 
 ## Capture Scan Status
 
 Source Capture includes Scan capture sources now. It runs safe local collectors for enabled watch folders, screenshot folders, ResourceInbox staging status, and preview-safe opened-document metadata when explicitly enabled. It shows captured, duplicate, skipped, and last-scan counts so enabled capture controls have visible feedback.
+
+Skipped files are grouped by collector, extension, reason, count, and sample filenames. Common document, image, media, subtitle, URL, and text/data formats are queued as best-effort sources when readable. Files that cannot be copied because of iCloud or macOS permissions stay visible as per-file blockers instead of stopping the app.
 
 The scan does not silently start live screen recording, broad browser history import, or full monitoring.
 

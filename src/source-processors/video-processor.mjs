@@ -2,7 +2,7 @@ import path from "node:path";
 import { mediaMetadata, readSidecarTranscript } from "./audio-processor.mjs";
 
 export function canProcessVideoSource(file) {
-  return new Set([".mp4", ".mov", ".m4v", ".webm"]).has(path.extname(file).toLowerCase());
+  return new Set([".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"]).has(path.extname(file).toLowerCase());
 }
 
 export function processVideoSource(file, options = {}) {

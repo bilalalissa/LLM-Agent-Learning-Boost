@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { trackBehaviorEvent } from "./behavior-tracker.mjs";
 import { learningPageDir, learningPaths } from "./learning-store.mjs";
@@ -65,7 +66,7 @@ export function normalizeSourceCaptureSettings(input = {}) {
     enabled: input.enabled === true,
     fullLocalCaptureMode: full,
     manualImport: input.manualImport !== false,
-    watchFolders: normalizeList(input.watchFolders),
+    watchFolders: normalizeList(input.watchFolders).map(expandTilde),
     browserClipper: input.browserClipper !== false,
     autoProcessCapturedResources,
     browserHistoryImport: full && input.browserHistoryImport === true,
@@ -395,7 +396,7 @@ function yamlString(value) {
 function preserveLocalFile(vaultPath, file, sourceType, input) {
   const text = String(file || "").trim();
   if (!text || !path.isAbsolute(text) || !fs.existsSync(text) || !fs.statSync(text).isFile()) return "";
-  const shouldCopy = input.contentApproved === true || ["screenshot", "voice_memo"].includes(sourceType);
+  const shouldCopy = ["screenshot", "voice_memo"].includes(sourceType);
   if (!shouldCopy) return "";
   const dir = path.join(vaultPath, "raw", "assets", "resource-capture");
   fs.mkdirSync(dir, { recursive: true });
@@ -541,6 +542,19 @@ function positiveNumber(value, fallback) {
 
 function stableId(prefix, value) {
   return `${prefix}-${slugify(String(value || "").slice(0, 140))}`;
+}
+
+function expandTilde(value) {
+  const text = String(value || "").trim();
+  if (text === "~") return os.homedir();
+  if (text.startsWith("~/")) return path.join(os.homedir(), text.slice(2));
+  if (!path.isAbsolute(text)) {
+    const [first, ...rest] = text.split(/[\\/]/).filter(Boolean);
+    if (["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures"].includes(first)) {
+      return path.join(os.homedir(), first, ...rest);
+    }
+  }
+  return text;
 }
 
 function sourceTypeLabel(sourceType) {

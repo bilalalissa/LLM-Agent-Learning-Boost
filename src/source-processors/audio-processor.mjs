@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { normalizeTranscriptText } from "./text-processor.mjs";
 
 export function canProcessAudioSource(file) {
-  return new Set([".mp3", ".wav", ".m4a", ".aiff", ".aac"]).has(path.extname(file).toLowerCase());
+  return new Set([".mp3", ".wav", ".m4a", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr"]).has(path.extname(file).toLowerCase());
 }
 
 export function processAudioSource(file, options = {}) {

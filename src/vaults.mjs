@@ -3,10 +3,22 @@ import os from "node:os";
 import path from "node:path";
 
 export function listVaults(root) {
+  const registryVaults = listObsidianVaults();
+  const rootVaults = shouldScanVaultsRoot(root, registryVaults) ? listVaultsUnderRoot(root) : [];
   return uniquePaths([
-    ...listVaultsUnderRoot(root),
-    ...listObsidianVaults()
+    ...rootVaults,
+    ...registryVaults
   ]).sort((a, b) => vaultName(a).localeCompare(vaultName(b), undefined, { sensitivity: "base" }));
+}
+
+function shouldScanVaultsRoot(root, registryVaults) {
+  if (process.env.LLM_WIKI_SCAN_VAULTS_ROOT === "1") return true;
+  const resolvedRoot = path.resolve(expandTilde(root || "."));
+  if (!registryVaults.length) return true;
+  return !registryVaults.some((vaultPath) => {
+    const resolvedVault = path.resolve(vaultPath);
+    return resolvedVault === resolvedRoot || resolvedVault.startsWith(resolvedRoot + path.sep);
+  });
 }
 
 function listVaultsUnderRoot(root) {
@@ -46,6 +58,7 @@ function isDirectory(file) {
 
 function readJson(file) {
   try {
+    traceFileRead(file);
     return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
     return null;
@@ -93,7 +106,18 @@ export function readVaultLog(vaultPath) {
 }
 
 export function readIfExists(file) {
+  traceFileRead(file);
   return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+}
+
+function traceFileRead(file) {
+  const traceFile = process.env.LLM_WIKI_WORKER_TRACE_FILE;
+  if (!traceFile) return;
+  try {
+    fs.appendFileSync(traceFile, `${new Date().toISOString()} read ${file}\n`, "utf8");
+  } catch {
+    // Trace logging must never block normal vault operations.
+  }
 }
 
 export function ensureDir(dir) {
@@ -120,15 +144,25 @@ export function listRawCandidates(vaultPath) {
   const rawDir = path.join(vaultPath, "raw");
   if (!fs.existsSync(rawDir)) return [];
   const result = [];
-  for (const entry of fs.readdirSync(rawDir, { withFileTypes: true })) {
-    const file = path.join(rawDir, entry.name);
-    if (entry.isFile() && isIngestibleRawFile(file)) result.push(file);
-  }
+  collectDirectRawFiles(rawDir, result);
   for (const folder of ["inbox", "input"]) {
     const dir = path.join(rawDir, folder);
-    if (isDirectory(dir)) walkRawCandidates(rawDir, dir, result);
+    if (isDirectory(dir)) collectDirectRawFiles(dir, result);
   }
   return result;
+}
+
+function collectDirectRawFiles(dir, result) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const file = path.join(dir, entry.name);
+    if (entry.isFile() && isIngestibleRawFile(file)) result.push(file);
+  }
 }
 
 const ingestibleExtensions = new Set([
@@ -140,30 +174,54 @@ const ingestibleExtensions = new Set([
   ".rtf",
   ".csv",
   ".tsv",
+  ".log",
+  ".xml",
+  ".yaml",
+  ".yml",
   ".json",
   ".jsonl",
   ".docx",
+  ".doc",
+  ".xlsx",
+  ".xls",
   ".odt",
   ".pptx",
+  ".ppt",
   ".odp",
+  ".pages",
+  ".numbers",
+  ".key",
   ".epub",
+  ".eml",
+  ".ics",
+  ".webarchive",
   ".png",
   ".jpg",
   ".jpeg",
   ".gif",
   ".webp",
+  ".bmp",
+  ".tif",
+  ".tiff",
   ".svg",
   ".heic",
+  ".heif",
   ".pdf",
   ".mp3",
   ".wav",
   ".m4a",
   ".aiff",
   ".aac",
+  ".flac",
+  ".ogg",
+  ".opus",
+  ".amr",
   ".mp4",
   ".mov",
   ".m4v",
   ".webm",
+  ".mkv",
+  ".avi",
   ".vtt",
   ".srt",
   ".url"
@@ -183,13 +241,27 @@ export function isTextRawFile(file) {
     ".rtf",
     ".csv",
     ".tsv",
+    ".log",
+    ".xml",
+    ".yaml",
+    ".yml",
     ".json",
     ".jsonl",
     ".docx",
+    ".doc",
+    ".xlsx",
+    ".xls",
     ".odt",
     ".pptx",
+    ".ppt",
     ".odp",
+    ".pages",
+    ".numbers",
+    ".key",
     ".epub",
+    ".eml",
+    ".ics",
+    ".webarchive",
     ".pdf",
     ".vtt",
     ".srt",
@@ -207,19 +279,6 @@ function walk(dir, result) {
     if (entry.isDirectory()) {
       walk(file, result);
     } else {
-      result.push(file);
-    }
-  }
-}
-
-function walkRawCandidates(rawDir, dir, result) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const file = path.join(dir, entry.name);
-    const rel = path.relative(rawDir, file);
-    if (entry.isDirectory()) {
-      if (rel === "processed" || rel === "assets") continue;
-      walkRawCandidates(rawDir, file, result);
-    } else if (isIngestibleRawFile(file)) {
       result.push(file);
     }
   }

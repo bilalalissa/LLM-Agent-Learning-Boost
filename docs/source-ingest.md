@@ -2,6 +2,17 @@
 
 Source ingest turns files in each vault's `raw/` folder into source pages under `wiki/sources/`.
 
+The automatic flow now has two local-first entry points:
+
+- files already placed in `raw/`, `raw/inbox/`, or `raw/input/`;
+- approved ResourceInbox items queued into `raw/input/` before ingest.
+
+Approved local ResourceInbox files are copied into `raw/input/` with stable dedupe metadata. The original file is not deleted. URL-only or metadata-only resources are queued as traceable Markdown notes until a richer local capture path is available.
+
+User-selected watch folders can feed this queue. The watch-folder collector filters to supported ingest extensions, skips unsafe or unsupported paths with grouped visible reasons, and dedupes repeated scans by path, size, and modified time. Common relative folder names such as `Downloads` are normalized to the user's home folder.
+
+Opened documents can also feed the queue after preview approval. Metadata-only previews stay in ResourceInbox as `needs_review`; approved local document paths are copied into `raw/input/` by the same ResourceInbox queue.
+
 ## Supported Inputs
 
 - text and Markdown
@@ -12,6 +23,8 @@ Source ingest turns files in each vault's `raw/` folder into source pages under 
 - audio and voice memos
 - video files and transcript files
 - remote video URLs when transcript tools can provide source text
+
+Best-effort capture also queues common legacy or app-specific files such as `.doc`, `.xls`, `.ppt`, `.pages`, `.numbers`, `.key`, `.eml`, `.ics`, `.webarchive`, `.heif`, `.flac`, `.mkv`, `.log`, `.xml`, `.yaml`, and `.url`. If extraction is incomplete, the source remains pending or records a clear limitation instead of being marked fully processed.
 
 ## Learning Outputs
 

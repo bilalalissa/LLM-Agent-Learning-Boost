@@ -75,14 +75,60 @@ The scan reports:
 - last scan time
 - captured count
 - duplicate count
-- skipped count and reasons
+- skipped count grouped by reason and extension
+- watch folders scanned
+- watch-folder files discovered
+- watch-folder files queued
+- watch-folder files skipped and why
 - the next safe action
 
 Current safe scans include configured watch folders, screenshot folders when screenshots are explicitly enabled, ResourceInbox staging status, and preview-safe opened-document metadata when that option is explicitly enabled.
 
 The scan does not silently start live screen recording, broad browser history import, clipboard monitoring, visited-page monitoring, or frontmost-app monitoring. Those broader collectors remain confirmation-gated by Full Local Capture Mode and expanded monitoring.
 
-If `autoProcessCapturedResources` is enabled, new captured resources can be staged into `raw/input/` and processed after the scan when the selected provider is ready. If it is disabled, captured resources stay visible in ResourceInbox for manual review.
+If `autoProcessCapturedResources` is enabled, new approved captured resources can be queued into `raw/input/` and processed after the scan when the selected provider is ready. If it is disabled, captured resources stay visible in ResourceInbox for manual review.
+
+## Watch Folders
+
+Watch folders are normal capture only when source capture is enabled and the folder path is explicitly configured by the user. Paths beginning with `~/` are expanded to the local home folder.
+
+By default, watch folders scan direct files only. Enable recursive watch-folder scanning only for folders that are intentionally scoped for Learning Boost.
+
+The collector normalizes common relative folders such as `Downloads` to the local home folder, for example `/Users/ba/Downloads`. This avoids accidentally scanning from the app's working directory.
+
+The collector queues best-effort sources for common formats instead of silently ignoring them:
+
+- Documents: `.pdf`, `.docx`, `.doc`, `.xlsx`, `.xls`, `.pptx`, `.ppt`, `.pages`, `.numbers`, `.key`, `.rtf`, `.html`, `.htm`, `.webarchive`, `.eml`, `.ics`.
+- Text and data: `.md`, `.markdown`, `.txt`, `.log`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.xml`, `.yaml`, `.yml`, `.srt`, `.vtt`, `.url`.
+- Images: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`, `.tif`, `.tiff`, `.heic`, `.heif`.
+- Media: `.mp3`, `.m4a`, `.wav`, `.flac`, `.ogg`, `.opus`, `.amr`, `.mp4`, `.mov`, `.m4v`, `.webm`, `.mkv`, `.avi`.
+
+When full extraction is not available, the item can still become a pending media or metadata source with a clear limitation. It is not marked fully processed until extraction and provider analysis actually succeed.
+
+Unsupported files, missing folders, unreadable files, files already in `raw/processed`, and files in capture output asset folders are skipped with a visible grouped reason in scan status. Instead of repeating `Unsupported file type` hundreds of times, the UI groups skipped files by collector, extension, reason, count, and sample filenames.
+
+Watch-folder dedupe uses local path, file size, and modified time. Repeated scans do not keep re-adding the same file. In the default `ready_for_ingest` mode, supported files in an explicitly selected watch folder are approved for local queueing into `raw/input/`. In `needs_review` mode, the file is recorded in ResourceInbox but is not copied into `raw/input/` until approved later.
+
+Copy failures, including iCloud or macOS permission errors such as `EPERM`, are recorded on that one ResourceInbox item. They do not stop the entire app or block other tabs from loading. Fix the file permission, move the file to a readable local folder, or choose a different watch folder, then scan again.
+
+## Screenshot and Media Privacy
+
+Screenshot capture is disabled by default. When enabled, Learning Boost scans only configured local folders and preserves readable image files as local evidence. It does not start live screen recording, attach to browser sessions, or call cloud services during the safe scan.
+
+Image, audio, and video files are queued as best-effort local sources when their extension is supported. If Learning Boost can only preserve metadata, the resulting pending source says that the content still needs local inspection or provider analysis. It is not marked fully processed until extraction and provider analysis succeed.
+
+## Opened Documents
+
+Opened-document detection is broad local capture. It is disabled unless Source Capture, Full Local Capture Mode, and `openedDocuments` are all enabled.
+
+The collector has two layers:
+
+- metadata preview: frontmost/source app name, document title, optional local file path, and timestamp;
+- approved content capture: only after preview approval, a local file path can be queued into `raw/input/`.
+
+The app uses macOS AppleScript best-effort metadata discovery. Some apps do not expose a document path, and macOS may require Automation or Accessibility permission before a frontmost document can be inspected. If discovery is unavailable, the scan reports why instead of crashing.
+
+The manual fallback is the `Opened document file path` field in Source Capture. Paste or choose the current document path, then click `Approve opened document file`. This records explicit approval and keeps the original file in place.
 
 ## ResourceInbox
 

@@ -26,6 +26,38 @@ npm run check
 
 Confirm the source is in `raw/`, the provider is available, and the source type is supported by local extractors.
 
+## Watch Folder Files Do Not Ingest
+
+Check Source Capture settings:
+
+- Source Capture must be enabled.
+- The folder must be explicitly listed in `watchFolders`.
+- Relative common folder names such as `Downloads` are normalized to your home folder, for example `/Users/ba/Downloads`.
+- The file extension must be supported by raw ingest. Common documents, images, audio/video, subtitle, URL, and text/data files are queued as best-effort sources.
+- By default, only direct files are scanned. Enable recursive watch-folder scanning only for intentionally scoped folders.
+- Files under the vault's `raw/processed` or capture output folders are skipped to avoid loops.
+
+The Learning tab scan status reports folders scanned, files discovered, files queued, and skipped reasons. Skipped files are grouped by reason and extension with sample filenames, so a large folder does not produce hundreds of identical messages.
+
+Approved watch-folder files are copied into `raw/input/`; originals are not deleted. If macOS or iCloud blocks the copy with `EPERM` or another permission error, Learning Boost records that one file as blocked and continues scanning. Move the file to a readable local folder, adjust macOS Files and Folders permission, or choose a narrower watch folder, then scan again.
+
+## Opened Documents Are Not Detected
+
+Opened-document capture is broad local capture. It requires:
+
+- Source Capture enabled.
+- Full Local Capture Mode enabled.
+- Opened-document detection enabled.
+- Preview approval before content is queued.
+
+macOS may require Automation or Accessibility permission, and some apps do not expose a local document path. Use the Source Capture manual fallback by entering the current document file path and approving it for local ingest.
+
+## Screenshot Or Media Capture Is Limited
+
+Safe capture scans do not start live screen recording or attach to private browser sessions. They only inspect configured local folders and approved ResourceInbox items.
+
+If an image, audio, or video file is captured but not fully analyzed, check the generated source note for the limitation. Learning Boost keeps the file local and records metadata until extraction and the selected provider can produce grounded analysis.
+
 ## RemNote Export Requires Confirmation
 
 Large exports are blocked until confirmed:

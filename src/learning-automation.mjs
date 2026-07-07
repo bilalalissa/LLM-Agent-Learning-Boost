@@ -4,12 +4,12 @@ import { trackBehaviorEvent } from "./behavior-tracker.mjs";
 import { ingestVault } from "./ingest-lib.mjs";
 import { draftLearningPlans, readLearningPlans } from "./learning-planner.mjs";
 import { learningPaths } from "./learning-store.mjs";
+import { queueResourceInboxForIngestAsync } from "./source-capture-ingest.mjs";
 import { suggestPlanUpdates } from "./plan-update-suggester.mjs";
 import {
   markResourceIngestResults,
   readSourceCaptureSettings,
-  resourceInbox,
-  stageResourcesForIngest
+  resourceInbox
 } from "./source-capture.mjs";
 import { listRawCandidates, vaultName } from "./vaults.mjs";
 
@@ -85,7 +85,7 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
   const sourceSettings = readSourceCaptureSettings(vaultPath);
   const started = new Date();
   const staged = settings.autoProcessNewSources && sourceSettings.autoProcessCapturedResources !== false
-    ? stageResourcesForIngest(vaultPath, { limit: options.resourceLimit || 12 })
+    ? await queueResourceInboxForIngestAsync(vaultPath, { limit: options.resourceLimit || 12 })
     : { staged: [] };
   const rawBefore = listRawCandidates(vaultPath);
 

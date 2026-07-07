@@ -85,6 +85,9 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /button\.learning-chip:disabled/);
   assert.ok(serverSource.includes(".learning-stepper li { position: relative; display: block;"));
   assert.ok(serverSource.includes(".learning-flow-lane li { display: block;"));
+  assert.match(serverSource, /\.learning-stepper button \{[^}]*overflow-wrap: normal/);
+  assert.match(serverSource, /\.learning-flow-lane button \{[^}]*overflow-wrap: normal/);
+  assert.doesNotMatch(serverSource, /\.learning-jump, \.learning-target-button \{[^}]*overflow-wrap: anywhere/);
   assert.ok(!serverSource.includes(".learning-stepper li { position: relative; display: grid; grid-template-columns: 28px"));
   assert.ok(!serverSource.includes(".learning-flow-lane li { display: grid; grid-template-columns: 28px"));
   assert.match(serverSource, /Review due cards/);
@@ -113,6 +116,10 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /api\/learning\/capture-scan/);
   assert.match(serverSource, /Scan capture sources now/);
   assert.match(serverSource, /capture-scan-status/);
+  assert.match(serverSource, /Skipped files by reason/);
+  assert.match(serverSource, /groupSkippedForDisplay/);
+  assert.match(serverSource, /skippedGroups/);
+  assert.match(serverSource, /Documents, images, audio\/video, subtitles/);
   assert.match(serverSource, /runLearningCaptureScan/);
   assert.match(serverSource, /collectWatchFolderResources/);
   assert.match(serverSource, /collectScreenshots/);
@@ -149,7 +156,8 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.doesNotMatch(serverSource, /providerForAutoIngest/);
   assert.doesNotMatch(serverSource, /openAiCompatForAutoIngest/);
   assert.doesNotMatch(serverSource, /Using Local AI Router .* for background ingest/);
-  assert.match(serverSource, /runLearningAutomationForVault\(vault, \{ config, provider \}\)/);
+  assert.match(serverSource, /runAutoIngestWorker/);
+  assert.match(serverSource, /auto-ingest-worker\.mjs/);
   assert.match(serverSource, /Auto-ingest blocked/);
   assert.match(serverSource, /\.provider-grid \.inline-toggle/);
   assert.match(serverSource, /Revise Plans And Goals/);
@@ -161,7 +169,7 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /learning-flowchart/);
   assert.match(serverSource, /learning-map-grid/);
   assert.match(serverSource, /repeat\(auto-fit, minmax\(min\(260px, 100%\), 1fr\)\)/);
-  assert.match(serverSource, /repeat\(auto-fit, minmax\(min\(240px, 100%\), 1fr\)\)/);
+  assert.match(serverSource, /repeat\(auto-fit, minmax\(min\(280px, 100%\), 1fr\)\)/);
   assert.match(serverSource, /overflow: visible/);
   assert.match(serverSource, /learning-study-card-face\.back \{ display: none/);
   assert.match(serverSource, /source_linked_to_learning/);

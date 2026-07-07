@@ -4,7 +4,7 @@ import path from "node:path";
 const transcriptExtensions = new Set([".vtt", ".srt"]);
 
 export function canProcessTextSource(file) {
-  return new Set([".md", ".markdown", ".txt", ".csv", ".tsv", ".json", ".jsonl", ".vtt", ".srt", ".url"]).has(path.extname(file).toLowerCase());
+  return new Set([".md", ".markdown", ".txt", ".csv", ".tsv", ".log", ".xml", ".yaml", ".yml", ".json", ".jsonl", ".vtt", ".srt", ".url"]).has(path.extname(file).toLowerCase());
 }
 
 export function processTextSource(file, options = {}) {

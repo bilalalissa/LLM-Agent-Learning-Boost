@@ -127,7 +127,7 @@ Files, Archive, Topics, and the side Topics list report explicit loading states:
 - `stale_refreshing`: cached rows remain visible while a background refresh runs.
 - `error`: indexing failed or timed out.
 
-The app no longer treats a loading index as “No processed files yet.” If indexing takes too long, a retry control appears instead of polling forever.
+The app no longer treats a loading index as “No processed files yet.” If indexing takes too long, a retry control appears instead of polling forever. Slow capture scans and background ingest work are kept off the main tab-loading path so these lists can stay responsive.
 
 ## Plans And Goals
 
@@ -171,7 +171,9 @@ Plans begin as `proposed`. Approval and activation require explicit confirmation
 
 Use Add Resource for a URL, file path, topic, and source type. Browser clipper sources and manual resources enter ResourceInbox first, then are staged into `raw/input/` when auto-processing is enabled.
 
-`Scan capture sources now` runs the enabled safe collectors and shows a visible status: enabled collectors, last scan time, captured count, duplicate count, skipped count with reasons, and the next safe action. Current safe scans cover configured watch folders, screenshot folders when explicitly enabled, ResourceInbox status, and preview-safe opened-document metadata when explicitly enabled.
+`Scan capture sources now` runs the enabled safe collectors and shows a visible status: enabled collectors, last scan time, captured count, duplicate count, skipped count grouped by reason and extension, and the next safe action. Current safe scans cover configured watch folders, screenshot folders when explicitly enabled, ResourceInbox status, and preview-safe opened-document metadata when explicitly enabled.
+
+Watch folders queue best-effort sources for common documents, images, media, subtitles, local URL files, and text/data files. If full extraction is not possible, the source remains pending with a clear limitation. Unsupported or unreadable files are grouped by extension and reason with sample filenames. Copy failures from iCloud or macOS permissions are recorded on the individual file and do not stop the whole app.
 
 This scan does not start live screen recording, broad browser history capture, or silent monitoring. Full Local Capture Mode and expanded monitoring are opt-in. They can include broader local signals, so the app asks before enabling them.
 

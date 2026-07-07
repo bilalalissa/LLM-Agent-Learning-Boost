@@ -282,7 +282,9 @@ Safe default:
 
 Full Local Capture Mode is intentionally confirmation-gated. Enable it only if you want broader local activity capture and understand what sources may be indexed locally.
 
-Click Scan capture sources now to see what enabled local collectors can find. The scan reports enabled collectors, last scan time, captured count, duplicates, skipped items with reasons, and the next safe action. It checks configured watch folders, screenshot folders when explicitly enabled, ResourceInbox status, and preview-safe opened-document metadata when explicitly enabled. It does not silently start live screen recording, broad browser history import, clipboard monitoring, or full monitoring.
+Click Scan capture sources now to see what enabled local collectors can find. The scan reports enabled collectors, last scan time, captured count, duplicates, skipped items grouped by reason and extension, and the next safe action. It checks configured watch folders, screenshot folders when explicitly enabled, ResourceInbox status, and preview-safe opened-document metadata when explicitly enabled. It does not silently start live screen recording, broad browser history import, clipboard monitoring, or full monitoring.
+
+Watch folder scans now queue common documents, images, media, subtitles, local URL files, and text/data files as best-effort sources. If hundreds of files are skipped, the status card groups them by extension and reason with sample filenames so you can decide whether to narrow the folder, move a file, or add it manually. Permission or iCloud copy failures are shown as per-file blockers instead of stopping the whole app.
 
 ### Add Resource
 

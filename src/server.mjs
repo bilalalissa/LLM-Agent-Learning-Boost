@@ -1,7 +1,8 @@
 import http from "node:http";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { execFile, fork } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { deleteArchivedItems } from "./archive-delete.mjs";
 import { restoreArchivedItems } from "./archive-restore.mjs";
@@ -17,7 +18,6 @@ import {
   learningAutomationStatus,
   readLearningNotifications,
   recordLearningNotification,
-  runLearningAutomationForVault,
   updateAutomationSettings,
   updateLearningNotificationAction
 } from "./learning-automation.mjs";
@@ -36,7 +36,8 @@ import { createProvider } from "./provider.mjs";
 import { providerStatus } from "./provider-status.mjs";
 import { recordPlanUpdateChoice, suggestPlanUpdates } from "./plan-update-suggester.mjs";
 import { preflightStatus } from "./preflight.mjs";
-import { queueResourceInboxForIngest } from "./source-capture-ingest.mjs";
+import { queueResourceInboxForIngestAsync } from "./source-capture-ingest.mjs";
+import { listArchiveHistory, listFileHistory } from "./history.mjs";
 import {
   remoteResearch,
   saveRemoteSourcesToResourceInbox,
@@ -60,8 +61,7 @@ import {
 import { collectScreenshots } from "./source-collectors/screenshots-collector.mjs";
 import { collectWatchFolderResources } from "./source-collectors/watch-folder-collector.mjs";
 import { topicContentAsync } from "./topic-content.mjs";
-import { listRawCandidates, listVaults, vaultName } from "./vaults.mjs";
-import { bootstrapVault } from "./vault-bootstrap.mjs";
+import { listVaults, readIfExists, vaultName } from "./vaults.mjs";
 
 let config = getConfig();
 let provider = createProvider(config);
@@ -75,6 +75,7 @@ let autoIngestTimer = null;
 let autoIngestIntervalMs = 0;
 let autoIngestStartTimer = null;
 let autoIngestBackoffUntil = 0;
+let autoIngestWorker = null;
 let lastIngestMessage = compactStatusMessage("Auto-ingest has not run yet.");
 let ingestProgress = {
   percent: 0,
@@ -97,8 +98,12 @@ const tabDataCache = {
   learning: cacheState()
 };
 const tabDataWorkers = new Map();
+const tabDataRefreshScheduled = new Set();
+const listTabKinds = new Set(["files", "archives", "topics"]);
+const tabCacheDir = path.join(os.homedir(), "Library", "Application Support", "LLM Agent Learning Boost", "tab-cache");
 const learningAutomationRuntime = new Map();
 const captureScanRuntime = new Map();
+const captureScanWorkers = new Map();
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
@@ -162,14 +167,14 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname === "/api/files") {
-    if (url.searchParams.get("refresh") === "1") scheduleTabDataRefresh("files", { force: true });
+    if (url.searchParams.get("refresh") === "1") refreshTabData("files", { force: true });
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(cachedTabPayload("files")));
     return;
   }
 
   if (request.method === "GET" && url.pathname === "/api/archives") {
-    if (url.searchParams.get("refresh") === "1") scheduleTabDataRefresh("archives", { force: true });
+    if (url.searchParams.get("refresh") === "1") refreshTabData("archives", { force: true });
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(cachedTabPayload("archives")));
     return;
@@ -264,7 +269,7 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname === "/api/topics") {
-    if (url.searchParams.get("refresh") === "1") scheduleTabDataRefresh("topics", { force: true });
+    if (url.searchParams.get("refresh") === "1") refreshTabData("topics", { force: true });
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(cachedTabPayload("topics")));
     return;
@@ -370,7 +375,17 @@ const server = http.createServer(async (request, response) => {
       const payload = JSON.parse(body || "{}");
       vaultPath = resolveLearningVaultPath(payload.vault);
       setAutomationRuntime(vaultPath, { running: true, status: "processing", detail: "Processing pending learning sources..." });
-      const result = await runLearningAutomationForVault(vaultPath, { config, provider, force: payload.force === true, resourceLimit: payload.limit || 12 });
+      const workerResult = await runAutoIngestWorker({
+        vaultPath,
+        options: { force: payload.force === true, resourceLimit: payload.limit || 12 },
+        timeoutMs: Math.max(config.providerTimeoutMs || 60000, 90000)
+      });
+      const result = workerResult.vaults?.[0]?.automationResult || {
+        status: workerResult.status || "idle",
+        detail: workerResult.detail || "Learning automation finished.",
+        processed: workerResult.processed || 0,
+        results: []
+      };
       updateRuntimeFromAutomationResult(vaultPath, result);
       ingestProgress = progressState({
         completed: result.processed || 0,
@@ -398,11 +413,18 @@ const server = http.createServer(async (request, response) => {
     try {
       const vaultParam = url.searchParams.get("vault") || "";
       const pendingNativeOnly = url.searchParams.get("pendingNative") === "1";
-      const vaultPaths = vaultParam ? [resolveLearningVaultPath(vaultParam)] : listVaults(config.vaultsRoot);
-      const notifications = vaultPaths.flatMap((vaultPath) => readLearningNotifications(vaultPath, {
-        limit: Number(url.searchParams.get("limit") || 50),
+      const limit = Number(url.searchParams.get("limit") || 50);
+      if (!vaultParam) {
+        const payload = cachedLearningNotifications({ limit, pendingNativeOnly });
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(payload));
+        return;
+      }
+      const vaultPath = resolveLearningVaultPath(vaultParam);
+      const notifications = readLearningNotifications(vaultPath, {
+        limit,
         pendingNativeOnly
-      }).map((item) => ({ ...item, vault: vaultName(vaultPath) })));
+      }).map((item) => ({ ...item, vault: vaultName(vaultPath) }));
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ notifications }));
     } catch (error) {
@@ -532,7 +554,7 @@ const server = http.createServer(async (request, response) => {
       const body = await readBody(request);
       const payload = JSON.parse(body || "{}");
       const vaultPath = resolveLearningVaultPath(payload.vault);
-      const result = runLearningCaptureScan(vaultPath);
+      const result = await runLearningCaptureScanInWorker(vaultPath, { timeoutMs: 15000 });
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
     } catch (error) {
@@ -568,7 +590,7 @@ const server = http.createServer(async (request, response) => {
       const body = await readBody(request);
       const payload = JSON.parse(body || "{}");
       const vaultPath = resolveLearningVaultPath(payload.vault);
-      const staged = queueResourceInboxForIngest(vaultPath, { limit: payload.limit || 12 });
+      const staged = await queueResourceInboxForIngestAsync(vaultPath, { limit: payload.limit || 12 });
       if (!staged.staged.length) {
         ingestProgress = progressState({
           completed: 0,
@@ -1264,22 +1286,20 @@ const server = http.createServer(async (request, response) => {
 server.listen(config.chatPort, config.bridgeHost, () => {
   console.log(`LLM Agent Learning Boost UI: http://${config.bridgeHost}:${config.chatPort}`);
   void localAiRouterSupervisor.start();
+  ["files", "archives", "topics"].forEach((kind, index) => {
+    setTimeout(() => scheduleTabDataRefresh(kind), 250 + (index * 800));
+  });
   ensureAutoIngestScheduler();
 });
 
 async function startAutoIngest() {
   if (autoIngestTimer) return;
-  for (const vault of listVaults(config.vaultsRoot)) {
-    bootstrapVault(vault, config);
-    await yieldToServer();
-  }
   if (process.env.LLM_WIKI_BACKFILL_ON_START === "1") {
     const backfilled = backfillLearningSections(config);
     if (backfilled.length) {
       console.log(`[backfill] added learning sections to ${backfilled.length} wiki page${backfilled.length === 1 ? "" : "s"}`);
     }
   }
-  refreshChangedTabsAfterIngest();
   void runAutoIngest();
   autoIngestIntervalMs = config.watchIntervalMs;
   autoIngestTimer = setInterval(runAutoIngest, autoIngestIntervalMs);
@@ -1341,6 +1361,8 @@ function cacheState() {
 
 function cachedTabPayload(kind) {
   const state = tabDataCache[kind] || cacheState();
+  recoverStuckTabLoading(kind, state);
+  hydratePersistedTabCache(kind, state);
   const stale = isTabCacheStale(state);
   if ((!state.ready || stale) && !state.loading) scheduleTabDataRefresh(kind);
   const key = kind === "archives" ? "archives" : kind;
@@ -1349,12 +1371,107 @@ function cachedTabPayload(kind) {
     [key]: state.items,
     loading: status === "loading",
     status,
+    state: status,
     stale,
     error: state.error,
     lastStartedAt: state.lastStartedAt,
     lastFinishedAt: state.lastFinishedAt,
     updatedAt: state.updatedAt
   };
+}
+
+function recoverStuckTabLoading(kind, state) {
+  if (!state.loading || !state.lastStartedAt) return;
+  const started = Date.parse(state.lastStartedAt);
+  if (!Number.isFinite(started) || Date.now() - started < 15000) return;
+  state.loading = false;
+  if (!state.items.length) {
+    state.error = "Tab data scan did not finish. Showing cached rows if available; use Retry after iCloud finishes syncing.";
+  }
+  state.lastFinishedAt = new Date().toISOString();
+  const worker = tabDataWorkers.get(kind);
+  if (worker) {
+    worker.kill?.("SIGTERM");
+    tabDataWorkers.delete(kind);
+  }
+}
+
+function hydratePersistedTabCache(kind, state) {
+  if (!listTabKinds.has(kind) || state.items.length) return;
+  const persisted = readPersistedTabCache(kind);
+  if (!persisted?.items?.length) return;
+  state.items = persisted.items;
+  state.ready = true;
+  state.error = state.error || "";
+  state.updatedAt = persisted.updatedAt || new Date().toISOString();
+}
+
+function listTopicsFromFastIndexes(currentConfig) {
+  const topics = new Map();
+  for (const vaultPath of listVaults(currentConfig.vaultsRoot)) {
+    const vault = vaultName(vaultPath);
+    const index = readIfExists(path.join(vaultPath, "index.md"));
+    for (const line of index.split(/\r?\n/)) {
+      if (!line.startsWith("| [[")) continue;
+      const cells = line.split("|").map((cell) => cell.trim()).filter(Boolean);
+      if (cells.length < 4) continue;
+      const link = parseFastWikiLink(cells[0]);
+      if (!link) continue;
+      const key = `${vault}|${link.path}`;
+      if (!topics.has(key)) {
+        topics.set(key, {
+          vault,
+          title: link.title,
+          path: link.path,
+          type: cells[1],
+          summary: cells[2],
+          updated: cells[3],
+          tags: [],
+          created: "",
+          element: cells[1]
+        });
+      }
+    }
+  }
+  for (const record of listFileHistory(currentConfig)) {
+    if (!record.sourcePage) continue;
+    const rel = record.sourcePage.replace(/\.md$/i, "");
+    const key = `${record.vault}|${rel}`;
+    if (!topics.has(key)) {
+      topics.set(key, {
+        vault: record.vault,
+        title: titleFromFastPath(record.sourcePage),
+        path: rel,
+        type: "source",
+        summary: record.file || record.sourcePage,
+        updated: dateFromFastLocal(record.processedAt) || dateFromFastLocal(record.receivedAt),
+        tags: [],
+        created: dateFromFastLocal(record.receivedAt),
+        element: "source"
+      });
+    }
+  }
+  return [...topics.values()].sort((a, b) => a.title.localeCompare(b.title));
+}
+
+function parseFastWikiLink(cell) {
+  const match = String(cell || "").match(/\[\[([^|\]]+)(?:\|([^\]]+))?\]\]/);
+  if (!match) return null;
+  return {
+    path: match[1],
+    title: match[2] || titleFromFastPath(match[1])
+  };
+}
+
+function titleFromFastPath(value) {
+  return path.basename(String(value || ""), path.extname(String(value || "")))
+    .replace(/^\d{4}-\d{2}-\d{2}--/, "")
+    .replace(/-/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function dateFromFastLocal(value) {
+  return String(value || "").match(/\d{4}-\d{2}-\d{2}/)?.[0] || "";
 }
 
 function cachedLearningPayload() {
@@ -1371,18 +1488,45 @@ function cachedLearningPayload() {
   };
 }
 
+function cachedLearningNotifications(options = {}) {
+  const state = tabDataCache.learning || cacheState();
+  const stale = isTabCacheStale(state);
+  if ((!state.ready || stale) && !state.loading) scheduleTabDataRefresh("learning");
+  const limit = Number(options.limit || 50);
+  const pendingNativeOnly = options.pendingNativeOnly === true;
+  const notifications = (state.data?.vaults || [])
+    .flatMap((vault) => (vault.notifications || []).map((item) => ({ ...item, vault: vault.vault })))
+    .filter((item) => {
+      if (!pendingNativeOnly) return true;
+      return item.nativeDeliveryStatus === "pending" && Number(item.deliveryAttempts || 0) < 5;
+    })
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+    .slice(0, Number.isFinite(limit) && limit > 0 ? limit : 50);
+  return {
+    notifications,
+    loading: !state.ready || state.loading,
+    stale,
+    error: state.error,
+    updatedAt: state.updatedAt
+  };
+}
+
 function enrichLearningRuntime(data) {
-  const vaultPaths = listVaults(config.vaultsRoot);
   return {
     ...data,
     vaults: (data.vaults || []).map((item) => {
-      const vaultPath = vaultPaths.find((candidate) => vaultName(candidate) === item.vault);
-      if (!vaultPath) return item;
+      const runtime = learningAutomationRuntime.get(item.vault) || {};
       return {
         ...item,
-        automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)),
-        captureScan: captureScanRuntime.get(vaultName(vaultPath)) || null,
-        notifications: readLearningNotifications(vaultPath, { limit: 30 })
+        automation: {
+          ...(item.automation || {}),
+          ...runtime,
+          running: runtime.running === true || item.automation?.running === true,
+          status: runtime.status || item.automation?.status || "",
+          detail: runtime.detail || item.automation?.detail || ""
+        },
+        captureScan: captureScanRuntime.get(item.vault) || item.captureScan || null,
+        notifications: item.notifications || []
       };
     })
   };
@@ -1396,6 +1540,7 @@ function isTabCacheStale(state) {
 }
 
 function tabPayloadStatus(state, stale) {
+  if (state.error && state.items.length) return "stale_refreshing";
   if (state.error) return "error";
   if (state.items.length && state.loading) return "stale_refreshing";
   if (state.items.length && stale) return "stale_refreshing";
@@ -1458,7 +1603,12 @@ function refreshChangedTabsAfterIngest() {
 }
 
 function scheduleTabDataRefresh(kind, options = {}) {
-  setImmediate(() => refreshTabData(kind, options));
+  if (tabDataRefreshScheduled.has(kind) && !options.force) return;
+  tabDataRefreshScheduled.add(kind);
+  setImmediate(() => {
+    tabDataRefreshScheduled.delete(kind);
+    refreshTabData(kind, options);
+  });
 }
 
 function refreshTabData(kind = "all", options = {}) {
@@ -1467,9 +1617,30 @@ function refreshTabData(kind = "all", options = {}) {
     return;
   }
   if (!tabDataCache[kind]) return;
+  tabDataRefreshScheduled.delete(kind);
+  if (options.force && listTabKinds.has(kind)) {
+    for (const activeKind of listTabKinds) {
+      const activeWorker = tabDataWorkers.get(activeKind);
+      if (!activeWorker) continue;
+      activeWorker.kill?.("SIGTERM");
+      tabDataWorkers.delete(activeKind);
+      if (activeKind !== kind) tabDataCache[activeKind].loading = false;
+    }
+  }
   if (tabDataWorkers.has(kind)) {
     if (!options.force) return;
     tabDataWorkers.get(kind)?.kill?.("SIGTERM");
+    tabDataWorkers.delete(kind);
+  }
+  if (hasConflictingTabWorker(kind)) {
+    if (!tabDataRefreshScheduled.has(kind)) {
+      tabDataRefreshScheduled.add(kind);
+      setTimeout(() => {
+        tabDataRefreshScheduled.delete(kind);
+        refreshTabData(kind, options);
+      }, 500);
+    }
+    return;
   }
   const kinds = [kind];
   const started = Date.now();
@@ -1479,23 +1650,51 @@ function refreshTabData(kind = "all", options = {}) {
     tabDataCache[item].lastStartedAt = new Date(started).toISOString();
   }
   console.log(`[tab-data] ${kind} refresh started.`);
-  const worker = fork(path.join(agentRoot, "src", "tab-data-worker.mjs"), [kind], {
+  const resultFile = tempWorkerResultFile("llm-learning-tab-data", kind);
+  const traceFile = `${resultFile}.trace`;
+  const worker = spawn(process.execPath, [path.join(agentRoot, "src", "tab-data-worker.mjs"), kind, resultFile], {
     cwd: agentRoot,
-    env: process.env,
-    stdio: ["ignore", "ignore", "ignore", "ipc"]
+    env: { ...process.env, LLM_WIKI_ENV_FILE: config.configFile, LLM_WIKI_WORKER_TRACE_FILE: traceFile },
+    stdio: ["ignore", "pipe", "pipe"]
   });
+  let workerStdout = "";
+  let workerStderr = "";
+  let workerFinalized = false;
+  worker.stdout?.on("data", (chunk) => {
+    workerStdout += chunk.toString();
+    if (workerStdout.length > 10_000_000) workerStdout = workerStdout.slice(-10_000_000);
+  });
+  worker.stderr?.on("data", (chunk) => {
+    workerStderr += chunk.toString();
+    if (workerStderr.length > 20000) workerStderr = workerStderr.slice(-20000);
+  });
+  let workerTimedOut = false;
   const timeout = setTimeout(() => {
-    if (tabDataWorkers.get(kind) !== worker) return;
+    if (workerFinalized || tabDataWorkers.get(kind) !== worker) return;
+    workerFinalized = true;
+    clearInterval(resultPoll);
+    tabDataWorkers.delete(kind);
+    workerTimedOut = true;
     tabDataCache[kind].loading = false;
-    tabDataCache[kind].error = "Tab data scan is taking too long. Try again after iCloud finishes syncing this vault.";
+    const lastRead = lastWorkerTraceLine(traceFile);
+    tabDataCache[kind].error = `Tab data scan is taking too long${lastRead ? ` while reading ${lastRead}` : ""}. Try again after iCloud finishes syncing this vault.`;
     tabDataCache[kind].lastFinishedAt = new Date().toISOString();
     console.warn(`[tab-data] ${kind} refresh timed out after ${Date.now() - started}ms.`);
     worker.kill("SIGTERM");
-  }, 25000);
+    setTimeout(() => {
+      if (tabDataWorkers.get(kind) === worker) worker.kill("SIGKILL");
+    }, 1000);
+    cleanupWorkerResult(resultFile);
+    cleanupWorkerResult(traceFile);
+  }, 12000);
   tabDataWorkers.set(kind, worker);
-  worker.on("message", (message) => {
-    if (!message?.ok) {
-      for (const item of kinds) tabDataCache[item].error = message?.error || "Tab data refresh failed.";
+  const applyWorkerMessage = (message) => {
+      if (!message?.ok) {
+      for (const item of kinds) {
+        tabDataCache[item].error = message?.error || "Tab data refresh failed.";
+        tabDataCache[item].loading = false;
+        tabDataCache[item].lastFinishedAt = new Date().toISOString();
+      }
       return;
     }
     const result = message.result || {};
@@ -1513,22 +1712,43 @@ function refreshTabData(kind = "all", options = {}) {
         continue;
       }
       if (!Array.isArray(result[item])) continue;
+      const persisted = listTabKinds.has(item) ? readPersistedTabCache(item) : null;
+      const nextItems = result[item].length || !persisted?.items?.length ? result[item] : persisted.items;
       tabDataCache[item] = {
-        items: result[item],
+        items: nextItems,
         ready: true,
         loading: false,
-        error: "",
+        error: result[item].length || !persisted?.items?.length ? "" : "Live tab scan returned no rows. Showing the last cached rows; retry after iCloud finishes syncing or grant the app vault access.",
         lastFinishedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        updatedAt: result[item].length || !persisted?.updatedAt ? new Date().toISOString() : persisted.updatedAt
       };
+      if (listTabKinds.has(item) && result[item].length) writePersistedTabCache(item, tabDataCache[item].items, tabDataCache[item].updatedAt);
     }
-  });
-  worker.on("exit", (code) => {
+  };
+  const finishWorker = (message, { code = 0, early = false } = {}) => {
+    if (workerFinalized || tabDataWorkers.get(kind) !== worker) return;
+    workerFinalized = true;
     clearTimeout(timeout);
-    if (tabDataWorkers.get(kind) !== worker) return;
+    clearInterval(resultPoll);
     tabDataWorkers.delete(kind);
     const elapsed = Date.now() - started;
-    if (code) {
+    if (message?.resultFile && !message.result) {
+      message = readWorkerResult(message.resultFile) || {
+        ok: false,
+        error: "Tab data worker finished but its result file could not be read."
+      };
+    }
+    if (message?.ok && !message.result) {
+      message = { ok: false, error: "Tab data worker finished without returning rows." };
+    }
+    if (message && !workerTimedOut) applyWorkerMessage(message);
+    cleanupWorkerResult(resultFile);
+    cleanupWorkerResult(traceFile);
+    if (early) {
+      console.log(`[tab-data] ${kind} refresh result accepted in ${elapsed}ms.`);
+      worker.kill("SIGTERM");
+      setTimeout(() => worker.kill("SIGKILL"), 1000);
+    } else if (code) {
       console.warn(`[tab-data] ${kind} refresh exited with code ${code} after ${elapsed}ms.`);
     } else {
       console.log(`[tab-data] ${kind} refresh finished in ${elapsed}ms.`);
@@ -1536,12 +1756,26 @@ function refreshTabData(kind = "all", options = {}) {
     for (const item of kinds) {
       tabDataCache[item].loading = false;
       tabDataCache[item].lastFinishedAt = new Date().toISOString();
-      if (code && !tabDataCache[item].error) tabDataCache[item].error = `Tab data refresh exited with code ${code}.`;
+      if (code && !tabDataCache[item].error) {
+        const detail = compactStatusMessage(workerStderr || "", 240);
+        tabDataCache[item].error = detail ? `Tab data refresh exited with code ${code}: ${detail}` : `Tab data refresh exited with code ${code}.`;
+      }
     }
+  };
+  const resultPoll = setInterval(() => {
+    if (workerFinalized || tabDataWorkers.get(kind) !== worker) return;
+    const message = readWorkerResult(resultFile);
+    if (message?.ok && message.result) finishWorker(message, { early: true });
+  }, 100);
+  worker.on("exit", (code) => {
+    let message = readWorkerResult(resultFile) || parseWorkerStdout(workerStdout);
+    finishWorker(message, { code });
   });
   worker.on("error", (error) => {
+    if (workerFinalized || tabDataWorkers.get(kind) !== worker) return;
+    workerFinalized = true;
     clearTimeout(timeout);
-    if (tabDataWorkers.get(kind) !== worker) return;
+    clearInterval(resultPoll);
     tabDataWorkers.delete(kind);
     console.warn(`[tab-data] ${kind} refresh failed after ${Date.now() - started}ms: ${error.message}`);
     for (const item of kinds) {
@@ -1550,6 +1784,35 @@ function refreshTabData(kind = "all", options = {}) {
       tabDataCache[item].lastFinishedAt = new Date().toISOString();
     }
   });
+}
+
+function hasConflictingTabWorker(kind) {
+  if (listTabKinds.has(kind)) {
+    return [...tabDataWorkers.keys()].some((activeKind) => listTabKinds.has(activeKind));
+  }
+  return tabDataWorkers.size > 0;
+}
+
+function lastWorkerTraceLine(file) {
+  try {
+    const lines = fs.readFileSync(file, "utf8").trim().split(/\r?\n/).filter(Boolean);
+    const line = lines.at(-1) || "";
+    return line.replace(/^\S+\s+read\s+/, "").slice(0, 240);
+  } catch {
+    return "";
+  }
+}
+
+function parseWorkerStdout(output) {
+  const lines = String(output || "").trim().split(/\r?\n/).filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      return JSON.parse(lines[index]);
+    } catch {
+      // Ignore non-JSON worker output.
+    }
+  }
+  return null;
 }
 
 function chooseConfigFile() {
@@ -1938,61 +2201,37 @@ async function runAutoIngest() {
   if (ingestRunning) return;
   ingestRunning = true;
   try {
-    let count = 0;
-    await yieldToServer();
-    const vaults = listVaults(config.vaultsRoot);
-    const candidateCounts = [];
-    for (const vault of vaults) {
-      await yieldToServer();
-      candidateCounts.push(listRawCandidates(vault).length);
-    }
-    const rawTotal = candidateCounts.reduce((sum, item) => sum + item, 0);
-    const total = rawTotal || vaults.length;
-    let completed = 0;
     ingestProgress = {
       percent: 0,
-      completed,
-      total,
+      completed: 0,
+      total: 1,
       vault: "",
-      detail: rawTotal ? "Learning Autopilot started." : "Learning Autopilot is checking vaults."
+      detail: "Learning Autopilot is running in a background worker."
     };
-    for (const [index, vault] of vaults.entries()) {
-      await yieldToServer();
-      const bootstrapped = bootstrapVault(vault, config);
-      if (bootstrapped.length) {
-        console.log(`[bootstrap] ${vaultName(vault)}: ${bootstrapped.join(", ")}`);
+    const workerResult = await runAutoIngestWorker({
+      timeoutMs: Math.max(config.providerTimeoutMs || 60000, config.watchIntervalMs * 2, 120000)
+    });
+    let count = 0;
+    const completedVaults = workerResult.vaults || [];
+    for (const item of completedVaults) {
+      const vaultPath = item.vaultPath || path.join(config.vaultsRoot, item.vault || "");
+      if (item.bootstrapped?.length) {
+        console.log(`[bootstrap] ${item.vault}: ${item.bootstrapped.join(", ")}`);
       }
-      runLearningCaptureScan(vault);
-      ingestProgress = progressState({
-        completed,
-        total,
-        vault: vaultName(vault),
-        detail: `Scanning ${vaultName(vault)}.`
-      });
-      setAutomationRuntime(vault, { running: true, status: "processing", detail: `Processing ${vaultName(vault)}.` });
-      const automationResult = await runLearningAutomationForVault(vault, { config, provider });
-      updateRuntimeFromAutomationResult(vault, automationResult);
-      const results = automationResult.results || [];
-      await yieldToServer();
-      completed += rawTotal ? candidateCounts[index] : 1;
+      updateRuntimeFromAutomationResult(vaultPath, item.automationResult || {});
+      const results = item.automationResult?.results || [];
       count += results.length;
       for (const result of results) {
         console.log(`[auto-ingest] ${result.vault}: ${result.source} -> ${result.sourcePage}`);
       }
-      ingestProgress = progressState({
-        completed,
-        total,
-        vault: vaultName(vault),
-        detail: `Finished ${vaultName(vault)}.`
-      });
     }
     lastIngestMessage = count
       ? reportStatus(`Operation progress: 100%. Processed ${count} file${count === 1 ? "" : "s"} at ${formatLocal(new Date())}.`)
       : reportStatus(`Operation progress: 100%. No pending files at ${formatLocal(new Date())}.`);
     autoIngestBackoffUntil = 0;
     ingestProgress = progressState({
-      completed: total,
-      total,
+      completed: 1,
+      total: 1,
       vault: "",
       detail: lastIngestMessage
     });
@@ -2008,6 +2247,288 @@ async function runAutoIngest() {
   } finally {
     ingestRunning = false;
     refreshChangedTabsAfterIngest();
+  }
+}
+
+function runAutoIngestWorker(options = {}) {
+  if (autoIngestWorker) {
+    return Promise.reject(new Error("Auto-ingest worker is already running."));
+  }
+  return new Promise((resolve, reject) => {
+    const resultFile = tempWorkerResultFile("llm-learning-ingest", options.vaultPath ? vaultName(options.vaultPath) : "all-vaults");
+    const args = [
+      path.join(agentRoot, "src", "auto-ingest-worker.mjs"),
+      resultFile
+    ];
+    args.push(options.vaultPath || "");
+    args.push(JSON.stringify(options.options || {}));
+    const worker = spawn(process.execPath, args, {
+      cwd: agentRoot,
+      env: process.env,
+      stdio: "ignore"
+    });
+    autoIngestWorker = worker;
+    const finish = (callback) => {
+      clearTimeout(timeout);
+      if (autoIngestWorker === worker) autoIngestWorker = null;
+      callback();
+    };
+    const timeout = setTimeout(() => {
+      worker.kill("SIGTERM");
+      const message = {
+        ok: false,
+        error: "Auto-ingest worker timed out. Pending files were left in place."
+      };
+      cleanupWorkerResult(resultFile);
+      finish(() => reject(new Error(message.error)));
+    }, Math.max(15000, Number(options.timeoutMs || 120000)));
+    worker.on("error", (error) => {
+      cleanupWorkerResult(resultFile);
+      finish(() => reject(error));
+    });
+    worker.on("exit", (code) => {
+      const message = readWorkerResult(resultFile);
+      cleanupWorkerResult(resultFile);
+      if (message?.ok) {
+        finish(() => resolve(message));
+        return;
+      }
+      const reason = message?.error || `Auto-ingest worker exited with code ${code ?? "unknown"}.`;
+      finish(() => reject(new Error(reason)));
+    });
+  });
+}
+
+function shouldRunBackgroundCaptureScan(vaultPath) {
+  const current = captureScanRuntime.get(vaultName(vaultPath));
+  const last = Date.parse(current?.lastScanAt || "");
+  if (Number.isFinite(last) && Date.now() - last < Math.max(config.watchIntervalMs * 3, 120000)) return false;
+  return true;
+}
+
+function scheduleBackgroundCaptureScan(vaultPath) {
+  const name = vaultName(vaultPath);
+  if (captureScanWorkers.has(name)) return;
+  const started = Date.now();
+  const resultFile = captureScanWorkerResultFile(name);
+  const worker = spawn(process.execPath, [path.join(agentRoot, "src", "capture-scan-worker.mjs"), vaultPath, resultFile], {
+    cwd: agentRoot,
+    env: process.env,
+    stdio: "ignore"
+  });
+  captureScanWorkers.set(name, worker);
+  const setFailure = (reason, status = "failed") => {
+    captureScanRuntime.set(name, {
+      status,
+      lastScanAt: new Date().toISOString(),
+      collectors: [],
+      captured: 0,
+      duplicates: 0,
+      skipped: [{ collector: "source_capture", reason }],
+      skippedGroups: [{ collector: "source_capture", reason, extension: "(none)", count: 1, samples: [] }],
+      skippedCount: 1,
+      nextAction: "Review Source Capture settings and run Scan capture sources now."
+    });
+    scheduleTabDataRefresh("learning");
+  };
+  const timeout = setTimeout(() => {
+    if (captureScanWorkers.get(name) !== worker) return;
+    captureScanWorkers.delete(name);
+    setFailure(
+      "Background capture scan timed out. Narrow watch folders or run Scan capture sources now for details.",
+      "timeout"
+    );
+    worker.kill("SIGTERM");
+    cleanupCaptureScanWorkerResult(resultFile);
+  }, 20000);
+  worker.on("message", (message) => {
+    if (captureScanWorkers.get(name) !== worker) return;
+    if (message?.ok) {
+      captureScanRuntime.set(name, message.result);
+      console.log(`[capture-scan] ${name} finished in ${Date.now() - started}ms.`);
+      scheduleTabDataRefresh("learning");
+      return;
+    }
+    setFailure(message?.error || "Background capture scan failed.");
+  });
+  worker.on("exit", (code) => {
+    clearTimeout(timeout);
+    if (captureScanWorkers.get(name) !== worker) return;
+    captureScanWorkers.delete(name);
+    const message = readCaptureScanWorkerResult(resultFile);
+    cleanupCaptureScanWorkerResult(resultFile);
+    if (message?.ok) {
+      captureScanRuntime.set(name, message.result);
+      console.log(`[capture-scan] ${name} finished in ${Date.now() - started}ms.`);
+      scheduleTabDataRefresh("learning");
+      return;
+    }
+    setFailure(message?.error || `Background capture scan exited with code ${code ?? "unknown"}.`);
+  });
+  worker.on("error", (error) => {
+    clearTimeout(timeout);
+    if (captureScanWorkers.get(name) !== worker) return;
+    captureScanWorkers.delete(name);
+    cleanupCaptureScanWorkerResult(resultFile);
+    setFailure(error.message);
+  });
+}
+
+function runLearningCaptureScanInWorker(vaultPath, options = {}) {
+  const name = vaultName(vaultPath);
+  if (captureScanWorkers.has(name)) {
+    return Promise.resolve({
+      ...(captureScanRuntime.get(name) || {}),
+      status: "running",
+      collectors: captureScanRuntime.get(name)?.collectors || [],
+      nextAction: "A capture scan is already running for this vault."
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const resultFile = captureScanWorkerResultFile(name);
+    const worker = spawn(process.execPath, [path.join(agentRoot, "src", "capture-scan-worker.mjs"), vaultPath, resultFile], {
+      cwd: agentRoot,
+      env: process.env,
+      stdio: "ignore"
+    });
+    captureScanWorkers.set(name, worker);
+    const finish = (callback) => {
+      clearTimeout(timeout);
+      if (captureScanWorkers.get(name) === worker) captureScanWorkers.delete(name);
+      callback();
+    };
+    const timeout = setTimeout(() => {
+      const result = {
+        status: "timeout",
+        lastScanAt: new Date().toISOString(),
+        collectors: [],
+        captured: 0,
+        duplicates: 0,
+        skipped: [{ collector: "source_capture", reason: "Capture scan timed out while macOS was reading configured folders. Narrow broad folders, remove iCloud-only locations, or grant the app file access and scan again." }],
+        skippedGroups: [{ collector: "source_capture", reason: "Capture scan timed out while macOS was reading configured folders. Narrow broad folders, remove iCloud-only locations, or grant the app file access and scan again.", extension: "(none)", count: 1, samples: [] }],
+        skippedCount: 1,
+        nextAction: "Use a smaller local watch folder or grant file access for the configured folder, then scan again."
+      };
+      captureScanRuntime.set(name, result);
+      captureScanWorkers.delete(name);
+      worker.kill("SIGTERM");
+      cleanupCaptureScanWorkerResult(resultFile);
+      finish(() => resolve(result));
+    }, Math.max(5000, Number(options.timeoutMs || 30000)));
+    worker.on("message", (message) => {
+      if (captureScanWorkers.get(name) !== worker) return;
+      if (message?.ok) {
+        const result = message.result || {};
+        captureScanRuntime.set(name, result);
+        console.log(`[capture-scan] ${name} finished in ${Date.now() - started}ms.`);
+        scheduleTabDataRefresh("learning");
+        finish(() => resolve(result));
+        return;
+      }
+      const result = {
+        status: "failed",
+        lastScanAt: new Date().toISOString(),
+        collectors: [],
+        captured: 0,
+        duplicates: 0,
+        skipped: [{ collector: "source_capture", reason: message?.error || "Capture scan failed." }],
+        skippedGroups: [{ collector: "source_capture", reason: message?.error || "Capture scan failed.", extension: "(none)", count: 1, samples: [] }],
+        skippedCount: 1,
+        nextAction: "Review Source Capture settings and scan again."
+      };
+      captureScanRuntime.set(name, result);
+      finish(() => resolve(result));
+    });
+    worker.on("error", (error) => {
+      if (captureScanWorkers.get(name) !== worker) return;
+      cleanupCaptureScanWorkerResult(resultFile);
+      finish(() => reject(error));
+    });
+    worker.on("exit", (code) => {
+      if (captureScanWorkers.get(name) !== worker) return;
+      const message = readCaptureScanWorkerResult(resultFile);
+      cleanupCaptureScanWorkerResult(resultFile);
+      if (message?.ok) {
+        const result = message.result || {};
+        captureScanRuntime.set(name, result);
+        console.log(`[capture-scan] ${name} finished in ${Date.now() - started}ms.`);
+        scheduleTabDataRefresh("learning");
+        finish(() => resolve(result));
+        return;
+      }
+      const reason = message?.error || `Capture scan exited with code ${code ?? "unknown"}.`;
+      const result = {
+        status: "failed",
+        lastScanAt: new Date().toISOString(),
+        collectors: [],
+        captured: 0,
+        duplicates: 0,
+        skipped: [{ collector: "source_capture", reason }],
+        skippedGroups: [{ collector: "source_capture", reason, extension: "(none)", count: 1, samples: [] }],
+        skippedCount: 1,
+        nextAction: "Review Source Capture settings and scan again."
+      };
+      captureScanRuntime.set(name, result);
+      finish(() => resolve(result));
+    });
+  });
+}
+
+function captureScanWorkerResultFile(name) {
+  return tempWorkerResultFile("llm-learning-capture", name || "vault");
+}
+
+function readCaptureScanWorkerResult(file) {
+  return readWorkerResult(file);
+}
+
+function cleanupCaptureScanWorkerResult(file) {
+  cleanupWorkerResult(file);
+}
+
+function tempWorkerResultFile(prefix, name) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`));
+  const safeName = String(name || "worker").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "worker";
+  return path.join(dir, `${safeName}.json`);
+}
+
+function readWorkerResult(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function persistedTabCacheFile(kind) {
+  const safeKind = String(kind || "").toLowerCase().replace(/[^a-z0-9_-]+/g, "");
+  return path.join(tabCacheDir, `${safeKind}.json`);
+}
+
+function readPersistedTabCache(kind) {
+  try {
+    return JSON.parse(fs.readFileSync(persistedTabCacheFile(kind), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedTabCache(kind, items, updatedAt = new Date().toISOString()) {
+  if (!listTabKinds.has(kind) || !Array.isArray(items)) return;
+  try {
+    fs.mkdirSync(tabCacheDir, { recursive: true });
+    fs.writeFileSync(persistedTabCacheFile(kind), JSON.stringify({ kind, items, updatedAt }, null, 2), "utf8");
+  } catch (error) {
+    console.warn(`[tab-data] failed to write ${kind} cache: ${error.message}`);
+  }
+}
+
+function cleanupWorkerResult(file) {
+  try {
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  } catch {
+    // Best-effort cleanup for temporary worker result files.
   }
 }
 
@@ -2184,18 +2705,24 @@ function runLearningCaptureScan(vaultPath) {
   const collectors = [];
   const results = [];
   const skipped = [];
+  let watchFolderSummary = null;
   if (!settings.enabled) {
     skipped.push({ collector: "source_capture", reason: "Source capture is disabled." });
   } else {
     if ((settings.watchFolders || []).length) {
       collectors.push("watch_folders");
-      results.push(...collectWatchFolderResources(vaultPath, { settings, previewApproved: true }));
+      const watchResults = collectWatchFolderResources(vaultPath, { settings, previewApproved: true, maxFiles: 180 });
+      results.push(...watchResults);
+      if (watchResults.summary?.skipped?.length) skipped.push(...watchResults.summary.skipped);
+      watchFolderSummary = watchResults.summary || null;
     } else {
       skipped.push({ collector: "watch_folders", reason: "No watch folders are configured." });
     }
-    if (settings.screenshots === true) {
+    if (settings.screenshots === true && !(settings.watchFolders || []).length) {
       collectors.push("screenshots");
-      results.push(...collectScreenshots(vaultPath, { settings, previewApproved: true }));
+      results.push(...collectScreenshots(vaultPath, { settings, previewApproved: true, maxFiles: 80 }));
+    } else if (settings.screenshots === true) {
+      skipped.push({ collector: "screenshots", reason: "Screenshot files in configured watch folders are already handled by the watch-folder collector." });
     } else {
       skipped.push({ collector: "screenshots", reason: "Screenshot capture is disabled." });
     }
@@ -2216,15 +2743,25 @@ function runLearningCaptureScan(vaultPath) {
   }
   const captured = results.filter((item) => item.captured).length;
   const duplicates = results.filter((item) => item.duplicate).length;
-  const blocked = results.filter((item) => !item.captured && !item.duplicate).map((item) => ({ collector: "capture", reason: item.reason || "Capture blocked." }));
+  const blocked = results.filter((item) => !item.captured && !item.duplicate).map((item) => ({
+    collector: "capture",
+    reason: item.reason || "Capture blocked.",
+    file: item.file || ""
+  }));
+  const allSkipped = skipped.concat(blocked);
   const summary = {
     status: captured ? "captured" : "scanned",
     lastScanAt: started,
     collectors,
     captured,
     duplicates,
-    skipped: skipped.concat(blocked),
+    skipped: allSkipped,
+    skippedGroups: groupCaptureSkipped(allSkipped),
     skippedCount: skipped.length + blocked.length + duplicates,
+    watchFoldersScanned: watchFolderSummary?.foldersScanned || 0,
+    watchFilesDiscovered: watchFolderSummary?.filesDiscovered || 0,
+    watchFilesQueued: watchFolderSummary?.filesQueued || 0,
+    watchFilesSkipped: watchFolderSummary?.filesSkipped || 0,
     nextAction: captured
       ? "Review ResourceInbox or process captured sources into learning insights."
       : "No new approved local files were captured. Check watch folders or use the Arc clipper/manual import."
@@ -2232,6 +2769,34 @@ function runLearningCaptureScan(vaultPath) {
   captureScanRuntime.set(vaultName(vaultPath), summary);
   invalidateTabData("learning");
   return summary;
+}
+
+function groupCaptureSkipped(items = [], existingGroups = []) {
+  const groups = new Map();
+  for (const group of existingGroups) {
+    const key = `${group.collector || "capture"}|${group.reason || "Skipped"}|${group.extension || "(none)"}`;
+    groups.set(key, {
+      collector: group.collector || "capture",
+      reason: group.reason || "Skipped",
+      extension: group.extension || "(none)",
+      count: Number(group.count || 0),
+      samples: Array.isArray(group.samples) ? group.samples.slice(0, 4) : []
+    });
+  }
+  for (const item of items) {
+    const collector = item.collector || "capture";
+    const reason = item.reason || "Skipped";
+    const extension = item.extension || path.extname(String(item.file || "")).toLowerCase() || "(none)";
+    const key = `${collector}|${reason}|${extension}`;
+    if (!groups.has(key)) {
+      groups.set(key, { collector, reason, extension, count: 0, samples: [] });
+    }
+    const group = groups.get(key);
+    group.count += 1;
+    const sample = item.file ? path.basename(String(item.file)) : "";
+    if (sample && group.samples.length < 4 && !group.samples.includes(sample)) group.samples.push(sample);
+  }
+  return [...groups.values()].filter((group) => group.count > 0).sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
 }
 
 function recordProviderFallbackIfNeeded(status) {
@@ -2517,7 +3082,7 @@ function renderHtml() {
     .learning-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
     .learning-toolbar select { min-width: min(220px, 100%); flex: 1 1 220px; }
     .learning-toolbar .copy-feedback { margin-left: auto; }
-    .learning-jump, .learning-target-button { appearance: none; border: 0; background: transparent; color: var(--accent); font: inherit; font-weight: 750; padding: 0; cursor: pointer; text-align: start; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; overflow-wrap: anywhere; }
+    .learning-jump, .learning-target-button { appearance: none; border: 0; background: transparent; color: var(--accent); font: inherit; font-weight: 750; padding: 0; cursor: pointer; text-align: start; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; overflow-wrap: normal; word-break: normal; hyphens: none; }
     .learning-jump:hover, .learning-target-button:hover { color: var(--accent-2); }
     .learning-target-highlight { outline: 3px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 3px; box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 12%, transparent); }
     .learning-scroll-target, .learning-card, .learning-map-panel, .learning-study-card, .learning-notification-center li, tr.learning-target-highlight { scroll-margin-top: 96px; }
@@ -2547,11 +3112,11 @@ function renderHtml() {
     .learning-card h3 { margin: 0 0 8px; font-size: 15px; }
     .learning-card h4 { margin: 10px 0 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0; }
     .learning-card ul { margin: 0; padding-inline-start: 1.2em; }
-    .learning-card li { margin: 0 0 4px; overflow-wrap: anywhere; }
+    .learning-card li { margin: 0 0 4px; overflow-wrap: break-word; }
     .learning-card details { margin-top: 8px; }
     .learning-card summary { cursor: pointer; color: var(--accent); font-weight: 700; }
     .learning-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-    .learning-chip { display: inline-flex; align-items: center; max-width: 100%; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font-size: 12px; color: var(--muted); background: var(--soft); overflow-wrap: anywhere; white-space: normal; }
+    .learning-chip { display: inline-flex; align-items: center; max-width: 100%; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font-size: 12px; color: var(--muted); background: var(--soft); overflow-wrap: break-word; white-space: normal; }
     button.learning-chip { cursor: pointer; font: inherit; }
     button.learning-chip:disabled { cursor: not-allowed; opacity: .58; text-decoration: none; }
     .learning-chip.capture, .learning-card.capture, .learning-flow-lane.capture, .learning-type-legend .capture, .learning-study-card.capture { --kind: #0f766e; --kind-soft: color-mix(in srgb, #0f766e 13%, var(--panel)); }
@@ -2574,7 +3139,7 @@ function renderHtml() {
     .learning-flow-node::after { content: ">"; position: absolute; right: -9px; top: 50%; transform: translateY(-50%); color: var(--muted); font-weight: 800; }
     .learning-flow-node:last-child::after { content: ""; }
     .learning-flow-node strong { font-size: 13px; }
-    .learning-flow-node span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .learning-flow-node span { color: var(--muted); font-size: 12px; overflow-wrap: break-word; }
     .learning-flow-node.active { border-color: var(--accent); background: color-mix(in srgb, var(--mark) 42%, var(--panel)); }
     .learning-timeline { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px; margin: 12px 0; }
     .learning-timeline h3 { margin: 0 0 8px; }
@@ -2583,7 +3148,7 @@ function renderHtml() {
     .learning-timeline-date { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--soft); font-weight: 800; color: var(--accent); text-align: center; }
     .learning-timeline-items { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); gap: 8px; min-width: 0; }
     .learning-timeline-item { display: grid; gap: 4px; min-width: 0; padding: 9px; border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 35%, var(--line)); border-radius: 8px; background: var(--kind-soft, var(--panel)); color: inherit; text-align: start; cursor: pointer; }
-    .learning-timeline-item strong, .learning-timeline-item span { overflow-wrap: anywhere; }
+    .learning-timeline-item strong, .learning-timeline-item span { overflow-wrap: break-word; }
     .learning-timeline-item span { color: var(--muted); font-size: 12px; }
     .learning-map-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 12px; margin: 12px 0; }
     .learning-map-panel { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 12px; min-width: 0; }
@@ -2608,12 +3173,12 @@ function renderHtml() {
     .learning-autopilot-meter { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; align-content: center; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
     .learning-autopilot-meter strong { font-size: 24px; line-height: 1; color: var(--accent); }
     .learning-autopilot-meter span { color: var(--muted); font-size: 12px; align-self: center; }
-    .learning-stepper { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr)); gap: 8px; list-style: none; margin: 2px 0 0; padding: 0; }
+    .learning-stepper { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 8px; list-style: none; margin: 2px 0 0; padding: 0; }
     .learning-stepper li { position: relative; display: block; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); transition: transform .18s ease, border-color .18s ease, background .18s ease; }
-    .learning-stepper button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 7px; width: 100%; color: inherit; text-decoration: none; }
+    .learning-stepper button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 7px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: normal; align-items: start; }
     .learning-stepper li span { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--soft); color: var(--muted); font-weight: 800; }
-    .learning-stepper li strong { min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
-    .learning-stepper li em { grid-column: 2; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: anywhere; }
+    .learning-stepper li strong { min-width: 0; font-size: 13px; overflow-wrap: break-word; }
+    .learning-stepper li em { grid-column: 2; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: break-word; }
     .learning-stepper li.active { border-color: var(--accent); background: color-mix(in srgb, var(--mark) 36%, var(--panel)); transform: translateY(-2px); }
     .learning-stepper li.active span { background: var(--accent); color: #fff; }
     .learning-study-surface { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(min(260px, 100%), .8fr); gap: 14px; }
@@ -2628,25 +3193,29 @@ function renderHtml() {
     .learning-study-card.flipped .learning-study-card-inner { transform: translateY(-1px); }
     .learning-study-card-face { display: grid; align-content: space-between; gap: 10px; min-height: 190px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); backface-visibility: hidden; overflow: visible; }
     .learning-study-card.practice .learning-study-card-face, .learning-study-card.capture .learning-study-card-face { border-color: color-mix(in srgb, var(--kind, var(--accent)) 34%, var(--line)); background: var(--kind-soft, var(--panel)); }
-    .learning-study-card-face h4 { margin: 0; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
-    .learning-study-card-face p { margin: 0; overflow-wrap: anywhere; }
-    .learning-study-card-face small { color: var(--muted); overflow-wrap: anywhere; }
+    .learning-study-card-face h4 { margin: 0; font-size: 15px; line-height: 1.35; overflow-wrap: break-word; }
+    .learning-study-card-face p { margin: 0; overflow-wrap: break-word; }
+    .learning-study-card-face small { color: var(--muted); overflow-wrap: break-word; }
     .learning-study-card.read .learning-study-card-face { opacity: .82; }
     .learning-study-card-read { justify-self: start; color: #166534; border-color: color-mix(in srgb, #166534 45%, var(--line)); background: color-mix(in srgb, #166534 12%, var(--panel)); }
-    .learning-evidence-label { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; max-width: 100%; word-break: normal; overflow-wrap: anywhere; }
-    .learning-filter-banner, .learning-capture-status, .learning-export-review { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--soft); color: var(--muted); overflow-wrap: anywhere; }
+    .learning-evidence-label { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; max-width: 100%; word-break: normal; overflow-wrap: break-word; }
+    .learning-filter-banner, .learning-capture-status, .learning-export-review { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--soft); color: var(--muted); overflow-wrap: break-word; }
     .learning-filter-banner { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
     .learning-export-review textarea { width: 100%; min-height: 280px; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre; overflow: auto; }
     .learning-export-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 8px; margin: 8px 0; }
-    .learning-export-meta span { border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: var(--panel); overflow-wrap: anywhere; }
+    .learning-export-meta span { border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: var(--panel); overflow-wrap: break-word; }
     .learning-export-result { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 8px 0; background: var(--panel); }
     .learning-export-result.success { border-color: color-mix(in srgb, #15803d 42%, var(--line)); background: color-mix(in srgb, #15803d 10%, var(--panel)); }
     .learning-export-result.failed { border-color: color-mix(in srgb, #b91c1c 42%, var(--line)); background: color-mix(in srgb, #b91c1c 10%, var(--panel)); }
     .learning-export-files { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
-    .learning-export-files button { max-width: 100%; overflow-wrap: anywhere; text-align: start; }
+    .learning-export-files button { max-width: 100%; overflow-wrap: break-word; text-align: start; }
     .learning-form button, .learning-form .primary, .learning-form .secondary { align-self: end; min-height: 38px; white-space: normal; }
     .learning-form select, .learning-form input, .learning-form textarea { min-width: 0; }
-    .learning-capture-status { align-self: start; max-width: 100%; }
+    .learning-capture-status { align-self: start; max-width: 100%; max-height: 260px; overflow: auto; }
+    .learning-capture-status strong { display: block; color: var(--text); margin-bottom: 4px; }
+    .learning-capture-status ul { margin: 6px 0 0; padding-inline-start: 1.2em; }
+    .learning-capture-status li { margin-bottom: 4px; }
+    .learning-capture-status code { font-size: 12px; }
     .learning-study-card-face.back { display: none; background: color-mix(in srgb, var(--panel) 85%, var(--soft)); }
     .learning-study-card.flipped .learning-study-card-face.front { display: none; }
     .learning-study-card.flipped .learning-study-card-face.back { display: grid; }
@@ -2655,15 +3224,15 @@ function renderHtml() {
     .learning-bit-explorer details { border-top: 1px solid var(--line); padding: 8px 0; }
     .learning-bit-explorer details:first-of-type { border-top: 0; }
     .learning-empty-state { border: 1px dashed var(--line); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--soft); }
-    .learning-flow-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 10px; margin: 12px 0; }
+    .learning-flow-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 10px; margin: 12px 0; }
     .learning-flow-lane { border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 32%, var(--line)); border-radius: 8px; padding: 12px; background: var(--kind-soft, var(--panel)); }
     .learning-flow-lane h4 { margin: 0 0 8px; font-size: 15px; }
     .learning-flow-lane ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; }
     .learning-flow-lane li { display: block; min-width: 0; }
-    .learning-flow-lane button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: 100%; color: inherit; text-decoration: none; }
+    .learning-flow-lane button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: normal; align-items: start; }
     .learning-flow-lane button > span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--kind, var(--accent)) 78%, #fff); color: #fff; font-weight: 800; font-size: 12px; }
     .learning-flow-lane strong { display: block; font-size: 13px; }
-    .learning-flow-lane em { display: block; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: anywhere; }
+    .learning-flow-lane em { display: block; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: break-word; }
     .learning-plan-summary { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
     .learning-plan-summary strong { font-size: 16px; }
     .learning-plan-summary span:not(.learning-chip) { color: var(--muted); }
@@ -2676,7 +3245,7 @@ function renderHtml() {
     .learning-plan-timeline em { color: var(--muted); font-style: normal; font-size: 12px; }
     .learning-notification-center ul { display: grid; gap: 8px; padding: 0; margin: 0; list-style: none; }
     .learning-notification-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 10px 0; }
-    .learning-notification-summary span { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--soft); color: var(--muted); overflow-wrap: anywhere; }
+    .learning-notification-summary span { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--soft); color: var(--muted); overflow-wrap: break-word; }
     .learning-notification-summary strong { display: block; color: var(--text); font-size: 18px; }
     .learning-notification-center li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(min(220px, 100%), auto); gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); overflow-wrap: anywhere; }
     .learning-notification-center li.warning { border-color: color-mix(in srgb, #f59e0b 55%, var(--line)); }
@@ -4306,11 +4875,25 @@ function renderHtml() {
       if (option) chatSaveVault.value = option.value;
     }
 
+    async function fetchJsonWithTimeout(url, options = {}) {
+      const timeoutMs = Math.max(1000, Number(options.timeoutMs || 8000));
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(url, { signal: controller.signal });
+        return await response.json();
+      } catch (error) {
+        if (error.name === "AbortError") throw new Error("Request timed out while the app was indexing. Use Retry refresh.");
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
     async function loadFiles(options = {}) {
       if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Loading vault files...", "files");
       try {
-        const response = await fetch("/api/files" + (options.refresh ? "?refresh=1" : ""));
-        const data = await response.json();
+        const data = await fetchJsonWithTimeout("/api/files" + (options.refresh ? "?refresh=1" : ""));
         if (data.error) throw new Error(data.error);
         const nextFiles = data.files || [];
         if (nextFiles.length) {
@@ -4323,7 +4906,11 @@ function renderHtml() {
         }
         if (data.loading || data.status === "loading" || data.status === "stale_refreshing") {
           filesLoadPolls += 1;
-          filesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Vault files are still being indexed."), "files", filesLoadPolls > 8);
+          if (filesCache.length) {
+            renderFilesTable();
+          } else {
+            filesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Vault files are still being indexed."), "files", filesLoadPolls > 8);
+          }
           if (filesLoadPolls <= 8) setTimeout(() => loadFiles(), 1400);
           return;
         }
@@ -4333,7 +4920,7 @@ function renderHtml() {
         populateSelect(filesStatusFilter, filesCache.map((file) => file.status), "All statuses");
         renderFilesTable();
       } catch (error) {
-        filesBody.innerHTML = '<tr><td colspan="7">' + escapeHtml(error.message) + '</td></tr>';
+        filesBody.innerHTML = tabStatusRow(7, error.message, "files", true);
       }
     }
 
@@ -4620,8 +5207,7 @@ function renderHtml() {
     async function loadArchives(options = {}) {
       if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Loading archive history...", "archives");
       try {
-        const response = await fetch("/api/archives" + (options.refresh ? "?refresh=1" : ""));
-        const data = await response.json();
+        const data = await fetchJsonWithTimeout("/api/archives" + (options.refresh ? "?refresh=1" : ""));
         if (data.error) throw new Error(data.error);
         const nextArchives = data.archives || [];
         if (nextArchives.length) {
@@ -4634,7 +5220,11 @@ function renderHtml() {
         }
         if (data.loading || data.status === "loading" || data.status === "stale_refreshing") {
           archivesLoadPolls += 1;
-          archivesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Archive history is still being indexed."), "archives", archivesLoadPolls > 8);
+          if (archivesCache.length) {
+            renderArchivesTable();
+          } else {
+            archivesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Archive history is still being indexed."), "archives", archivesLoadPolls > 8);
+          }
           if (archivesLoadPolls <= 8) setTimeout(() => loadArchives(), 1400);
           return;
         }
@@ -4644,7 +5234,7 @@ function renderHtml() {
         populateSelect(archivesKindFilter, archivesCache.map((item) => item.kind), "All types");
         renderArchivesTable();
       } catch (error) {
-        archivesBody.innerHTML = '<tr><td colspan="7">' + escapeHtml(error.message) + '</td></tr>';
+        archivesBody.innerHTML = tabStatusRow(7, error.message, "archives", true);
       }
     }
 
@@ -4888,8 +5478,7 @@ function renderHtml() {
     async function loadTopics(options = {}) {
       if (!topicsCache.length) topicsBody.innerHTML = tabStatusRow(7, "Loading topics...", "topics");
       try {
-        const response = await fetch("/api/topics" + (options.refresh ? "?refresh=1" : ""));
-        const data = await response.json();
+        const data = await fetchJsonWithTimeout("/api/topics" + (options.refresh ? "?refresh=1" : ""));
         if (data.error) throw new Error(data.error);
         const nextTopics = data.topics || [];
         if (nextTopics.length) {
@@ -4903,7 +5492,11 @@ function renderHtml() {
         }
         if (data.loading || data.status === "loading" || data.status === "stale_refreshing") {
           topicsLoadPolls += 1;
-          topicsBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Topics are still being indexed."), "topics", topicsLoadPolls > 8);
+          if (topicsCache.length) {
+            renderTopicsTable();
+          } else {
+            topicsBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Topics are still being indexed."), "topics", topicsLoadPolls > 8);
+          }
           if (topicsLoadPolls <= 8) setTimeout(() => loadTopics(), 1400);
           return;
         }
@@ -4916,7 +5509,7 @@ function renderHtml() {
           applySideTopicsPayload(data);
         }
       } catch (error) {
-        topicsBody.innerHTML = '<tr><td colspan="7">' + escapeHtml(error.message) + '</td></tr>';
+        topicsBody.innerHTML = tabStatusRow(7, error.message, "topics", true);
       }
     }
 
@@ -6498,14 +7091,39 @@ function renderHtml() {
         captureScanStatus.textContent = "No capture scan has run in this session.";
         return;
       }
-      const skipped = (scan.skipped || []).slice(0, 4).map((item) => item.collector ? item.collector + ": " + item.reason : item.reason).filter(Boolean);
+      const groups = Array.isArray(scan.skippedGroups) && scan.skippedGroups.length
+        ? scan.skippedGroups
+        : groupSkippedForDisplay(scan.skipped || []);
+      const supported = "Documents, images, audio/video, subtitles, web/text files, local URL files, and common data/text files are queued when readable.";
       captureScanStatus.innerHTML =
         '<strong>' + escapeHtml(scan.status || "scan") + '</strong>' +
         '<div>Last scan: ' + escapeHtml(shortEventTime(scan.lastScanAt) || "now") + '</div>' +
-        '<div>Captured: ' + escapeHtml(String(scan.captured || 0)) + ' · duplicates: ' + escapeHtml(String(scan.duplicates || 0)) + ' · skipped: ' + escapeHtml(String(scan.skippedCount || skipped.length || 0)) + '</div>' +
+        '<div>Captured: ' + escapeHtml(String(scan.captured || 0)) + ' · duplicates: ' + escapeHtml(String(scan.duplicates || 0)) + ' · skipped: ' + escapeHtml(String(scan.skippedCount || groups.reduce((sum, item) => sum + Number(item.count || 0), 0))) + '</div>' +
+        '<div>Watch folders: ' + escapeHtml(String(scan.watchFoldersScanned || 0)) + ' scanned · ' + escapeHtml(String(scan.watchFilesDiscovered || 0)) + ' discovered · ' + escapeHtml(String(scan.watchFilesQueued || 0)) + ' queued · ' + escapeHtml(String(scan.watchFilesSkipped || 0)) + ' skipped</div>' +
+        '<div>Opened documents: ' + escapeHtml(String(scan.openedDocumentPreviews || 0)) + ' previewed · ' + escapeHtml(String(scan.openedDocumentCaptured || 0)) + ' captured · ' + escapeHtml(String(scan.openedDocumentSkipped || 0)) + ' skipped</div>' +
         '<div>Collectors: ' + escapeHtml((scan.collectors || []).join(", ") || "none") + '</div>' +
-        (skipped.length ? '<details><summary>Skipped collectors</summary><ul>' + skipped.map((item) => '<li>' + escapeHtml(item) + '</li>').join("") + '</ul></details>' : '') +
-        '<div>' + escapeHtml(scan.nextAction || "Review ResourceInbox for captured sources.") + '</div>';
+        '<div>' + escapeHtml(supported) + '</div>' +
+        (groups.length ? '<details open><summary>Skipped files by reason</summary><ul>' + groups.slice(0, 12).map((item) => {
+          const samples = Array.isArray(item.samples) && item.samples.length ? ' Samples: ' + item.samples.join(", ") : "";
+          return '<li><strong>' + escapeHtml(String(item.count || 0)) + ' ' + escapeHtml(item.extension || "file") + '</strong> · ' + escapeHtml(item.collector || "capture") + ': ' + escapeHtml(item.reason || "Skipped") + escapeHtml(samples) + '</li>';
+        }).join("") + '</ul></details>' : '') +
+        '<div><strong>Next:</strong> ' + escapeHtml(scan.nextAction || "Review ResourceInbox for captured sources.") + '</div>';
+    }
+
+    function groupSkippedForDisplay(items) {
+      const groups = new Map();
+      for (const item of items || []) {
+        const collector = item.collector || "capture";
+        const reason = item.reason || "Skipped";
+        const extension = item.extension || (item.file ? item.file.split(".").pop() : "(none)");
+        const key = collector + "|" + reason + "|" + extension;
+        if (!groups.has(key)) groups.set(key, { collector, reason, extension, count: 0, samples: [] });
+        const group = groups.get(key);
+        group.count += 1;
+        const file = String(item.file || "").split(/[\\/]/).pop();
+        if (file && group.samples.length < 4 && !group.samples.includes(file)) group.samples.push(file);
+      }
+      return Array.from(groups.values()).sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
     }
 
     function confirmSourceCaptureChanges(current) {
@@ -6995,8 +7613,7 @@ function renderHtml() {
       if (sideTopicsLoading) return;
       sideTopicsLoading = true;
       try {
-        const response = await fetch("/api/topics" + (options.refresh ? "?refresh=1" : ""));
-        const data = await response.json();
+        const data = await fetchJsonWithTimeout("/api/topics" + (options.refresh ? "?refresh=1" : ""), { timeoutMs: 8000 });
         if (data.loading && !(data.topics || []).length) {
           sideTopicsLoadPolls += 1;
           topicList.innerHTML = "Loading topics..." + (sideTopicsLoadPolls > 8 ? ' <button class="secondary" type="button" data-tab-refresh="topics">Retry refresh</button>' : "");
