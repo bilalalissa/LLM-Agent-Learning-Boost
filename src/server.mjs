@@ -1551,7 +1551,7 @@ function recoverStuckTabLoading(kind, state) {
   if (!Number.isFinite(started) || Date.now() - started < 15000) return;
   state.loading = false;
   if (!state.items.length) {
-    state.error = "Tab data scan did not finish. Showing cached rows if available; use Retry after iCloud finishes syncing.";
+    state.error = "Tab data scan did not finish. Cached rows will stay visible when available; this usually means iCloud or a vault scan is still busy.";
   }
   state.lastFinishedAt = new Date().toISOString();
   const worker = tabDataWorkers.get(kind);
@@ -3960,7 +3960,7 @@ function renderHtml() {
     .learning-toggle-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); gap: 8px; }
     .learning-toggle-grid .inline-toggle { align-items: flex-start; white-space: normal; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); color: var(--text); line-height: 1.25; }
     .learning-form .inline-toggle { min-width: 0; white-space: normal; }
-    .learning-form .primary { grid-column: 1 / -1; justify-self: end; min-width: 220px; }
+    .learning-form .primary { justify-self: start; min-width: min(220px, 100%); }
     .learning-overview { min-height: 160px; }
     .learning-boost-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 12px; margin: 12px 0; }
     .learning-card { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 12px; min-width: 0; }
@@ -3985,8 +3985,8 @@ function renderHtml() {
     .learning-type-legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
     .learning-type-legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
     .learning-type-legend span::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--kind, var(--accent)); border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 60%, var(--line)); }
-    .learning-action-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: stretch; }
-    .learning-action-row button, .learning-button-row button { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: break-word; text-align: center; }
+    .learning-action-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+    .learning-action-row button, .learning-button-row button { flex: 0 1 auto; min-width: min(180px, 100%); max-width: 100%; white-space: normal; overflow-wrap: break-word; word-break: normal; text-align: center; }
     .learning-card.danger { border-color: color-mix(in srgb, #dc2626 45%, var(--line)); }
     .learning-card.warning { border-color: color-mix(in srgb, #f59e0b 55%, var(--line)); }
     .learning-flowchart { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(128px, 100%), 1fr)); gap: 8px; align-items: stretch; margin: 10px 0 14px; }
@@ -4065,7 +4065,8 @@ function renderHtml() {
     .learning-export-result.failed { border-color: color-mix(in srgb, #b91c1c 42%, var(--line)); background: color-mix(in srgb, #b91c1c 10%, var(--panel)); }
     .learning-export-files { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
     .learning-export-files button { max-width: 100%; overflow-wrap: break-word; text-align: start; }
-    .learning-form button, .learning-form .primary, .learning-form .secondary { align-self: end; min-height: 38px; white-space: normal; overflow-wrap: break-word; }
+    .learning-form .learning-button-row { grid-column: 1 / -1; align-items: center; justify-content: flex-start; }
+    .learning-form button, .learning-form .primary, .learning-form .secondary { align-self: end; min-height: 38px; white-space: normal; overflow-wrap: break-word; word-break: normal; }
     .learning-form select, .learning-form input, .learning-form textarea { min-width: 0; }
     .learning-capture-status { align-self: start; max-width: 100%; max-height: none; overflow: visible; line-height: 1.35; }
     .learning-capture-status strong { display: block; color: var(--text); margin-bottom: 4px; }
@@ -4090,9 +4091,9 @@ function renderHtml() {
     .learning-flow-lane h4 { margin: 0 0 8px; font-size: 15px; }
     .learning-flow-lane ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; }
     .learning-flow-lane li { display: block; min-width: 0; }
-    .learning-flow-lane button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: break-word; align-items: start; line-height: 1.25; }
-    .learning-flow-lane button > span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--kind, var(--accent)) 78%, #fff); color: #fff; font-weight: 800; font-size: 12px; }
-    .learning-flow-lane button > div { min-width: 0; display: grid; gap: 2px; }
+    .learning-flow-lane .learning-flow-step-button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: break-word; align-items: start; line-height: 1.25; }
+    .learning-flow-lane .learning-flow-step-button > span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--kind, var(--accent)) 78%, #fff); color: #fff; font-weight: 800; font-size: 12px; }
+    .learning-flow-lane .learning-flow-step-button > div { min-width: 0; display: grid; gap: 2px; }
     .learning-flow-lane strong { display: block; font-size: 13px; }
     .learning-flow-lane em { display: block; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: break-word; }
     .learning-plan-summary { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
@@ -5332,6 +5333,12 @@ function renderHtml() {
       renderSideTopics();
       sideTopicSearch.focus();
     });
+    document.addEventListener("pointerdown", (event) => {
+      if (document.body.classList.contains("sidebar-hidden")) return;
+      if (sideTopics.contains(event.target) || sideTopicHide.contains(event.target) || sideTopicShow.contains(event.target)) return;
+      setSideTopicHidden(true);
+      localStorage.setItem("llm-wiki-side-topic-hidden", "1");
+    }, true);
     refreshProvider.addEventListener("click", () => loadProviderStatus({ reloadConfig: false }));
     refreshLocalAiRouter.addEventListener("click", runLocalAiRouterHandshake);
     reloadProviderConfig.addEventListener("click", () => loadProviderStatus({ reloadConfig: true }));
@@ -5738,14 +5745,14 @@ function renderHtml() {
     }
 
     async function fetchJsonWithTimeout(url, options = {}) {
-      const timeoutMs = Math.max(1000, Number(options.timeoutMs || 8000));
+      const timeoutMs = Math.max(1000, Number(options.timeoutMs || 12000));
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const response = await fetch(url, { signal: controller.signal });
         return await response.json();
       } catch (error) {
-        if (error.name === "AbortError") throw new Error("Request timed out while the app was indexing. Use Retry refresh.");
+        if (error.name === "AbortError") throw new Error("Request timed out while the app was indexing. Cached rows will stay visible when available.");
         throw error;
       } finally {
         clearTimeout(timer);
@@ -7136,7 +7143,7 @@ function renderHtml() {
       return '<section id="learning-numbered-flow" class="learning-map-panel learning-scroll-target"><h3>Numbered Learning Flow</h3><p class="muted">Use these lanes to know what to do now, this week, and immediately after a source finishes processing.</p>' +
         '<div class="learning-flow-lanes">' + lanes.map((lane) =>
           '<section class="learning-flow-lane ' + escapeHtml(lane.kind) + '"><h4>' + escapeHtml(lane.title) + '</h4><ol>' +
-            lane.steps.map(([label, detail, target], index) => '<li><button class="learning-target-button" type="button" data-learning-target="learning-section" data-section="' + escapeHtml(target || lane.target || "learning-numbered-flow") + '"><span>' + escapeHtml(String(index + 1)) + '</span><div><strong>' + escapeHtml(label) + '</strong><em>' + escapeHtml(detail) + '</em></div></button></li>').join("") +
+            lane.steps.map(([label, detail, target], index) => '<li><button class="learning-target-button learning-flow-step-button" type="button" data-learning-target="learning-section" data-section="' + escapeHtml(target || lane.target || "learning-numbered-flow") + '"><span>' + escapeHtml(String(index + 1)) + '</span><div><strong>' + escapeHtml(label) + '</strong><em>' + escapeHtml(detail) + '</em></div></button></li>').join("") +
           '</ol>' + (lane.actionLabel ? '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="' + escapeHtml(lane.action) + '">' + escapeHtml(lane.actionLabel) + '</button></div>' : '') + '</section>'
         ).join("") + '</div></section>';
     }
@@ -7988,7 +7995,7 @@ function renderHtml() {
         '</div>' +
         '<div><strong>Collectors:</strong> ' + escapeHtml((scan.collectors || []).join(", ") || "none") + '</div>' +
         '<div><strong>Best effort:</strong> ' + escapeHtml(supported) + '</div>' +
-        (groups.length ? '<details open><summary>Skipped files by reason and extension</summary><div class="capture-skip-list">' + groups.slice(0, 12).map((item) => {
+        (groups.length ? '<details><summary>Skipped files by reason and extension</summary><div class="capture-skip-list">' + groups.slice(0, 12).map((item) => {
           const samples = Array.isArray(item.samples) && item.samples.length ? '<div><small>Examples: ' + escapeHtml(item.samples.join(", ")) + '</small></div>' : "";
           return '<div class="capture-skip-item"><strong>' + escapeHtml(String(item.count || 0)) + ' ' + escapeHtml(item.extension || "file") + '</strong><div>' + escapeHtml(item.collector || "capture") + ': ' + escapeHtml(friendlyCaptureSkipReason(item.reason || "Skipped")) + '</div>' + samples + '</div>';
         }).join("") + '</div></details>' : '') +
@@ -7997,7 +8004,7 @@ function renderHtml() {
 
     function friendlyCaptureSkipReason(reason) {
       const text = String(reason || "Skipped");
-      if (/unsupported file type/i.test(text)) return "This extension is not yet supported for best-effort ingest.";
+      if (/unsupported file type/i.test(text)) return "This extension is not yet supported by the local extractor. It was left out instead of creating a misleading metadata-only source.";
       if (/already captured/i.test(text)) return "Already captured earlier; duplicate was not queued again.";
       if (/permission|eperm|eacces|operation not permitted/i.test(text)) return "macOS or iCloud blocked file access. Move the file to a readable local folder or grant file access, then scan again.";
       if (/directory|folder/i.test(text)) return text;

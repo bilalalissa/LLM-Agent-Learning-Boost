@@ -68,7 +68,9 @@ macOS may require Automation or Accessibility permission, and some apps do not e
 
 Safe capture scans do not start live screen recording or attach to private browser sessions. They only inspect configured local folders and approved ResourceInbox items.
 
-If an image, audio, or video file is captured but not fully analyzed, check the generated source note for the limitation. Learning Boost keeps the file local and records metadata until extraction and the selected provider can produce grounded analysis.
+If an image, audio, or video file is captured but not fully analyzed, check the generated source note for the limitation. Learning Boost tries local OCR with `tesseract`, transcript sidecars, local ASR with `whisper`, and video keyframe OCR with `ffmpeg` when available. Missing command-line tools, missing OCR language packs, long files, large files, unreadable iCloud placeholders, and provider failures are reported in processor notes instead of silently creating a useful-looking source from metadata only.
+
+For audio/video transcription, install or expose a working `whisper` command on the app PATH, or set `LEARNING_BOOST_WHISPER_COMMAND` to the executable path before launch. For Arabic image OCR, install the Arabic `tesseract` language data; otherwise Learning Boost falls back to smaller available language sets and records the limitation.
 
 ## Unexpected "Choose Application" Window
 

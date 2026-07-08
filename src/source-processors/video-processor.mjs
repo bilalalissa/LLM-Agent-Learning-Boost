@@ -2,30 +2,33 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { mediaMetadata, readSidecarTranscript } from "./audio-processor.mjs";
+import { extractAudioTranscript, mediaMetadata, readSidecarTranscript } from "./audio-processor.mjs";
 import { extractImageOcr } from "./image-processor.mjs";
 
 export function canProcessVideoSource(file) {
-  return new Set([".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp"]).has(path.extname(file).toLowerCase());
+  return new Set([".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp", ".m2ts", ".mts"]).has(path.extname(file).toLowerCase());
 }
 
 export function processVideoSource(file, options = {}) {
   const ext = path.extname(file).toLowerCase();
   const transcript = readSidecarTranscript(file);
   const metadata = mediaMetadata(file);
-  const frameOcr = transcript.text ? { text: "", evidence: [], notes: [] } : extractVideoKeyframeOcr(file, metadata, options);
-  const extractedText = [transcript.text, frameOcr.text].filter(Boolean).join("\n\n");
+  const asr = transcript.text ? { text: "", evidence: [], notes: [] } : extractAudioTranscript(file, metadata, options);
+  const frameOcr = transcript.text || asr.text ? { text: "", evidence: [], notes: [] } : extractVideoKeyframeOcr(file, metadata, options);
+  const extractedText = [transcript.text, asr.text, frameOcr.text].filter(Boolean).join("\n\n");
   return {
     kind: "video",
     title: path.basename(file, ext),
     text: extractedText || `${path.basename(file)} is preserved as a local video asset. Visual/audio content was not analyzed because no transcript, readable keyframe OCR, or permitted vision/ASR result was available.`,
     extension: ext,
     metadata,
-    evidence: transcript.evidence.length ? transcript.evidence : (frameOcr.evidence.length ? frameOcr.evidence : [path.basename(file)]),
+    evidence: transcript.evidence.length ? transcript.evidence : (asr.evidence.length ? asr.evidence : (frameOcr.evidence.length ? frameOcr.evidence : [path.basename(file)])),
     mediaRefs: [options.assetRel || path.basename(file)],
     processingNotes: [
       transcript.text ? "Video transcript sidecar ingested with timestamp evidence when present." : "No transcript sidecar found for this video.",
+      asr.text ? "Local ASR transcribed video audio for provider analysis." : "Local ASR did not produce readable video transcript text.",
       frameOcr.text ? "Video keyframe OCR extracted local text for provider analysis." : "Video keyframe OCR did not produce readable text.",
+      ...asr.notes,
       ...frameOcr.notes
     ]
   };

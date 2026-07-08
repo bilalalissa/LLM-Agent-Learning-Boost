@@ -194,6 +194,40 @@ test("video processor finds language-suffixed transcript sidecars and collapses 
   assert.match(source.processingNotes.join("\n"), /transcript sidecar/i);
 });
 
+test("audio processor uses local ASR when no transcript sidecar exists", () => {
+  const { root } = makeVault();
+  const audio = path.join(root, "lecture.mp3");
+  const whisper = path.join(root, "fake-whisper.sh");
+  fs.writeFileSync(audio, "fake audio bytes");
+  fs.writeFileSync(whisper, `#!/usr/bin/env bash
+input="$1"
+shift
+outdir=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output_dir) outdir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+name="$(basename "$input")"
+name="\${name%.*}"
+mkdir -p "$outdir"
+printf 'Local transcript line\\nLocal transcript line\\nNext idea\\n' > "$outdir/$name.txt"
+`);
+  fs.chmodSync(whisper, 0o755);
+
+  const source = processSourceFile(audio, {
+    assetRel: "raw/assets/lecture.mp3",
+    whisperCommand: whisper,
+    whisperModel: "tiny-test"
+  });
+
+  assert.equal(source.kind, "audio");
+  assert.match(source.text, /Local ASR transcript/);
+  assert.match(source.text, /Next idea/);
+  assert.match(source.processingNotes.join("\n"), /Local ASR transcribed audio/);
+});
+
 test("ingestFile leaves text sources pending when provider is unavailable", async () => {
   const { root, vault } = makeVault();
   const source = path.join(vault, "raw", "inbox", "provider-down.md");

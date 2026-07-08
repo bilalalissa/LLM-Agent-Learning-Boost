@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 const documentExtensions = new Set([
-  ".rtf", ".docx", ".doc", ".odt", ".pptx", ".ppt", ".odp",
+  ".rtf", ".docx", ".doc", ".odt", ".ods", ".pptx", ".ppt", ".odp",
   ".xlsx", ".xls", ".pages", ".numbers", ".key", ".epub", ".eml", ".msg", ".ics", ".webarchive", ".zip"
 ]);
 
@@ -19,7 +19,7 @@ export function processDocumentSource(file, options = {}) {
   else if (ext === ".docx") text = unzipXml(file, ["word/document.xml"], notes);
   else if (ext === ".pptx") text = unzipXml(file, ["ppt/slides/slide*.xml"], notes);
   else if (ext === ".xlsx") text = unzipXml(file, ["xl/sharedStrings.xml", "xl/worksheets/sheet*.xml"], notes);
-  else if ([".odt", ".odp", ".epub", ".pages", ".numbers", ".key"].includes(ext)) text = unzipXml(file, ["content.xml", "*.xhtml", "*.html", "index.xml", "Metadata/*.plist"], notes);
+  else if ([".odt", ".ods", ".odp", ".epub", ".pages", ".numbers", ".key"].includes(ext)) text = unzipXml(file, ["content.xml", "*.xhtml", "*.html", "index.xml", "Metadata/*.plist"], notes);
   else if (ext === ".webarchive") text = readTextLike(file, notes);
   else if (ext === ".eml" || ext === ".msg" || ext === ".ics") text = readTextLike(file, notes);
   else if (ext === ".doc" || ext === ".ppt" || ext === ".xls") text = convertWithTextutil(file, notes);

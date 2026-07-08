@@ -10,7 +10,7 @@ export function canProcessTextSource(file) {
     ".ipynb", ".bib", ".tex", ".sql", ".sh", ".bash", ".zsh", ".py", ".js",
     ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css", ".scss", ".java", ".c",
     ".cc", ".cpp", ".h", ".hpp", ".swift", ".go", ".rs", ".rb", ".php",
-    ".mhtml", ".vtt", ".srt", ".url", ".webloc"
+    ".mhtml", ".vtt", ".srt", ".sbv", ".smi", ".lrc", ".ass", ".ssa", ".url", ".webloc"
   ]).has(path.extname(file).toLowerCase());
 }
 

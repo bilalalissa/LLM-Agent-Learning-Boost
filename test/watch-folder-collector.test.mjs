@@ -112,8 +112,14 @@ test("watch folder collector queues expanded code web image media and archive fo
     "page.mhtml",
     "shortcut.webloc",
     "diagram.avif",
+    "icon.ico",
     "voice.m4b",
+    "meeting.caf",
     "clip.3gp",
+    "camera.m2ts",
+    "captions.sbv",
+    "captions.ass",
+    "sheet.ods",
     "bundle.zip"
   ]) {
     fs.writeFileSync(path.join(folder, name), "sample");
@@ -126,8 +132,8 @@ test("watch folder collector queues expanded code web image media and archive fo
   });
   const collected = collectWatchFolderResources(vault, { settings, previewApproved: true });
 
-  assert.equal(collected.summary.filesDiscovered, 9);
-  assert.equal(collected.summary.filesQueued, 9);
+  assert.equal(collected.summary.filesDiscovered, 15);
+  assert.equal(collected.summary.filesQueued, 15);
   assert.equal(collected.summary.filesSkipped, 0);
 });
 

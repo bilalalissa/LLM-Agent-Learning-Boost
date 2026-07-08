@@ -7,9 +7,9 @@ Stage 3 adds a processor pipeline for deeper local ingest before provider analys
 - `text-processor.mjs`: Markdown, plain text, tables, JSON/JSONL, subtitles, transcripts, and URL files.
 - `pdf-processor.mjs`: PDF text extraction with page evidence when `pdftotext` is locally available; metadata-only fallback otherwise.
 - `document-processor.mjs`: RTF through `textutil` and ZIP/XML office formats through local `unzip` when available.
-- `image-processor.mjs`: image asset preservation, dimensions/metadata, and local OCR through `tesseract` when available. If OCR returns no readable text, the source page records that limitation instead of inventing visual claims.
-- `audio-processor.mjs`: audio metadata and transcript sidecars. Sidecar matching accepts exact names plus language-suffixed captions such as `.ar-orig.srt`, `.ar.vtt`, or `.en.srt`.
-- `video-processor.mjs`: video metadata, transcript sidecars, and bounded local keyframe OCR through `ffmpeg` plus `tesseract` when no transcript is present.
+- `image-processor.mjs`: image asset preservation, dimensions/metadata, and local OCR through `tesseract` when available. It tries the configured OCR language set, then a smaller fallback such as `eng` if a language pack is missing. If OCR returns no readable text, the source page records that limitation instead of inventing visual claims.
+- `audio-processor.mjs`: audio metadata, transcript sidecars, and bounded local ASR through `whisper` when available. Sidecar matching accepts exact names plus language-suffixed captions such as `.ar-orig.srt`, `.ar.vtt`, or `.en.srt`.
+- `video-processor.mjs`: video metadata, transcript sidecars, bounded local ASR through `whisper`, and bounded local keyframe OCR through `ffmpeg` plus `tesseract` when no transcript is present.
 - `remote-video-processor.mjs`: remote video URL metadata/caption support through optional `yt-dlp`, without full video download by default.
 - `web-processor.mjs`: reader-style HTML cleanup, schema.org extraction, metadata, and media references.
 

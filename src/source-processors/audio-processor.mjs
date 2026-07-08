@@ -1,28 +1,85 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { normalizeTranscriptText } from "./text-processor.mjs";
 
 export function canProcessAudioSource(file) {
-  return new Set([".mp3", ".wav", ".m4a", ".m4b", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr"]).has(path.extname(file).toLowerCase());
+  return new Set([".mp3", ".wav", ".m4a", ".m4b", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr", ".caf", ".wma"]).has(path.extname(file).toLowerCase());
 }
 
 export function processAudioSource(file, options = {}) {
   const ext = path.extname(file).toLowerCase();
   const transcript = readSidecarTranscript(file);
   const metadata = mediaMetadata(file);
+  const asr = transcript.text ? { text: "", evidence: [], notes: [] } : extractAudioTranscript(file, metadata, options);
+  const extractedText = transcript.text || asr.text;
   return {
     kind: "audio",
     title: path.basename(file, ext),
-    text: transcript.text || `${path.basename(file)} is preserved as a local audio asset. Audio content was not transcribed because no transcript sidecar or local ASR output was available.`,
+    text: extractedText || `${path.basename(file)} is preserved as a local audio asset. Audio content was not transcribed because no transcript sidecar or local ASR output was available.`,
     extension: ext,
     metadata,
-    evidence: transcript.evidence.length ? transcript.evidence : [path.basename(file)],
+    evidence: transcript.evidence.length ? transcript.evidence : (asr.evidence.length ? asr.evidence : [path.basename(file)]),
     mediaRefs: [options.assetRel || path.basename(file)],
-    processingNotes: transcript.text
-      ? ["Audio transcript sidecar ingested with timestamp evidence when present."]
-      : ["Audio content not analyzed; metadata only. Configure local ASR or add a transcript sidecar for content extraction."]
+    processingNotes: [
+      transcript.text ? "Audio transcript sidecar ingested with timestamp evidence when present." : "No transcript sidecar found for this audio file.",
+      asr.text ? "Local ASR transcribed audio for provider analysis." : "Local ASR did not produce readable transcript text.",
+      ...asr.notes
+    ]
   };
+}
+
+export function extractAudioTranscript(file, metadata = {}, options = {}) {
+  if (options.disableAsr || process.env.LEARNING_BOOST_DISABLE_LOCAL_ASR === "1") {
+    return { text: "", evidence: [], notes: ["Local ASR disabled by configuration."] };
+  }
+  const whisperCommand = String(options.whisperCommand || process.env.LEARNING_BOOST_WHISPER_COMMAND || "whisper");
+  if (!commandAvailable(whisperCommand)) {
+    return { text: "", evidence: [], notes: [`Local ASR unavailable: ${whisperCommand} is not installed or not on PATH.`] };
+  }
+  const maxBytes = Number(options.asrMaxBytes || process.env.LEARNING_BOOST_ASR_MAX_BYTES || 450 * 1024 * 1024);
+  const maxDuration = Number(options.asrMaxDurationSeconds || process.env.LEARNING_BOOST_ASR_MAX_DURATION_SECONDS || 60 * 60);
+  try {
+    const size = fs.statSync(file).size;
+    if (size > maxBytes) {
+      return { text: "", evidence: [], notes: [`Local ASR skipped: file exceeds ${Math.round(maxBytes / (1024 * 1024))} MB limit.`] };
+    }
+  } catch {
+    return { text: "", evidence: [], notes: ["Local ASR skipped: file size unavailable."] };
+  }
+  const duration = Number(metadata.duration || 0);
+  if (duration && duration > maxDuration) {
+    return { text: "", evidence: [], notes: [`Local ASR skipped: duration exceeds ${Math.round(maxDuration / 60)} minute limit.`] };
+  }
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learning-boost-asr-"));
+  const model = String(options.whisperModel || process.env.LEARNING_BOOST_WHISPER_MODEL || "tiny");
+  const timeout = Number(options.asrTimeoutMs || process.env.LEARNING_BOOST_ASR_TIMEOUT_MS || 10 * 60 * 1000);
+  const notes = [];
+  try {
+    execFileSync(whisperCommand, [
+      file,
+      "--model", model,
+      "--output_dir", tempDir,
+      "--output_format", "txt",
+      "--verbose", "False"
+    ], {
+      encoding: "utf8",
+      timeout,
+      maxBuffer: 12 * 1024 * 1024
+    });
+    const transcriptFile = findTranscriptOutput(tempDir);
+    if (!transcriptFile) return { text: "", evidence: [], notes: [`Local ASR completed but no transcript file was produced by ${whisperCommand}.`] };
+    const raw = fs.readFileSync(transcriptFile, "utf8");
+    const text = normalizeTranscriptText(raw);
+    return text
+      ? { text: `Local ASR transcript:\n${text}`, evidence: ["local ASR transcript"], notes: [`Local ASR command: ${whisperCommand}; model: ${model}.`, ...notes] }
+      : { text: "", evidence: [], notes: [`Local ASR transcript file was empty: ${path.basename(transcriptFile)}.`] };
+  } catch (error) {
+    return { text: "", evidence: [], notes: [`Local ASR failed: ${error.message}`] };
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 export function mediaMetadata(file) {
@@ -105,4 +162,28 @@ function uniquePaths(paths) {
     seen.add(key);
     return true;
   });
+}
+
+function findTranscriptOutput(dir) {
+  try {
+    const files = fs.readdirSync(dir)
+      .filter((entry) => [".txt", ".srt", ".vtt"].includes(path.extname(entry).toLowerCase()))
+      .map((entry) => path.join(dir, entry));
+    return files[0] || "";
+  } catch {
+    return "";
+  }
+}
+
+function commandAvailable(command) {
+  try {
+    execFileSync("/usr/bin/env", ["bash", "-lc", `command -v ${shellQuote(command)}`], { stdio: "ignore", timeout: 3000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
 }

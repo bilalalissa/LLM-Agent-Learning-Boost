@@ -24,12 +24,13 @@ Opened documents can also feed the queue after preview approval. Metadata-only p
 - video files and transcript files
 - remote video URLs when transcript tools can provide source text
 
-Best-effort capture also queues common legacy or app-specific files such as `.doc`, `.xls`, `.ppt`, `.pages`, `.numbers`, `.key`, `.eml`, `.ics`, `.webarchive`, `.heif`, `.flac`, `.mkv`, `.log`, `.xml`, `.yaml`, and `.url`. If extraction is incomplete, the source remains pending or records a clear limitation instead of being marked fully processed.
+Best-effort capture also queues common legacy or app-specific files such as `.doc`, `.xls`, `.ods`, `.ppt`, `.pages`, `.numbers`, `.key`, `.eml`, `.ics`, `.webarchive`, `.heif`, `.ico`, `.flac`, `.caf`, `.wma`, `.mkv`, `.m2ts`, `.mts`, `.sbv`, `.ass`, `.ssa`, `.log`, `.xml`, `.yaml`, and `.url`. If extraction is incomplete, the source remains pending or records a clear limitation instead of being marked fully processed.
 
 For media sources, Learning Boost tries local extraction before provider analysis:
 
 - image OCR through `tesseract` when installed;
 - audio/video sidecar captions with exact or language-suffixed names;
+- bounded local audio/video ASR through `whisper` when installed;
 - video keyframe OCR through `ffmpeg` plus `tesseract` for bounded, local visual text extraction.
 
 The saved source page lists processor notes so you can see whether the app used OCR, captions, metadata only, or a manual description.

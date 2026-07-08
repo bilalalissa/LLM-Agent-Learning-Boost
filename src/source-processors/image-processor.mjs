@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 export function canProcessImageSource(file) {
-  return new Set([".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif"]).has(path.extname(file).toLowerCase());
+  return new Set([".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif", ".ico"]).has(path.extname(file).toLowerCase());
 }
 
 export function processImageSource(file, options = {}) {
@@ -36,6 +36,26 @@ export function extractImageOcr(file, options = {}) {
   }
   const languages = String(options.ocrLanguages || process.env.LEARNING_BOOST_OCR_LANGUAGES || "eng+ara");
   const timeout = Number(options.ocrTimeoutMs || process.env.LEARNING_BOOST_OCR_TIMEOUT_MS || 20000);
+  const candidates = uniqueValues([
+    languages,
+    ...languages.split(/[,+\s]+/).filter(Boolean),
+    "eng"
+  ]);
+  const notes = [];
+  for (const language of candidates) {
+    const result = runTesseract(file, language, timeout);
+    if (result.text) {
+      return {
+        text: `Local OCR text from image:\n${result.text}`,
+        notes: [...notes, `Image OCR languages: ${language}.`]
+      };
+    }
+    notes.push(result.note);
+  }
+  return { text: "", notes };
+}
+
+function runTesseract(file, languages, timeout) {
   try {
     const output = execFileSync("tesseract", [file, "stdout", "-l", languages], {
       encoding: "utf8",
@@ -44,10 +64,10 @@ export function extractImageOcr(file, options = {}) {
     });
     const text = String(output || "").replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
     return text
-      ? { text: `Local OCR text from image:\n${text}`, notes: [`Image OCR languages: ${languages}.`] }
-      : { text: "", notes: ["Image OCR completed but returned no readable text."] };
+      ? { text, note: `Image OCR languages ${languages} extracted readable text.` }
+      : { text: "", note: `Image OCR languages ${languages} completed but returned no readable text.` };
   } catch (error) {
-    return { text: "", notes: [`Image OCR failed: ${error.message}`] };
+    return { text: "", note: `Image OCR languages ${languages} failed: ${error.message}` };
   }
 }
 
@@ -77,4 +97,15 @@ function commandAvailable(command) {
 
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function uniqueValues(values) {
+  const seen = new Set();
+  return values
+    .map((value) => String(value || "").trim())
+    .filter((value) => {
+      if (!value || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
 }

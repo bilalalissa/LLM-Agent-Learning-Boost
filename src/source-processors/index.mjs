@@ -12,18 +12,18 @@ export const STAGE_3_SOURCE_EXTENSIONS = new Set([
   ".md", ".mdx", ".rst", ".markdown", ".txt", ".html", ".htm", ".mhtml", ".rtf", ".csv", ".tsv", ".json", ".jsonl",
   ".log", ".ini", ".conf", ".toml", ".xml", ".yaml", ".yml", ".ipynb", ".bib", ".tex", ".sql", ".sh", ".bash", ".zsh",
   ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css", ".scss", ".java", ".c", ".cc", ".cpp", ".h", ".hpp",
-  ".swift", ".go", ".rs", ".rb", ".php", ".docx", ".doc", ".xlsx", ".xls", ".odt", ".pptx", ".ppt", ".odp", ".pages",
+  ".swift", ".go", ".rs", ".rb", ".php", ".docx", ".doc", ".xlsx", ".xls", ".odt", ".ods", ".pptx", ".ppt", ".odp", ".pages",
   ".numbers", ".key", ".epub", ".eml", ".msg", ".ics", ".webloc", ".webarchive", ".pdf", ".zip",
-  ".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif",
-  ".mp3", ".wav", ".m4a", ".m4b", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr",
-  ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp",
-  ".vtt", ".srt", ".url"
+  ".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif", ".ico",
+  ".mp3", ".wav", ".m4a", ".m4b", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr", ".caf", ".wma",
+  ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp", ".m2ts", ".mts",
+  ".vtt", ".srt", ".sbv", ".smi", ".lrc", ".ass", ".ssa", ".url"
 ]);
 
 export const ASSET_SOURCE_EXTENSIONS = new Set([
-  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif",
-  ".mp3", ".wav", ".m4a", ".m4b", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr",
-  ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp"
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif", ".ico",
+  ".mp3", ".wav", ".m4a", ".m4b", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr", ".caf", ".wma",
+  ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp", ".m2ts", ".mts"
 ]);
 
 export function isStage3Ingestible(file) {
