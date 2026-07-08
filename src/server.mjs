@@ -6532,7 +6532,7 @@ function renderHtml() {
       try {
         const response = await fetch("/api/learning");
         const data = await response.json();
-        if (data.error) throw new Error(data.error);
+        if (data.error && !(data.vaults || []).length) throw new Error(data.error);
         learningCache = data;
         populateSelect(learningVault, (data.vaults || []).map((item) => item.vault), "Choose vault");
         renderLearningProfile();
@@ -8374,7 +8374,7 @@ function renderHtml() {
           if (sideTopicsLoadPolls <= 8) setTimeout(() => loadSideTopics(), 1400);
           return;
         }
-        if (data.error) throw new Error(data.error);
+        if (data.error && !(data.topics || []).length) throw new Error(data.error);
         sideTopicsLoadPolls = 0;
         applySideTopicsPayload(data);
       } catch (error) {

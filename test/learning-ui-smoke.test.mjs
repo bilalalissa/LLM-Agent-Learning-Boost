@@ -251,6 +251,8 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /archivesBody\.innerHTML = tabStatusRow\(6, "Loading archive history/);
   assert.doesNotMatch(serverSource, /filesBody\.innerHTML = tabStatusRow\(7/);
   assert.doesNotMatch(serverSource, /archivesBody\.innerHTML = tabStatusRow\(7/);
+  assert.match(serverSource, /if \(data\.error && !\(data\.vaults \|\| \[\]\)\.length\) throw new Error\(data\.error\);/);
+  assert.match(serverSource, /if \(data\.error && !\(data\.topics \|\| \[\]\)\.length\) throw new Error\(data\.error\);/);
   assert.match(serverSource, /api\/learning\/card-review/);
   assert.match(serverSource, /markLearningCardRead/);
   assert.match(serverSource, /displayRead/);
