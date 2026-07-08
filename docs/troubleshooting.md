@@ -8,7 +8,7 @@ Check `VAULTS_ROOT` in your config file and confirm at least one folder has `.ob
 
 The app should keep cached rows visible while a background index refresh runs. If a tab cannot finish scanning, it reports `loading`, `stale_refreshing`, `ready_empty`, or `error` instead of polling forever.
 
-Learning Boost uses the configured `VAULTS_ROOT` first. The Obsidian registry file is only a fallback unless explicitly enabled, so a slow or locked `~/Library/Application Support/obsidian/obsidian.json` should not block normal tab loading.
+Learning Boost uses the configured `VAULTS_ROOT` and its persisted vault cache for normal tab loading. The Obsidian registry file is not read unless you explicitly set `LLM_WIKI_INCLUDE_OBSIDIAN_REGISTRY=1`, so a slow or locked `~/Library/Application Support/obsidian/obsidian.json` should not block normal tab loading.
 
 If Learning opens while a deep scan is slow, it uses a fast local snapshot from `.llm-wiki/learning/` so the vault selector, cards, bits, plans, goals, and notification controls remain reachable. Retry the tab refresh after iCloud finishes syncing if stale rows or a snapshot warning remain.
 

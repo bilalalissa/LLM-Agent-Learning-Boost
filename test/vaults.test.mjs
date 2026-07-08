@@ -37,6 +37,33 @@ test("listVaults uses configured root before Obsidian registry", () => {
   }
 });
 
+test("listVaults uses explicit env vault paths without scanning root or registry", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llm-learning-env-vaults-"));
+  const traceFile = path.join(dir, "trace.log");
+  const root = path.join(dir, "Missing-root");
+  const vault = path.join(dir, "Env-vault");
+  fs.mkdirSync(vault, { recursive: true });
+  fs.writeFileSync(path.join(vault, "AGENTS.md"), "# Env\n", "utf8");
+
+  const previousPaths = process.env.LLM_WIKI_VAULT_PATHS;
+  const previousTrace = process.env.LLM_WIKI_WORKER_TRACE_FILE;
+  const previousRegistry = process.env.OBSIDIAN_VAULTS_FILE;
+  try {
+    process.env.LLM_WIKI_VAULT_PATHS = JSON.stringify(["", vault]);
+    process.env.LLM_WIKI_WORKER_TRACE_FILE = traceFile;
+    process.env.OBSIDIAN_VAULTS_FILE = path.join(dir, "missing-obsidian.json");
+
+    const vaults = listVaults(root);
+    assert.deepEqual(vaults.map(vaultName), ["Env-vault"]);
+    assert.equal(fs.existsSync(traceFile), false, "Explicit env vault paths should bypass root and registry reads");
+  } finally {
+    restoreEnv("LLM_WIKI_VAULT_PATHS", previousPaths);
+    restoreEnv("LLM_WIKI_WORKER_TRACE_FILE", previousTrace);
+    restoreEnv("OBSIDIAN_VAULTS_FILE", previousRegistry);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function restoreEnv(name, value) {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;

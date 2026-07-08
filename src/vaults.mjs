@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 
 export function listVaults(root) {
+  const envVaults = listVaultsFromEnv();
+  if (envVaults.length) return envVaults;
   const rootVaults = listVaultsUnderRoot(root);
   const registryVaults = shouldUseObsidianRegistry(rootVaults) ? listObsidianVaults() : [];
   return uniquePaths([
@@ -11,10 +13,28 @@ export function listVaults(root) {
   ]).sort((a, b) => vaultName(a).localeCompare(vaultName(b), undefined, { sensitivity: "base" }));
 }
 
+function listVaultsFromEnv() {
+  const raw = process.env.LLM_WIKI_VAULT_PATHS || "";
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return uniquePaths(parsed
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+      .map((item) => path.resolve(expandTilde(item)))
+      .filter(Boolean)
+      .filter(isDirectory))
+      .sort((a, b) => vaultName(a).localeCompare(vaultName(b), undefined, { sensitivity: "base" }));
+  } catch {
+    return [];
+  }
+}
+
 function shouldUseObsidianRegistry(rootVaults) {
   if (process.env.LLM_WIKI_SKIP_OBSIDIAN_REGISTRY === "1") return false;
   if (process.env.LLM_WIKI_INCLUDE_OBSIDIAN_REGISTRY === "1") return true;
-  return !rootVaults.length;
+  return false;
 }
 
 function listVaultsUnderRoot(root) {

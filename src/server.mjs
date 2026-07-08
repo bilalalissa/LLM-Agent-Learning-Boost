@@ -38,7 +38,6 @@ import { providerStatus } from "./provider-status.mjs";
 import { recordPlanUpdateChoice, suggestPlanUpdates } from "./plan-update-suggester.mjs";
 import { preflightStatus } from "./preflight.mjs";
 import { queueResourceInboxForIngestAsync } from "./source-capture-ingest.mjs";
-import { listArchiveHistory, listFileHistory } from "./history.mjs";
 import {
   remoteResearch,
   saveRemoteSourcesToResourceInbox,
@@ -46,7 +45,7 @@ import {
 } from "./remote-research.mjs";
 import { createReminders, exportPlanRemindersMarkdown, previewPlanRemindersMarkdown } from "./reminders-integration.mjs";
 import { exportRemnoteForVault, previewRemnoteForVault } from "./remnote-export.mjs";
-import { listBridgeVaults, sharedSettingsForVault, sharedSettingsSummary, updateSharedSettingsForVault } from "./shared-settings.mjs";
+import { defaultSharedSettings, ensureSharedSettings, writeSharedSettings } from "./shared-settings.mjs";
 import { deleteSources } from "./source-delete.mjs";
 import { mergeSources } from "./source-merge.mjs";
 import { renameSource } from "./source-rename.mjs";
@@ -61,7 +60,6 @@ import {
 } from "./source-capture.mjs";
 import { collectScreenshots } from "./source-collectors/screenshots-collector.mjs";
 import { collectWatchFolderResources } from "./source-collectors/watch-folder-collector.mjs";
-import { topicContentAsync } from "./topic-content.mjs";
 import { listVaults, readIfExists, vaultName } from "./vaults.mjs";
 
 let config = getConfig();
@@ -290,15 +288,11 @@ const server = http.createServer(async (request, response) => {
 
   if (request.method === "GET" && url.pathname === "/api/topic-content") {
     try {
-      const answer = await withTimeout(
-        topicContentAsync(config, {
-          vault: url.searchParams.get("vault"),
-          path: url.searchParams.get("path"),
-          title: url.searchParams.get("title")
-        }),
-        8000,
-        "Topic content is taking too long to read. The source may still be syncing; try again or open it from Files."
-      );
+      const answer = topicContentFromCachedVault(config, {
+        vault: url.searchParams.get("vault"),
+        path: url.searchParams.get("path"),
+        title: url.searchParams.get("title")
+      });
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ answer }));
     } catch (error) {
@@ -348,14 +342,8 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && url.pathname === "/api/learning/automation-status") {
     try {
       const vaultParam = url.searchParams.get("vault") || "";
-      const vaultPaths = vaultParam ? [resolveLearningVaultPath(vaultParam)] : cachedVaultPaths(config);
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({
-        vaults: vaultPaths.map((vaultPath) => learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath))),
-        ingestRunning,
-        ingestProgress,
-        lastIngestMessage
-      }));
+      response.end(JSON.stringify(cachedLearningAutomationStatus(vaultParam)));
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: error.message }));
@@ -974,7 +962,7 @@ const server = http.createServer(async (request, response) => {
 
   if (request.method === "GET" && url.pathname === "/api/vaults") {
     response.writeHead(200, corsHeaders({ "content-type": "application/json" }));
-    response.end(JSON.stringify({ vaults: listBridgeVaults(config) }));
+    response.end(JSON.stringify({ vaults: cachedBridgeVaults(config) }));
     return;
   }
 
@@ -1008,7 +996,7 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && url.pathname === "/api/shared-settings") {
     try {
       const vault = url.searchParams.get("vault");
-      const payload = vault ? sharedSettingsForVault(config, vault) : { vaults: sharedSettingsSummary(config) };
+      const payload = vault ? sharedSettingsForCachedVault(config, vault) : { vaults: cachedSharedSettingsSummary(config) };
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(payload));
     } catch (error) {
@@ -1023,7 +1011,7 @@ const server = http.createServer(async (request, response) => {
     try {
       const body = await readBody(request);
       const payload = JSON.parse(body || "{}");
-      const result = updateSharedSettingsForVault(config, payload.vault, payload.settings || {});
+      const result = updateSharedSettingsForCachedVault(config, payload.vault, payload.settings || {});
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(result));
     } catch (error) {
@@ -1557,7 +1545,7 @@ function listTopicsFromFastIndexes(currentConfig) {
       }
     }
   }
-  for (const record of listFileHistory(currentConfig)) {
+  for (const record of readPersistedTabCache("files")?.items || []) {
     if (!record.sourcePage) continue;
     const rel = record.sourcePage.replace(/\.md$/i, "");
     const key = `${record.vault}|${rel}`;
@@ -1621,6 +1609,53 @@ function cachedLearningPayload() {
     error: state.error,
     updatedAt: state.updatedAt
   };
+}
+
+function cachedLearningAutomationStatus(vaultParam = "") {
+  const payload = cachedLearningPayload();
+  const requested = String(vaultParam || "").trim();
+  const vaults = (payload.vaults || [])
+    .filter((item) => !requested || item.vault === requested)
+    .map((item) => {
+      const runtime = cachedVaultRuntimeForName(item.vault);
+      const automation = item.automation || {};
+      const sourceCapture = item.sourceCapture || {};
+      const notifications = item.notifications || [];
+      return {
+        settings: automation.settings || defaultFastAutomationSettings(),
+        vault: item.vault,
+        running: runtime.running === true || automation.running === true,
+        blocked: runtime.status === "blocked" || automation.blocked === true,
+        status: runtime.status || automation.status || "snapshot",
+        detail: runtime.detail || automation.detail || "Fast Learning snapshot loaded; deep automation status refreshes in the background.",
+        lastRunAt: runtime.lastRunAt || automation.lastRunAt || "",
+        lastSuccessAt: runtime.lastSuccessAt || automation.lastSuccessAt || "",
+        lastBlockedAt: runtime.lastBlockedAt || automation.lastBlockedAt || "",
+        pendingRawCount: Number(automation.pendingRawCount || 0),
+        pendingRaw: Array.isArray(automation.pendingRaw) ? automation.pendingRaw.slice(0, 12) : [],
+        pendingResourceCount: Number(automation.pendingResourceCount || sourceCapture.groups?.length || 0),
+        resourceInboxCount: Number(automation.resourceInboxCount || sourceCapture.groups?.length || 0),
+        sourceCaptureAutoProcess: sourceCapture.settings?.autoProcessCapturedResources !== false,
+        notificationsUnread: notifications.filter((notification) => !notification.readAt && notification.status !== "dismissed").length,
+        notificationsPendingNative: notifications.filter((notification) => notification.status === "pending").length
+      };
+    });
+  if (requested && !vaults.length) throw new Error(`Unknown vault: ${requested}`);
+  return {
+    vaults,
+    ingestRunning,
+    ingestProgress,
+    lastIngestMessage,
+    loading: payload.loading === true,
+    stale: payload.stale === true,
+    error: payload.error || "",
+    updatedAt: payload.updatedAt || ""
+  };
+}
+
+function cachedVaultRuntimeForName(name) {
+  const vaultPath = cachedVaultPaths(config).find((item) => vaultName(item) === name);
+  return vaultPath ? automationRuntimeFor(vaultPath) : {};
 }
 
 function hydratePersistedLearningCache(state) {
@@ -2023,9 +2058,19 @@ function refreshTabData(kind = "all", options = {}) {
   console.log(`[tab-data] ${kind} refresh started.`);
   const resultFile = tempWorkerResultFile("llm-learning-tab-data", kind);
   const traceFile = `${resultFile}.trace`;
+  const workerEnv = {
+    ...process.env,
+    LLM_WIKI_ENV_FILE: config.configFile,
+    LLM_WIKI_WORKER_TRACE_FILE: traceFile
+  };
+  if (workerEnv.LLM_WIKI_INCLUDE_OBSIDIAN_REGISTRY !== "1") {
+    workerEnv.LLM_WIKI_SKIP_OBSIDIAN_REGISTRY = "1";
+  }
+  const knownVaultPaths = cachedVaultPaths(config);
+  if (knownVaultPaths.length) workerEnv.LLM_WIKI_VAULT_PATHS = JSON.stringify(knownVaultPaths);
   const worker = spawn(process.execPath, [path.join(agentRoot, "src", "tab-data-worker.mjs"), kind, resultFile], {
     cwd: agentRoot,
-    env: { ...process.env, LLM_WIKI_ENV_FILE: config.configFile, LLM_WIKI_WORKER_TRACE_FILE: traceFile },
+    env: workerEnv,
     stdio: ["ignore", "pipe", "pipe"]
   });
   let workerStdout = "";
@@ -2282,6 +2327,36 @@ function updateVaultCacheFromLearning(data = {}) {
   updateVaultCacheFromRows((data.vaults || []).map((vault) => ({ vault: vault.vault })));
 }
 
+function cachedBridgeVaults(currentConfig = config) {
+  return cachedVaultPaths(currentConfig).map((vaultPath) => ({
+    name: vaultName(vaultPath),
+    sharedSettings: defaultSharedSettings(currentConfig)
+  }));
+}
+
+function cachedSharedSettingsSummary(currentConfig = config) {
+  return cachedVaultPaths(currentConfig).map((vaultPath) => ({
+    vault: vaultName(vaultPath),
+    settings: defaultSharedSettings(currentConfig)
+  }));
+}
+
+function sharedSettingsForCachedVault(currentConfig, name) {
+  const vaultPath = resolveCachedVaultPath(currentConfig, name);
+  return {
+    vault: vaultName(vaultPath),
+    settings: ensureSharedSettings(vaultPath, currentConfig)
+  };
+}
+
+function updateSharedSettingsForCachedVault(currentConfig, name, input) {
+  const vaultPath = resolveCachedVaultPath(currentConfig, name);
+  return {
+    vault: vaultName(vaultPath),
+    settings: writeSharedSettings(vaultPath, currentConfig, input)
+  };
+}
+
 function chooseConfigFile() {
   return runOsascript([
     "set chosenFile to choose file with prompt \"Choose LLM Agent Learning Boost config file\"",
@@ -2314,7 +2389,7 @@ function openVaultPath(vault, file) {
 }
 
 function resolveVaultMedia(config, vault, file) {
-  const vaultPath = cachedVaultPaths(config, { allowScan: true }).find((item) => vaultName(item) === vault);
+  const vaultPath = resolveCachedVaultPath(config, vault);
   if (!vaultPath) throw new Error("Unknown vault.");
   const normalized = String(file || "").replace(/\\/g, "/").replace(/^\/+/, "");
   if (!normalized || normalized.includes("\0") || normalized.split("/").includes("..")) {
@@ -2332,7 +2407,7 @@ async function exportSelectedFiles(config, payload) {
   if (!sources.length) throw new Error("Select at least one file first.");
   const format = payload.format === "text" ? "text" : "markdown";
   const action = payload.action === "save" ? "save" : "download";
-  const vaults = new Map(cachedVaultPaths(config, { allowScan: true }).map((vaultPath) => [vaultName(vaultPath), vaultPath]));
+  const vaults = new Map(cachedVaultPaths(config).map((vaultPath) => [vaultName(vaultPath), vaultPath]));
   const entries = sources.map((source) => exportEntryForSource(vaults, source));
   const content = format === "text" ? renderFilesExportText(entries) : renderFilesExportMarkdown(entries);
   const extension = format === "text" ? "txt" : "md";
@@ -3098,6 +3173,86 @@ function withTimeout(promise, timeoutMs, message) {
   ]).finally(() => clearTimeout(timer));
 }
 
+function topicContentFromCachedVault(currentConfig, input = {}) {
+  const vaultPath = resolveCachedVaultPath(currentConfig, input.vault);
+  const topicRel = normalizeSafeWikiRel(input.path);
+  const topicTitle = String(input.title || titleFromFastPath(topicRel));
+  const topicText = readIfExists(path.join(vaultPath, topicRel));
+  if (!topicText) throw new Error(`Topic page not found: ${topicRel}`);
+  const linked = parseTopicWikiLinks(topicText);
+  const ordered = topicRel.startsWith("wiki/sources/")
+    ? uniqueTopicPaths([topicRel, ...linked])
+    : uniqueTopicPaths([
+      ...linked.filter((rel) => rel.startsWith("wiki/sources/")),
+      topicRel,
+      ...linked.filter((rel) => !rel.startsWith("wiki/sources/") && rel !== topicRel)
+    ]);
+  const lines = [
+    `# ${topicTitle}`,
+    "",
+    "The selected page is shown with linked wiki pages that are already indexed locally.",
+    ""
+  ];
+  for (const rel of ordered) {
+    const text = readIfExists(path.join(vaultPath, rel));
+    if (!text) continue;
+    lines.push(`## ${rel.startsWith("wiki/sources/") ? "Source" : "Related"}: ${titleFromTopicMarkdown(text, rel)}`);
+    lines.push(`${vaultName(vaultPath)} / ${rel}`);
+    lines.push("");
+    lines.push(cleanTopicMarkdownForDisplay(text));
+    lines.push("");
+  }
+  if (ordered.length === 0) lines.push("No related wiki pages were found.");
+  return lines.join("\n");
+}
+
+function resolveCachedVaultPath(currentConfig, name) {
+  const requested = String(name || "").trim();
+  const vaults = cachedVaultPaths(currentConfig);
+  const found = requested ? vaults.find((item) => vaultName(item) === requested) : vaults[0];
+  if (found) return found;
+  if (requested && isSafeVaultName(requested)) return path.join(currentConfig.vaultsRoot, requested);
+  throw new Error("No cached vault is available yet. Retry after the Files or Learning tab refreshes.");
+}
+
+function isSafeVaultName(value) {
+  return Boolean(value) && !value.includes("/") && !value.includes("\\") && !value.includes("\0") && !value.includes("..");
+}
+
+function normalizeSafeWikiRel(value) {
+  const rel = String(value || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!rel || rel.includes("\0") || rel.split("/").includes("..")) throw new Error(`Unsafe topic path: ${value}`);
+  if (!rel.startsWith("wiki/")) throw new Error(`Topic path must be under wiki/: ${value}`);
+  return rel.endsWith(".md") ? rel : `${rel}.md`;
+}
+
+function parseTopicWikiLinks(markdown) {
+  const links = [];
+  for (const match of String(markdown || "").matchAll(/\[\[([^|\]#]+)(?:#[^|\]]+)?(?:\|[^\]]+)?\]\]/g)) {
+    const rel = match[1].trim();
+    if (!rel.startsWith("wiki/")) continue;
+    links.push(rel.endsWith(".md") ? rel : `${rel}.md`);
+  }
+  return uniqueTopicPaths(links);
+}
+
+function uniqueTopicPaths(items) {
+  return [...new Set((items || []).filter(Boolean))];
+}
+
+function titleFromTopicMarkdown(markdown, rel) {
+  const title = String(markdown || "").match(/^#\s+(.+)$/m);
+  return title ? title[1].trim() : titleFromFastPath(rel);
+}
+
+function cleanTopicMarkdownForDisplay(markdown) {
+  return String(markdown || "")
+    .replace(/^---[\s\S]*?---\s*/m, "")
+    .replace(/\n## User Highlights[\s\S]*?(?=\n## User Notes|\n##\s+[^U]|$)/m, "")
+    .replace(/\n## User Notes[\s\S]*$/m, "")
+    .trim();
+}
+
 function topicContentFallback(params) {
   const title = params.get("title") || "Selected topic";
   const vault = params.get("vault") || "current vault";
@@ -3115,9 +3270,8 @@ function topicContentFallback(params) {
 }
 
 function resolveLearningVaultPath(name) {
-  const vaults = cachedVaultPaths(config, { allowScan: true });
   const requested = String(name || "").trim();
-  const vaultPath = vaults.find((item) => vaultName(item) === requested) || vaults[0];
+  const vaultPath = resolveCachedVaultPath(config, requested);
   if (!vaultPath) throw new Error("No Obsidian vault is available.");
   return vaultPath;
 }
