@@ -12,6 +12,8 @@ Learning Boost uses the configured `VAULTS_ROOT` and its persisted vault cache f
 
 If Learning opens while a deep scan is slow, it uses a fast local snapshot from `.llm-wiki/learning/` so the vault selector, cards, bits, plans, goals, and notification controls remain reachable. Retry the tab refresh after iCloud finishes syncing if stale rows or a snapshot warning remain.
 
+If a Local sidebar topic opens with a cached summary instead of full page content, the app process could not read that live vault file quickly enough. The fallback uses the cached topic title, path, summary, type, and updated date so navigation still works. Grant `/Applications/LLM Agent Learning Boost.app` access to the vault/iCloud folder in macOS Privacy settings, make sure the file is downloaded locally, then use Retry refresh.
+
 ## Local AI Unavailable
 
 Open the Provider tab. For `local_auto`, check:

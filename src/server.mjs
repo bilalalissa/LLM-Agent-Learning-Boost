@@ -2,7 +2,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { deleteArchivedItems } from "./archive-delete.mjs";
 import { restoreArchivedItems } from "./archive-restore.mjs";
@@ -298,7 +298,7 @@ const server = http.createServer(async (request, response) => {
     } catch (error) {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
-        answer: topicContentFallback(url.searchParams),
+        answer: topicContentFallback(url.searchParams, config, error),
         error: error.message,
         timedOut: /taking too long/i.test(error.message)
       }));
@@ -3177,8 +3177,8 @@ function topicContentFromCachedVault(currentConfig, input = {}) {
   const vaultPath = resolveCachedVaultPath(currentConfig, input.vault);
   const topicRel = normalizeSafeWikiRel(input.path);
   const topicTitle = String(input.title || titleFromFastPath(topicRel));
-  const topicText = readIfExists(path.join(vaultPath, topicRel));
-  if (!topicText) throw new Error(`Topic page not found: ${topicRel}`);
+  const topicText = readTopicPageWithTimeout(path.join(vaultPath, topicRel));
+  if (!topicText) throw new Error(`Topic page unavailable from app process: ${topicRel}`);
   const linked = parseTopicWikiLinks(topicText);
   const ordered = topicRel.startsWith("wiki/sources/")
     ? uniqueTopicPaths([topicRel, ...linked])
@@ -3187,14 +3187,15 @@ function topicContentFromCachedVault(currentConfig, input = {}) {
       topicRel,
       ...linked.filter((rel) => !rel.startsWith("wiki/sources/") && rel !== topicRel)
     ]);
+  const bounded = ordered.slice(0, 6);
   const lines = [
     `# ${topicTitle}`,
     "",
     "The selected page is shown with linked wiki pages that are already indexed locally.",
     ""
   ];
-  for (const rel of ordered) {
-    const text = readIfExists(path.join(vaultPath, rel));
+  for (const rel of bounded) {
+    const text = readTopicPageWithTimeout(path.join(vaultPath, rel));
     if (!text) continue;
     lines.push(`## ${rel.startsWith("wiki/sources/") ? "Source" : "Related"}: ${titleFromTopicMarkdown(text, rel)}`);
     lines.push(`${vaultName(vaultPath)} / ${rel}`);
@@ -3202,8 +3203,35 @@ function topicContentFromCachedVault(currentConfig, input = {}) {
     lines.push(cleanTopicMarkdownForDisplay(text));
     lines.push("");
   }
+  if (ordered.length > bounded.length) {
+    lines.push(`Related pages truncated to ${bounded.length} items so the UI stays responsive.`);
+  }
   if (ordered.length === 0) lines.push("No related wiki pages were found.");
   return lines.join("\n");
+}
+
+function readTopicPageWithTimeout(file) {
+  const timeout = 1500;
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile()) return "";
+    if (stat.size > 2 * 1024 * 1024) {
+      return execFileSync("/usr/bin/head", ["-c", String(2 * 1024 * 1024), file], {
+        encoding: "utf8",
+        maxBuffer: 2 * 1024 * 1024,
+        timeout,
+        killSignal: "SIGKILL"
+      });
+    }
+    return execFileSync("/bin/cat", [file], {
+      encoding: "utf8",
+      maxBuffer: 2 * 1024 * 1024,
+      timeout,
+      killSignal: "SIGKILL"
+    });
+  } catch {
+    return "";
+  }
 }
 
 function resolveCachedVaultPath(currentConfig, name) {
@@ -3253,20 +3281,41 @@ function cleanTopicMarkdownForDisplay(markdown) {
     .trim();
 }
 
-function topicContentFallback(params) {
+function topicContentFallback(params, currentConfig = config, error = null) {
   const title = params.get("title") || "Selected topic";
   const vault = params.get("vault") || "current vault";
   const rel = params.get("path") || "";
+  const cached = cachedTopicRow(currentConfig, { vault, title, path: rel });
   return [
     `# ${title}`,
     "",
-    "The app could not finish reading this topic page within the UI timeout.",
+    "The app could not read the live vault page from this app process, so it is showing the cached index entry instead.",
     "",
     `Vault: ${vault}`,
     rel ? `Path: ${rel}` : "",
+    cached?.type ? `Type: ${cached.type}` : "",
+    cached?.updated ? `Updated: ${cached.updated}` : "",
+    cached?.summary ? `Summary: ${cached.summary}` : "",
+    error?.message ? `Read detail: ${error.message}` : "",
     "",
-    "Try again after iCloud or Obsidian finishes syncing, or open the source from the Files/Topics table."
+    "Try again after iCloud finishes syncing, grant the app access to the vault folder, or open the source from the Files/Topics table.",
+    cached?.tags?.length ? `Tags: ${cached.tags.join(", ")}` : ""
   ].filter(Boolean).join("\n");
+}
+
+function cachedTopicRow(currentConfig, input = {}) {
+  const requestedVault = String(input.vault || "").trim();
+  const requestedTitle = String(input.title || "").trim().toLowerCase();
+  const requestedPath = String(input.path || "").trim().replace(/\.md$/i, "");
+  const state = tabDataCache.topics || cacheState();
+  hydratePersistedTabCache("topics", state);
+  const rows = state.items?.length ? state.items : listTopicsFromFastIndexes(currentConfig);
+  return (rows || []).find((item) => {
+    if (requestedVault && item.vault !== requestedVault) return false;
+    const itemPath = String(item.path || "").replace(/\.md$/i, "");
+    const itemTitle = String(item.title || "").trim().toLowerCase();
+    return (requestedPath && itemPath === requestedPath) || (requestedTitle && itemTitle === requestedTitle);
+  }) || null;
 }
 
 function resolveLearningVaultPath(name) {
@@ -4099,7 +4148,7 @@ function renderHtml() {
           </tr>
         </thead>
         <tbody id="files-body">
-          <tr><td colspan="7" class="muted">Loading...</td></tr>
+          <tr><td colspan="6" class="muted">Loading...</td></tr>
         </tbody>
       </table>
     </section>
@@ -4132,7 +4181,7 @@ function renderHtml() {
           </tr>
         </thead>
         <tbody id="archives-body">
-          <tr><td colspan="7" class="muted">Loading...</td></tr>
+          <tr><td colspan="6" class="muted">Loading...</td></tr>
         </tbody>
       </table>
     </section>
@@ -5564,7 +5613,7 @@ function renderHtml() {
     }
 
     async function loadFiles(options = {}) {
-      if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Loading vault files...", "files");
+      if (!filesCache.length) filesBody.innerHTML = tabStatusRow(6, "Loading vault files...", "files");
       try {
         const data = await fetchJsonWithTimeout("/api/files" + (options.refresh ? "?refresh=1" : ""));
         const nextFiles = data.files || [];
@@ -5582,7 +5631,7 @@ function renderHtml() {
           if (filesCache.length) {
             renderFilesTable();
           } else {
-            filesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Vault files are still being indexed."), "files", filesLoadPolls > 8);
+            filesBody.innerHTML = tabStatusRow(6, tabStatusMessage(data, "Vault files are still being indexed."), "files", filesLoadPolls > 8);
           }
           if (filesLoadPolls <= 8) setTimeout(() => loadFiles(), 1400);
           return;
@@ -5596,9 +5645,9 @@ function renderHtml() {
         filesLoadPolls = 9;
         if (filesCache.length) {
           renderFilesTable();
-          filesBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached files. Refresh failed: " + error.message, "files", true));
+          filesBody.insertAdjacentHTML("afterbegin", tabStatusRow(6, "Showing cached files. Refresh failed: " + error.message, "files", true));
         } else {
-          filesBody.innerHTML = tabStatusRow(7, error.message, "files", true);
+          filesBody.innerHTML = tabStatusRow(6, error.message, "files", true);
         }
       }
     }
@@ -5610,12 +5659,12 @@ function renderHtml() {
         .filter((file) => !filesStatusFilter.value || file.status === filesStatusFilter.value), "files");
       if (!filesCache.length) {
         tableSelection.files.visibleKeys = [];
-        filesBody.innerHTML = '<tr><td colspan="7" class="muted">No processed files yet.</td></tr>';
+        filesBody.innerHTML = '<tr><td colspan="6" class="muted">No processed files yet.</td></tr>';
         return;
       }
       if (!files.length) {
         tableSelection.files.visibleKeys = [];
-        filesBody.innerHTML = '<tr><td colspan="7" class="muted">No files match the current filters.</td></tr>';
+        filesBody.innerHTML = '<tr><td colspan="6" class="muted">No files match the current filters.</td></tr>';
         return;
       }
       tableSelection.files.visibleKeys = files.map((file) => sourceSelectionKey(file));
@@ -5884,7 +5933,7 @@ function renderHtml() {
     }
 
     async function loadArchives(options = {}) {
-      if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Loading archive history...", "archives");
+      if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(6, "Loading archive history...", "archives");
       try {
         const data = await fetchJsonWithTimeout("/api/archives" + (options.refresh ? "?refresh=1" : ""));
         const nextArchives = data.archives || [];
@@ -5902,7 +5951,7 @@ function renderHtml() {
           if (archivesCache.length) {
             renderArchivesTable();
           } else {
-            archivesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Archive history is still being indexed."), "archives", archivesLoadPolls > 8);
+            archivesBody.innerHTML = tabStatusRow(6, tabStatusMessage(data, "Archive history is still being indexed."), "archives", archivesLoadPolls > 8);
           }
           if (archivesLoadPolls <= 8) setTimeout(() => loadArchives(), 1400);
           return;
@@ -5916,9 +5965,9 @@ function renderHtml() {
         archivesLoadPolls = 9;
         if (archivesCache.length) {
           renderArchivesTable();
-          archivesBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached archives. Refresh failed: " + error.message, "archives", true));
+          archivesBody.insertAdjacentHTML("afterbegin", tabStatusRow(6, "Showing cached archives. Refresh failed: " + error.message, "archives", true));
         } else {
-          archivesBody.innerHTML = tabStatusRow(7, error.message, "archives", true);
+          archivesBody.innerHTML = tabStatusRow(6, error.message, "archives", true);
         }
       }
     }
@@ -5930,12 +5979,12 @@ function renderHtml() {
         .filter((item) => !archivesKindFilter.value || item.kind === archivesKindFilter.value), "archives");
       if (!archivesCache.length) {
         tableSelection.archives.visibleKeys = [];
-        archivesBody.innerHTML = '<tr><td colspan="7" class="muted">No archived sources yet.</td></tr>';
+        archivesBody.innerHTML = '<tr><td colspan="6" class="muted">No archived sources yet.</td></tr>';
         return;
       }
       if (!archives.length) {
         tableSelection.archives.visibleKeys = [];
-        archivesBody.innerHTML = '<tr><td colspan="7" class="muted">No archived items match the current filters.</td></tr>';
+        archivesBody.innerHTML = '<tr><td colspan="6" class="muted">No archived items match the current filters.</td></tr>';
         return;
       }
       tableSelection.archives.visibleKeys = archives.map((item) => archiveSelectionKey(item));
@@ -8728,12 +8777,6 @@ function renderHtml() {
       } catch (error) {
         localAnswer.textContent = error.message;
       }
-    }
-
-    function activateTab(name) {
-      tabs.forEach((item) => item.classList.toggle("active", item.dataset.tab === name));
-      document.querySelectorAll(".panel").forEach((item) => item.classList.remove("active"));
-      document.querySelector("#" + name + "-panel").classList.add("active");
     }
 
     function isScaffoldTopic(topic) {
