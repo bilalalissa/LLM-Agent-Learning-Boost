@@ -101,6 +101,36 @@ test("watch folder collector queues common best-effort document media and text f
   assert.equal(collected.every((item) => item.captured), true);
 });
 
+test("watch folder collector queues expanded code web image media and archive formats", () => {
+  const { vault, root } = makeVault();
+  const folder = path.join(root, "watched-expanded-formats");
+  fs.mkdirSync(folder);
+  for (const name of [
+    "notebook.ipynb",
+    "script.py",
+    "component.tsx",
+    "page.mhtml",
+    "shortcut.webloc",
+    "diagram.avif",
+    "voice.m4b",
+    "clip.3gp",
+    "bundle.zip"
+  ]) {
+    fs.writeFileSync(path.join(folder, name), "sample");
+  }
+
+  const settings = updateSourceCaptureSettings(vault, {
+    enabled: true,
+    watchFolders: [folder],
+    watchFolderIngestMode: "ready_for_ingest"
+  });
+  const collected = collectWatchFolderResources(vault, { settings, previewApproved: true });
+
+  assert.equal(collected.summary.filesDiscovered, 9);
+  assert.equal(collected.summary.filesQueued, 9);
+  assert.equal(collected.summary.filesSkipped, 0);
+});
+
 test("relative common watch folder names are normalized to the user home folder in settings", () => {
   const { vault } = makeVault();
   const settings = updateSourceCaptureSettings(vault, {

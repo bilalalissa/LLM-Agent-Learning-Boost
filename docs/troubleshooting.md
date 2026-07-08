@@ -4,6 +4,14 @@
 
 Check `VAULTS_ROOT` in your config file and confirm at least one folder has `.obsidian`, `AGENTS.md`, or a `*-vault` name.
 
+## Files, Archive, Topics, Or Learning Stay On Loading
+
+The app should keep cached rows visible while a background index refresh runs. If a tab cannot finish scanning, it reports `loading`, `stale_refreshing`, `ready_empty`, or `error` instead of polling forever.
+
+Learning Boost uses the configured `VAULTS_ROOT` first. The Obsidian registry file is only a fallback unless explicitly enabled, so a slow or locked `~/Library/Application Support/obsidian/obsidian.json` should not block normal tab loading.
+
+If Learning opens while a deep scan is slow, it uses a fast local snapshot from `.llm-wiki/learning/` so the vault selector, cards, bits, plans, goals, and notification controls remain reachable. Retry the tab refresh after iCloud finishes syncing if stale rows or a snapshot warning remain.
+
 ## Local AI Unavailable
 
 Open the Provider tab. For `local_auto`, check:
@@ -57,6 +65,12 @@ macOS may require Automation or Accessibility permission, and some apps do not e
 Safe capture scans do not start live screen recording or attach to private browser sessions. They only inspect configured local folders and approved ResourceInbox items.
 
 If an image, audio, or video file is captured but not fully analyzed, check the generated source note for the limitation. Learning Boost keeps the file local and records metadata until extraction and the selected provider can produce grounded analysis.
+
+## Unexpected "Choose Application" Window
+
+Older installer builds used an AppleScript app-name lookup before replacing the app bundle. macOS could show a `Choose Application` dialog asking where `LLMWikiAgent` or `LLM Agent Learning Boost` is. The installer now stops the running helper process directly and does not trigger that chooser.
+
+If the dialog is already open, cancel it once, reinstall the current app, and relaunch from `/Applications/LLM Agent Learning Boost.app`.
 
 ## RemNote Export Requires Confirmation
 

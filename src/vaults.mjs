@@ -3,22 +3,18 @@ import os from "node:os";
 import path from "node:path";
 
 export function listVaults(root) {
-  const registryVaults = listObsidianVaults();
-  const rootVaults = shouldScanVaultsRoot(root, registryVaults) ? listVaultsUnderRoot(root) : [];
+  const rootVaults = listVaultsUnderRoot(root);
+  const registryVaults = shouldUseObsidianRegistry(rootVaults) ? listObsidianVaults() : [];
   return uniquePaths([
     ...rootVaults,
     ...registryVaults
   ]).sort((a, b) => vaultName(a).localeCompare(vaultName(b), undefined, { sensitivity: "base" }));
 }
 
-function shouldScanVaultsRoot(root, registryVaults) {
-  if (process.env.LLM_WIKI_SCAN_VAULTS_ROOT === "1") return true;
-  const resolvedRoot = path.resolve(expandTilde(root || "."));
-  if (!registryVaults.length) return true;
-  return !registryVaults.some((vaultPath) => {
-    const resolvedVault = path.resolve(vaultPath);
-    return resolvedVault === resolvedRoot || resolvedVault.startsWith(resolvedRoot + path.sep);
-  });
+function shouldUseObsidianRegistry(rootVaults) {
+  if (process.env.LLM_WIKI_SKIP_OBSIDIAN_REGISTRY === "1") return false;
+  if (process.env.LLM_WIKI_INCLUDE_OBSIDIAN_REGISTRY === "1") return true;
+  return !rootVaults.length;
 }
 
 function listVaultsUnderRoot(root) {
@@ -167,19 +163,52 @@ function collectDirectRawFiles(dir, result) {
 
 const ingestibleExtensions = new Set([
   ".md",
+  ".mdx",
+  ".rst",
   ".txt",
   ".markdown",
   ".html",
   ".htm",
+  ".mhtml",
   ".rtf",
   ".csv",
   ".tsv",
   ".log",
+  ".ini",
+  ".conf",
+  ".toml",
   ".xml",
   ".yaml",
   ".yml",
   ".json",
   ".jsonl",
+  ".ipynb",
+  ".bib",
+  ".tex",
+  ".sql",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".py",
+  ".js",
+  ".mjs",
+  ".cjs",
+  ".ts",
+  ".tsx",
+  ".jsx",
+  ".css",
+  ".scss",
+  ".java",
+  ".c",
+  ".cc",
+  ".cpp",
+  ".h",
+  ".hpp",
+  ".swift",
+  ".go",
+  ".rs",
+  ".rb",
+  ".php",
   ".docx",
   ".doc",
   ".xlsx",
@@ -193,13 +222,17 @@ const ingestibleExtensions = new Set([
   ".key",
   ".epub",
   ".eml",
+  ".msg",
   ".ics",
+  ".webloc",
   ".webarchive",
   ".png",
   ".jpg",
   ".jpeg",
+  ".jfif",
   ".gif",
   ".webp",
+  ".avif",
   ".bmp",
   ".tif",
   ".tiff",
@@ -210,6 +243,7 @@ const ingestibleExtensions = new Set([
   ".mp3",
   ".wav",
   ".m4a",
+  ".m4b",
   ".aiff",
   ".aac",
   ".flac",
@@ -222,9 +256,15 @@ const ingestibleExtensions = new Set([
   ".webm",
   ".mkv",
   ".avi",
+  ".wmv",
+  ".flv",
+  ".mpg",
+  ".mpeg",
+  ".3gp",
   ".vtt",
   ".srt",
-  ".url"
+  ".url",
+  ".zip"
 ]);
 
 export function isIngestibleRawFile(file) {
@@ -234,19 +274,52 @@ export function isIngestibleRawFile(file) {
 export function isTextRawFile(file) {
   return new Set([
     ".md",
+    ".mdx",
+    ".rst",
     ".txt",
     ".markdown",
     ".html",
     ".htm",
+    ".mhtml",
     ".rtf",
     ".csv",
     ".tsv",
     ".log",
+    ".ini",
+    ".conf",
+    ".toml",
     ".xml",
     ".yaml",
     ".yml",
     ".json",
     ".jsonl",
+    ".ipynb",
+    ".bib",
+    ".tex",
+    ".sql",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".py",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".css",
+    ".scss",
+    ".java",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".swift",
+    ".go",
+    ".rs",
+    ".rb",
+    ".php",
     ".docx",
     ".doc",
     ".xlsx",
@@ -260,7 +333,9 @@ export function isTextRawFile(file) {
     ".key",
     ".epub",
     ".eml",
+    ".msg",
     ".ics",
+    ".webloc",
     ".webarchive",
     ".pdf",
     ".vtt",

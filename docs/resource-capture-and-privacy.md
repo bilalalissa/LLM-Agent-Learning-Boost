@@ -98,10 +98,10 @@ The collector normalizes common relative folders such as `Downloads` to the loca
 
 The collector queues best-effort sources for common formats instead of silently ignoring them:
 
-- Documents: `.pdf`, `.docx`, `.doc`, `.xlsx`, `.xls`, `.pptx`, `.ppt`, `.pages`, `.numbers`, `.key`, `.rtf`, `.html`, `.htm`, `.webarchive`, `.eml`, `.ics`.
-- Text and data: `.md`, `.markdown`, `.txt`, `.log`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.xml`, `.yaml`, `.yml`, `.srt`, `.vtt`, `.url`.
-- Images: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`, `.tif`, `.tiff`, `.heic`, `.heif`.
-- Media: `.mp3`, `.m4a`, `.wav`, `.flac`, `.ogg`, `.opus`, `.amr`, `.mp4`, `.mov`, `.m4v`, `.webm`, `.mkv`, `.avi`.
+- Documents: `.pdf`, `.docx`, `.doc`, `.xlsx`, `.xls`, `.pptx`, `.ppt`, `.pages`, `.numbers`, `.key`, `.rtf`, `.html`, `.htm`, `.mhtml`, `.webarchive`, `.eml`, `.msg`, `.ics`, `.epub`.
+- Text, code, and data: `.md`, `.mdx`, `.markdown`, `.rst`, `.txt`, `.log`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.ipynb`, `.xml`, `.yaml`, `.yml`, `.toml`, `.ini`, `.conf`, `.sql`, `.tex`, `.bib`, `.sh`, `.bash`, `.zsh`, `.py`, `.js`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.jsx`, `.css`, `.scss`, `.java`, `.c`, `.cc`, `.cpp`, `.h`, `.hpp`, `.swift`, `.go`, `.rs`, `.rb`, `.php`, `.srt`, `.vtt`, `.url`, `.webloc`.
+- Images: `.png`, `.jpg`, `.jpeg`, `.jfif`, `.gif`, `.webp`, `.avif`, `.bmp`, `.tif`, `.tiff`, `.heic`, `.heif`, `.svg`.
+- Media and archives: `.mp3`, `.m4a`, `.m4b`, `.wav`, `.aiff`, `.aac`, `.flac`, `.ogg`, `.opus`, `.amr`, `.mp4`, `.mov`, `.m4v`, `.webm`, `.mkv`, `.avi`, `.wmv`, `.flv`, `.mpg`, `.mpeg`, `.3gp`, `.zip`.
 
 When full extraction is not available, the item can still become a pending media or metadata source with a clear limitation. It is not marked fully processed until extraction and provider analysis actually succeed.
 

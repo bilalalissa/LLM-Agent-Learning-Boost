@@ -85,8 +85,8 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /button\.learning-chip:disabled/);
   assert.ok(serverSource.includes(".learning-stepper li { position: relative; display: block;"));
   assert.ok(serverSource.includes(".learning-flow-lane li { display: block;"));
-  assert.match(serverSource, /\.learning-stepper button \{[^}]*overflow-wrap: normal/);
-  assert.match(serverSource, /\.learning-flow-lane button \{[^}]*overflow-wrap: normal/);
+  assert.match(serverSource, /\.learning-stepper button \{[^}]*overflow-wrap: break-word/);
+  assert.match(serverSource, /\.learning-flow-lane button \{[^}]*overflow-wrap: break-word/);
   assert.doesNotMatch(serverSource, /\.learning-jump, \.learning-target-button \{[^}]*overflow-wrap: anywhere/);
   assert.ok(!serverSource.includes(".learning-stepper li { position: relative; display: grid; grid-template-columns: 28px"));
   assert.ok(!serverSource.includes(".learning-flow-lane li { display: grid; grid-template-columns: 28px"));

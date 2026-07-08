@@ -14,6 +14,7 @@ import { answerQuestion } from "./chat-lib.mjs";
 import { saveChatAsRawSource } from "./chat-source.mjs";
 import { preflightBrowserClip, saveBrowserClip } from "./clip.mjs";
 import { ingestVault } from "./ingest-lib.mjs";
+import { enrichLearningBitForDisplay, enrichLearningCardForDisplay } from "./learning-card-display.mjs";
 import {
   learningAutomationStatus,
   readLearningNotifications,
@@ -99,11 +100,23 @@ const tabDataCache = {
 };
 const tabDataWorkers = new Map();
 const tabDataRefreshScheduled = new Set();
+let providerStatusWorker = null;
+const providerStatusCache = {
+  data: null,
+  loading: false,
+  error: "",
+  updatedAt: ""
+};
 const listTabKinds = new Set(["files", "archives", "topics"]);
 const tabCacheDir = path.join(os.homedir(), "Library", "Application Support", "LLM Agent Learning Boost", "tab-cache");
+const startupTabRefreshDelayMs = positiveEnvNumber("LLM_WIKI_STARTUP_TAB_REFRESH_DELAY_MS", 12000);
+const startupAutoIngestDelayMs = positiveEnvNumber("LLM_WIKI_STARTUP_AUTO_INGEST_DELAY_MS", 30000);
 const learningAutomationRuntime = new Map();
+let vaultPathCache = [];
+let vaultPathCacheRoot = "";
 const captureScanRuntime = new Map();
 const captureScanWorkers = new Map();
+installSyncReadDirTrace();
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
@@ -277,16 +290,24 @@ const server = http.createServer(async (request, response) => {
 
   if (request.method === "GET" && url.pathname === "/api/topic-content") {
     try {
-      const answer = await topicContentAsync(config, {
-        vault: url.searchParams.get("vault"),
-        path: url.searchParams.get("path"),
-        title: url.searchParams.get("title")
-      });
+      const answer = await withTimeout(
+        topicContentAsync(config, {
+          vault: url.searchParams.get("vault"),
+          path: url.searchParams.get("path"),
+          title: url.searchParams.get("title")
+        }),
+        8000,
+        "Topic content is taking too long to read. The source may still be syncing; try again or open it from Files."
+      );
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ answer }));
     } catch (error) {
-      response.writeHead(500, { "content-type": "application/json" });
-      response.end(JSON.stringify({ error: error.message }));
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        answer: topicContentFallback(url.searchParams),
+        error: error.message,
+        timedOut: /taking too long/i.test(error.message)
+      }));
     }
     return;
   }
@@ -298,7 +319,7 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname === "/api/provider-status") {
-    const status = await providerStatus(config);
+    const status = await cachedProviderStatus({ force: url.searchParams.get("refresh") === "1" });
     recordProviderFallbackIfNeeded(status);
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(status));
@@ -327,7 +348,7 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && url.pathname === "/api/learning/automation-status") {
     try {
       const vaultParam = url.searchParams.get("vault") || "";
-      const vaultPaths = vaultParam ? [resolveLearningVaultPath(vaultParam)] : listVaults(config.vaultsRoot);
+      const vaultPaths = vaultParam ? [resolveLearningVaultPath(vaultParam)] : cachedVaultPaths(config);
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
         vaults: vaultPaths.map((vaultPath) => learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath))),
@@ -1285,10 +1306,14 @@ const server = http.createServer(async (request, response) => {
 
 server.listen(config.chatPort, config.bridgeHost, () => {
   console.log(`LLM Agent Learning Boost UI: http://${config.bridgeHost}:${config.chatPort}`);
-  void localAiRouterSupervisor.start();
-  ["files", "archives", "topics"].forEach((kind, index) => {
-    setTimeout(() => scheduleTabDataRefresh(kind), 250 + (index * 800));
-  });
+  setTimeout(() => {
+    void localAiRouterSupervisor.start();
+  }, 1000);
+  if (process.env.LLM_WIKI_DISABLE_STARTUP_TAB_REFRESH !== "1") {
+    ["files", "archives", "topics"].forEach((kind, index) => {
+      setTimeout(() => scheduleTabDataRefresh(kind), startupTabRefreshDelayMs + (index * 2500));
+    });
+  }
   ensureAutoIngestScheduler();
 });
 
@@ -1317,7 +1342,7 @@ function ensureAutoIngestScheduler() {
   autoIngestStartTimer = setTimeout(() => {
     autoIngestStartTimer = null;
     void startAutoIngest();
-  }, 1500);
+  }, Math.max(5000, startupAutoIngestDelayMs));
 }
 
 function stopAutoIngestScheduler() {
@@ -1357,6 +1382,104 @@ function cacheState() {
     lastFinishedAt: "",
     updatedAt: ""
   };
+}
+
+function positiveEnvNumber(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function installSyncReadDirTrace() {
+  if (process.env.LLM_WIKI_TRACE_SYNC_READDIR !== "1") return;
+  const traceFile = process.env.LLM_WIKI_SYNC_READDIR_TRACE_FILE ||
+    path.join(os.homedir(), "Library", "Application Support", "LLM Agent Learning Boost", "sync-readdir-trace.log");
+  const original = fs.readdirSync.bind(fs);
+  try {
+    fs.readdirSync = function tracedReadDirSync(target, options) {
+      try {
+        fs.mkdirSync(path.dirname(traceFile), { recursive: true });
+        fs.appendFileSync(
+          traceFile,
+          `${new Date().toISOString()} readdirSync ${String(target)}\n${new Error().stack.split("\n").slice(2, 8).join("\n")}\n\n`,
+          "utf8"
+        );
+      } catch {
+        // Tracing must never affect app behavior.
+      }
+      return original(target, options);
+    };
+  } catch {
+    // Some runtimes may not allow patching the imported fs object.
+  }
+}
+
+function cachedVaultPaths(currentConfig = config, options = {}) {
+  const root = path.resolve(currentConfig.vaultsRoot || ".");
+  if (vaultPathCacheRoot === root && vaultPathCache.length) return vaultPathCache;
+  const persisted = readPersistedVaultPaths(currentConfig);
+  if (persisted.length) return setVaultPathCache(currentConfig, persisted, { persist: false });
+  const derived = deriveVaultPathsFromPersistedCaches(currentConfig);
+  if (derived.length) return setVaultPathCache(currentConfig, derived, { persist: true });
+  if (options.allowScan === true) return setVaultPathCache(currentConfig, listVaults(currentConfig.vaultsRoot), { persist: true });
+  return [];
+}
+
+function setVaultPathCache(currentConfig = config, vaultPaths = [], options = {}) {
+  const root = path.resolve(currentConfig.vaultsRoot || ".");
+  const unique = [];
+  const seen = new Set();
+  for (const item of vaultPaths) {
+    const full = path.resolve(String(item || ""));
+    if (!full || seen.has(full)) continue;
+    seen.add(full);
+    unique.push(full);
+  }
+  vaultPathCacheRoot = root;
+  vaultPathCache = unique;
+  if (options.persist !== false && unique.length) writePersistedVaultPaths(currentConfig, unique);
+  return vaultPathCache;
+}
+
+function deriveVaultPathsFromPersistedCaches(currentConfig = config) {
+  const names = new Set();
+  for (const kind of ["files", "archives", "topics"]) {
+    for (const item of readPersistedTabCache(kind)?.items || []) {
+      if (item?.vault) names.add(String(item.vault));
+    }
+  }
+  for (const item of readPersistedLearningCache()?.data?.vaults || []) {
+    if (item?.vault) names.add(String(item.vault));
+  }
+  return [...names]
+    .filter((name) => name && !name.includes("/") && !name.includes("\\") && !name.includes("\0"))
+    .map((name) => path.join(currentConfig.vaultsRoot, name));
+}
+
+function persistedVaultCacheFile() {
+  return path.join(tabCacheDir, "vaults.json");
+}
+
+function readPersistedVaultPaths(currentConfig = config) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(persistedVaultCacheFile(), "utf8"));
+    if (path.resolve(parsed.root || "") !== path.resolve(currentConfig.vaultsRoot || ".")) return [];
+    return Array.isArray(parsed.vaults) ? parsed.vaults : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePersistedVaultPaths(currentConfig = config, vaultPaths = []) {
+  try {
+    fs.mkdirSync(tabCacheDir, { recursive: true });
+    fs.writeFileSync(
+      persistedVaultCacheFile(),
+      JSON.stringify({ root: path.resolve(currentConfig.vaultsRoot || "."), vaults: vaultPaths, updatedAt: new Date().toISOString() }, null, 2),
+      "utf8"
+    );
+  } catch (error) {
+    console.warn(`[tab-data] failed to write vault cache: ${error.message}`);
+  }
 }
 
 function cachedTabPayload(kind) {
@@ -1404,11 +1527,12 @@ function hydratePersistedTabCache(kind, state) {
   state.ready = true;
   state.error = state.error || "";
   state.updatedAt = persisted.updatedAt || new Date().toISOString();
+  updateVaultCacheFromRows(state.items);
 }
 
 function listTopicsFromFastIndexes(currentConfig) {
   const topics = new Map();
-  for (const vaultPath of listVaults(currentConfig.vaultsRoot)) {
+  for (const vaultPath of cachedVaultPaths(currentConfig)) {
     const vault = vaultName(vaultPath);
     const index = readIfExists(path.join(vaultPath, "index.md"));
     for (const line of index.split(/\r?\n/)) {
@@ -1476,16 +1600,263 @@ function dateFromFastLocal(value) {
 
 function cachedLearningPayload() {
   const state = tabDataCache.learning || cacheState();
+  hydratePersistedLearningCache(state);
+  if (!state.data?.vaults?.length) {
+    const fast = buildFastLearningPayload(config);
+    if (fast.vaults.length) {
+      state.data = fast;
+      state.ready = true;
+      state.loading = false;
+      state.error = state.error || "Showing a fast Learning snapshot while deeper learning scans refresh in the background.";
+      state.updatedAt = state.updatedAt || new Date().toISOString();
+    }
+  }
   const stale = isTabCacheStale(state);
   if ((!state.ready || stale) && !state.loading) scheduleTabDataRefresh("learning");
   const data = state.data ? enrichLearningRuntime(state.data) : { vaults: [], appProfileIndex: { schemaVersion: 1, profiles: [] } };
   return {
     ...data,
-    loading: !state.ready || state.loading,
+    loading: (!state.ready || state.loading) && !(data.vaults || []).length,
     stale,
     error: state.error,
     updatedAt: state.updatedAt
   };
+}
+
+function hydratePersistedLearningCache(state) {
+  if (state.data?.vaults?.length) return;
+  const persisted = readPersistedLearningCache();
+  if (!persisted?.data?.vaults?.length) return;
+  state.data = persisted.data;
+  state.ready = true;
+  state.error = state.error || "";
+  state.updatedAt = persisted.updatedAt || new Date().toISOString();
+  updateVaultCacheFromLearning(state.data);
+}
+
+function buildFastLearningPayload(currentConfig) {
+  const vaultPaths = cachedVaultPaths(currentConfig);
+  return {
+    vaults: vaultPaths.map((vaultPath) => fastLearningVault(vaultPath)),
+    appProfileIndex: safeReadJson(appProfileIndexFile(), { schemaVersion: 1, profiles: [] })
+  };
+}
+
+function fastLearningVault(vaultPath) {
+  const vault = vaultName(vaultPath);
+  const dir = path.join(vaultPath, ".llm-wiki", "learning");
+  const userProfile = safeReadJson(path.join(dir, "user-profile.json"), {
+    profileId: "default",
+    displayName: "",
+    firstLanguage: "",
+    targetLanguages: [],
+    interfaceLanguage: "",
+    workingMemoryMode: "friendly",
+    preferredSessionMinutes: 25
+  });
+  const learningProfile = safeReadJson(path.join(dir, "profile.json"), {
+    activeProfileId: userProfile.profileId || "default",
+    firstLanguage: userProfile.firstLanguage || "",
+    targetLanguages: userProfile.targetLanguages || [],
+    workingMemoryMode: userProfile.workingMemoryMode || "friendly",
+    preferredSessionMinutes: userProfile.preferredSessionMinutes || 25,
+    maxVisibleActions: 3,
+    maxNewConceptsPerSession: 5,
+    scheduler: "spaced"
+  });
+  const bits = safeReadJsonl(path.join(dir, "bits.jsonl"));
+  const cards = safeReadJsonl(path.join(dir, "cards.jsonl"));
+  const reviews = safeReadJsonl(path.join(dir, "review-log.jsonl"));
+  const plans = safeReadJsonl(path.join(dir, "plans.jsonl"));
+  const goals = safeReadJsonl(path.join(dir, "goals.jsonl"));
+  const sourceLinks = safeReadJsonl(path.join(dir, "source-links.jsonl"));
+  const updateSuggestions = safeReadJsonl(path.join(dir, "plan-update-suggestions.jsonl"));
+  const externalWriteLog = safeReadJsonl(path.join(dir, "external-write-log.jsonl"));
+  const notifications = safeReadJsonl(path.join(dir, "notifications.jsonl"))
+    .filter((item) => item.status !== "dismissed")
+    .slice(-30)
+    .reverse();
+  const sourceSettings = safeReadJson(path.join(dir, "source-capture-settings.json"), defaultFastSourceCaptureSettings());
+  const behaviorSettings = safeReadJson(path.join(dir, "behavior-settings.json"), defaultFastBehaviorSettings());
+  const automationSettings = safeReadJson(path.join(dir, "automation-settings.json"), defaultFastAutomationSettings());
+  const remoteSettings = safeReadJson(path.join(dir, "remote-research-settings.json"), {});
+  const stats = fastLearningStats({ bits, cards, reviews, plans, sourceLinks });
+  return {
+    vault,
+    userProfile,
+    learningProfile,
+    learningStats: stats,
+    paths: {
+      userProfile: ".llm-wiki/learning/user-profile.json",
+      profile: ".llm-wiki/learning/profile.json",
+      learningDir: ".llm-wiki/learning",
+      dashboard: "wiki/learning/dashboard.md",
+      remnoteExport: ".llm-wiki/learning/exports/remnote-import.md",
+      remnoteTextExport: ".llm-wiki/learning/exports/remnote-import.txt",
+      remnoteMediaIndex: ".llm-wiki/learning/exports/remnote-media-index.md",
+      remnoteMediaDir: ".llm-wiki/learning/exports/remnote-media/"
+    },
+    onboardingQuestions: [],
+    nextActions: [
+      "Review due cards.",
+      "Process one pending source.",
+      "Check the next plan or goal suggestion."
+    ],
+    sourceCapture: {
+      settings: sourceSettings,
+      groups: [],
+      lastScan: safeReadJson(path.join(dir, "capture-scan-status.json"), null)
+    },
+    remoteResearch: { settings: remoteSettings },
+    automation: {
+      settings: automationSettings,
+      running: false,
+      status: "snapshot",
+      detail: "Fast Learning snapshot loaded; deep automation status refreshes in the background."
+    },
+    notifications,
+    behaviorCoach: {
+      settings: behaviorSettings,
+      counts: { events: 0 },
+      alerts: [],
+      recentEvents: []
+    },
+    planning: {
+      plans,
+      goals,
+      sourceLinks,
+      sourceGroups: fastSourceGroups(sourceLinks),
+      updateSuggestions,
+      externalWriteLog
+    }
+  };
+}
+
+function fastLearningStats({ bits, cards, reviews, plans, sourceLinks }) {
+  const readCardIds = new Set(reviews
+    .filter((event) => event.type === "card_reviewed" || event.action === "read" || event.action === "seen")
+    .map((event) => event.cardId || "")
+    .filter(Boolean));
+  const bitsBySource = new Map();
+  for (const bit of bits) {
+    const key = bit.sourcePage || "";
+    if (!key) continue;
+    const list = bitsBySource.get(key) || [];
+    list.push(bit);
+    bitsBySource.set(key, list);
+  }
+  const allCards = cards
+    .map((card) => enrichLearningCardForDisplay(card, { relatedBits: bitsBySource.get(card.sourcePage || "") || [], sourceLinks }))
+    .map((card) => ({ ...card, displayKey: fastCardKey(card), displayRead: readCardIds.has(fastCardKey(card)) }));
+  const primaryCards = allCards.filter((card) => card.displayDemoted !== true);
+  const visibleCards = primaryCards.length ? primaryCards : allCards;
+  const allBits = bits.map((bit) => enrichLearningBitForDisplay(bit, { sourceLinks }));
+  const today = new Date().toISOString().slice(0, 10);
+  return {
+    bits: bits.length,
+    cards: cards.length,
+    plans: plans.length,
+    sourceLinks: sourceLinks.length,
+    allCards: visibleCards,
+    allBits,
+    reviewedCards: readCardIds.size,
+    recentSourceLinks: sourceLinks.slice(-10).reverse(),
+    dueCards: visibleCards.filter((card) => !card.due || card.due <= today).slice(0, 10),
+    recentCards: visibleCards.slice(-10).reverse(),
+    recentBits: allBits.slice(-12).reverse()
+  };
+}
+
+function fastSourceGroups(sourceLinks) {
+  const groups = new Map();
+  for (const link of sourceLinks) {
+    const key = link.group || link.topic || "Ungrouped";
+    const current = groups.get(key) || { group: key, count: 0, sources: [] };
+    current.count += 1;
+    current.sources.push(link.sourcePage || link.title || "");
+    groups.set(key, current);
+  }
+  return [...groups.values()].sort((a, b) => b.count - a.count);
+}
+
+function fastCardKey(card = {}) {
+  return String(card.id || card.displayKey || card.cardId || `${card.sourcePage || ""}|${card.front || card.cloze || card.displayPrompt || ""}`);
+}
+
+function defaultFastSourceCaptureSettings() {
+  return {
+    enabled: true,
+    autoProcessCapturedResources: true,
+    fullLocalCaptureMode: false,
+    manualImport: true,
+    browserClipper: true,
+    browserHistoryImport: false,
+    openedDocuments: false,
+    screenshots: false,
+    meetings: false,
+    voiceMemos: false,
+    clipboard: false,
+    visitedWebPages: false,
+    frontmostAppMetadata: false,
+    watchFolders: [],
+    capturePageContent: "ask",
+    cloudProcessingPolicy: "ask_each_time",
+    retentionDays: 90
+  };
+}
+
+function defaultFastBehaviorSettings() {
+  return {
+    captureEnabled: true,
+    coachingEnabled: true,
+    paused: false,
+    expandedMonitoringEnabled: false,
+    detailedNotifications: false,
+    notificationPermission: "not_requested"
+  };
+}
+
+function defaultFastAutomationSettings() {
+  return {
+    learningAutopilot: true,
+    autoProcessNewSources: true,
+    autoDraftPlans: true,
+    autoSuggestPlanUpdates: true,
+    nativeMacNotifications: true,
+    requireApprovalForExternalWrites: true
+  };
+}
+
+function appProfileIndexFile() {
+  const override = process.env.LEARNING_BOOST_APP_SUPPORT;
+  const root = override || path.join(os.homedir(), "Library", "Application Support", "LLM Agent Learning Boost");
+  return path.join(root, "profiles.json");
+}
+
+function safeReadJson(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function safeReadJsonl(file) {
+  try {
+    return fs.readFileSync(file, "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 function cachedLearningNotifications(options = {}) {
@@ -1700,6 +2071,7 @@ function refreshTabData(kind = "all", options = {}) {
     const result = message.result || {};
     for (const item of Object.keys(tabDataCache)) {
       if (item === "learning" && result.learning && typeof result.learning === "object") {
+        updateVaultCacheFromLearning(result.learning);
         tabDataCache.learning = {
           ...tabDataCache.learning,
           data: result.learning,
@@ -1709,9 +2081,11 @@ function refreshTabData(kind = "all", options = {}) {
           lastFinishedAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         };
+        writePersistedLearningCache(tabDataCache.learning.data, tabDataCache.learning.updatedAt);
         continue;
       }
       if (!Array.isArray(result[item])) continue;
+      updateVaultCacheFromRows(result[item]);
       const persisted = listTabKinds.has(item) ? readPersistedTabCache(item) : null;
       const nextItems = result[item].length || !persisted?.items?.length ? result[item] : persisted.items;
       tabDataCache[item] = {
@@ -1815,6 +2189,99 @@ function parseWorkerStdout(output) {
   return null;
 }
 
+async function cachedProviderStatus(options = {}) {
+  const stale = !providerStatusCache.updatedAt || Date.now() - Date.parse(providerStatusCache.updatedAt) > 30000;
+  if ((options.force || stale) && !providerStatusCache.loading) {
+    const refresh = runProviderStatusWorker({ timeoutMs: 7000 }).catch((error) => {
+      providerStatusCache.error = error.message;
+      if (!providerStatusCache.data) {
+        providerStatusCache.data = providerStatusFallback(error.message);
+        providerStatusCache.updatedAt = new Date().toISOString();
+      }
+      return providerStatusCache.data;
+    });
+    if (!providerStatusCache.data || options.force) await refresh;
+  }
+  return {
+    ...(providerStatusCache.data || providerStatusFallback(providerStatusCache.error || "Provider status has not finished loading.")),
+    loading: providerStatusCache.loading,
+    stale: Boolean(providerStatusCache.updatedAt && stale),
+    error: providerStatusCache.error,
+    updatedAt: providerStatusCache.updatedAt
+  };
+}
+
+function runProviderStatusWorker(options = {}) {
+  if (providerStatusWorker) return Promise.resolve(providerStatusCache.data || providerStatusFallback("Provider status refresh is already running."));
+  providerStatusCache.loading = true;
+  providerStatusCache.error = "";
+  return new Promise((resolve) => {
+    const resultFile = tempWorkerResultFile("llm-learning-provider-status", "provider");
+    const worker = spawn(process.execPath, [path.join(agentRoot, "src", "provider-status-worker.mjs"), resultFile], {
+      cwd: agentRoot,
+      env: { ...process.env, LLM_WIKI_ENV_FILE: config.configFile },
+      stdio: "ignore"
+    });
+    providerStatusWorker = worker;
+    let finalized = false;
+    const finish = (message) => {
+      if (finalized || providerStatusWorker !== worker) return;
+      finalized = true;
+      clearTimeout(timeout);
+      providerStatusWorker = null;
+      providerStatusCache.loading = false;
+      cleanupWorkerResult(resultFile);
+      if (message?.ok && message.status) {
+        providerStatusCache.data = message.status;
+        providerStatusCache.error = "";
+      } else {
+        providerStatusCache.error = message?.error || "Provider status refresh failed.";
+        if (!providerStatusCache.data) providerStatusCache.data = providerStatusFallback(providerStatusCache.error);
+      }
+      providerStatusCache.updatedAt = new Date().toISOString();
+      resolve(providerStatusCache.data);
+    };
+    const timeout = setTimeout(() => {
+      worker.kill("SIGTERM");
+      setTimeout(() => worker.kill("SIGKILL"), 1000);
+      finish({ ok: false, error: "Provider status check timed out. The UI remains available; retry after local provider tools finish responding." });
+    }, Math.max(2000, Number(options.timeoutMs || 7000)));
+    worker.on("exit", () => finish(readWorkerResult(resultFile)));
+    worker.on("error", (error) => finish({ ok: false, error: error.message }));
+  });
+}
+
+function providerStatusFallback(detail) {
+  return {
+    status: "Checking provider",
+    statusColor: "orange",
+    provider: config.provider,
+    activeProvider: config.provider,
+    model: config.model,
+    localTransport: config.localTransport,
+    accessMethod: config.accessMethod,
+    authMethod: config.authMethod,
+    credentialStatus: "unknown",
+    statusDetail: detail || "Provider status is loading in a background worker.",
+    details: {}
+  };
+}
+
+function updateVaultCacheFromRows(rows = []) {
+  const names = new Set(cachedVaultPaths(config).map((item) => vaultName(item)));
+  for (const row of rows || []) {
+    if (row?.vault) names.add(String(row.vault));
+  }
+  const vaultPaths = [...names]
+    .filter((name) => name && !name.includes("/") && !name.includes("\\") && !name.includes("\0"))
+    .map((name) => path.join(config.vaultsRoot, name));
+  if (vaultPaths.length) setVaultPathCache(config, vaultPaths, { persist: true });
+}
+
+function updateVaultCacheFromLearning(data = {}) {
+  updateVaultCacheFromRows((data.vaults || []).map((vault) => ({ vault: vault.vault })));
+}
+
 function chooseConfigFile() {
   return runOsascript([
     "set chosenFile to choose file with prompt \"Choose LLM Agent Learning Boost config file\"",
@@ -1847,7 +2314,7 @@ function openVaultPath(vault, file) {
 }
 
 function resolveVaultMedia(config, vault, file) {
-  const vaultPath = listVaults(config.vaultsRoot).find((item) => vaultName(item) === vault);
+  const vaultPath = cachedVaultPaths(config, { allowScan: true }).find((item) => vaultName(item) === vault);
   if (!vaultPath) throw new Error("Unknown vault.");
   const normalized = String(file || "").replace(/\\/g, "/").replace(/^\/+/, "");
   if (!normalized || normalized.includes("\0") || normalized.split("/").includes("..")) {
@@ -1865,7 +2332,7 @@ async function exportSelectedFiles(config, payload) {
   if (!sources.length) throw new Error("Select at least one file first.");
   const format = payload.format === "text" ? "text" : "markdown";
   const action = payload.action === "save" ? "save" : "download";
-  const vaults = new Map(listVaults(config.vaultsRoot).map((vaultPath) => [vaultName(vaultPath), vaultPath]));
+  const vaults = new Map(cachedVaultPaths(config, { allowScan: true }).map((vaultPath) => [vaultName(vaultPath), vaultPath]));
   const entries = sources.map((source) => exportEntryForSource(vaults, source));
   const content = format === "text" ? renderFilesExportText(entries) : renderFilesExportMarkdown(entries);
   const extension = format === "text" ? "txt" : "md";
@@ -2524,6 +2991,25 @@ function writePersistedTabCache(kind, items, updatedAt = new Date().toISOString(
   }
 }
 
+function readPersistedLearningCache() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(persistedTabCacheFile("learning"), "utf8"));
+    return parsed?.data?.vaults ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedLearningCache(data, updatedAt = new Date().toISOString()) {
+  if (!data?.vaults) return;
+  try {
+    fs.mkdirSync(tabCacheDir, { recursive: true });
+    fs.writeFileSync(persistedTabCacheFile("learning"), JSON.stringify({ kind: "learning", data, updatedAt }, null, 2), "utf8");
+  } catch (error) {
+    console.warn(`[tab-data] failed to write learning cache: ${error.message}`);
+  }
+}
+
 function cleanupWorkerResult(file) {
   try {
     fs.rmSync(path.dirname(file), { recursive: true, force: true });
@@ -2602,8 +3088,34 @@ function readBody(request, maxBytes = 64 * 1024 * 1024) {
   });
 }
 
+function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message || "Operation timed out.")), Math.max(1000, Number(timeoutMs || 8000)));
+    })
+  ]).finally(() => clearTimeout(timer));
+}
+
+function topicContentFallback(params) {
+  const title = params.get("title") || "Selected topic";
+  const vault = params.get("vault") || "current vault";
+  const rel = params.get("path") || "";
+  return [
+    `# ${title}`,
+    "",
+    "The app could not finish reading this topic page within the UI timeout.",
+    "",
+    `Vault: ${vault}`,
+    rel ? `Path: ${rel}` : "",
+    "",
+    "Try again after iCloud or Obsidian finishes syncing, or open the source from the Files/Topics table."
+  ].filter(Boolean).join("\n");
+}
+
 function resolveLearningVaultPath(name) {
-  const vaults = listVaults(config.vaultsRoot);
+  const vaults = cachedVaultPaths(config, { allowScan: true });
   const requested = String(name || "").trim();
   const vaultPath = vaults.find((item) => vaultName(item) === requested) || vaults[0];
   if (!vaultPath) throw new Error("No Obsidian vault is available.");
@@ -2802,7 +3314,7 @@ function groupCaptureSkipped(items = [], existingGroups = []) {
 function recordProviderFallbackIfNeeded(status) {
   if (config.provider !== "local_auto") return;
   if (!["red", "orange"].includes(status.statusColor)) return;
-  for (const vaultPath of listVaults(config.vaultsRoot)) {
+  for (const vaultPath of cachedVaultPaths(config)) {
     trackBehaviorEvent(vaultPath, {
       type: "local_ai_unavailable",
       provider: status.activeProvider || status.provider || "local_auto",
@@ -3082,7 +3594,7 @@ function renderHtml() {
     .learning-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
     .learning-toolbar select { min-width: min(220px, 100%); flex: 1 1 220px; }
     .learning-toolbar .copy-feedback { margin-left: auto; }
-    .learning-jump, .learning-target-button { appearance: none; border: 0; background: transparent; color: var(--accent); font: inherit; font-weight: 750; padding: 0; cursor: pointer; text-align: start; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; overflow-wrap: normal; word-break: normal; hyphens: none; }
+    .learning-jump, .learning-target-button { appearance: none; border: 0; background: transparent; color: var(--accent); font: inherit; font-weight: 750; padding: 0; cursor: pointer; text-align: start; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; white-space: normal; overflow-wrap: break-word; word-break: normal; hyphens: none; max-width: 100%; }
     .learning-jump:hover, .learning-target-button:hover { color: var(--accent-2); }
     .learning-target-highlight { outline: 3px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 3px; box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 12%, transparent); }
     .learning-scroll-target, .learning-card, .learning-map-panel, .learning-study-card, .learning-notification-center li, tr.learning-target-highlight { scroll-margin-top: 96px; }
@@ -3130,8 +3642,8 @@ function renderHtml() {
     .learning-type-legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
     .learning-type-legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
     .learning-type-legend span::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--kind, var(--accent)); border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 60%, var(--line)); }
-    .learning-action-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-    .learning-action-row button { min-width: 0; }
+    .learning-action-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: stretch; }
+    .learning-action-row button, .learning-button-row button { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: break-word; text-align: center; }
     .learning-card.danger { border-color: color-mix(in srgb, #dc2626 45%, var(--line)); }
     .learning-card.warning { border-color: color-mix(in srgb, #f59e0b 55%, var(--line)); }
     .learning-flowchart { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(128px, 100%), 1fr)); gap: 8px; align-items: stretch; margin: 10px 0 14px; }
@@ -3175,7 +3687,8 @@ function renderHtml() {
     .learning-autopilot-meter span { color: var(--muted); font-size: 12px; align-self: center; }
     .learning-stepper { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 8px; list-style: none; margin: 2px 0 0; padding: 0; }
     .learning-stepper li { position: relative; display: block; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); transition: transform .18s ease, border-color .18s ease, background .18s ease; }
-    .learning-stepper button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 7px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: normal; align-items: start; }
+    .learning-stepper button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 7px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: break-word; align-items: start; line-height: 1.25; }
+    .learning-stepper button > div { min-width: 0; display: grid; gap: 2px; }
     .learning-stepper li span { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--soft); color: var(--muted); font-weight: 800; }
     .learning-stepper li strong { min-width: 0; font-size: 13px; overflow-wrap: break-word; }
     .learning-stepper li em { grid-column: 2; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: break-word; }
@@ -3209,13 +3722,18 @@ function renderHtml() {
     .learning-export-result.failed { border-color: color-mix(in srgb, #b91c1c 42%, var(--line)); background: color-mix(in srgb, #b91c1c 10%, var(--panel)); }
     .learning-export-files { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
     .learning-export-files button { max-width: 100%; overflow-wrap: break-word; text-align: start; }
-    .learning-form button, .learning-form .primary, .learning-form .secondary { align-self: end; min-height: 38px; white-space: normal; }
+    .learning-form button, .learning-form .primary, .learning-form .secondary { align-self: end; min-height: 38px; white-space: normal; overflow-wrap: break-word; }
     .learning-form select, .learning-form input, .learning-form textarea { min-width: 0; }
-    .learning-capture-status { align-self: start; max-width: 100%; max-height: 260px; overflow: auto; }
+    .learning-capture-status { align-self: start; max-width: 100%; max-height: none; overflow: visible; line-height: 1.35; }
     .learning-capture-status strong { display: block; color: var(--text); margin-bottom: 4px; }
     .learning-capture-status ul { margin: 6px 0 0; padding-inline-start: 1.2em; }
     .learning-capture-status li { margin-bottom: 4px; }
     .learning-capture-status code { font-size: 12px; }
+    .capture-status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 6px; margin: 8px 0; }
+    .capture-status-grid span { display: grid; gap: 2px; min-width: 0; border: 1px solid var(--line); border-radius: 6px; padding: 7px; background: var(--panel); overflow-wrap: break-word; }
+    .capture-skip-list { display: grid; gap: 6px; margin-top: 8px; }
+    .capture-skip-item { border: 1px solid var(--line); border-radius: 6px; padding: 7px; background: var(--panel); }
+    .capture-skip-item code, .capture-skip-item span { overflow-wrap: anywhere; }
     .learning-study-card-face.back { display: none; background: color-mix(in srgb, var(--panel) 85%, var(--soft)); }
     .learning-study-card.flipped .learning-study-card-face.front { display: none; }
     .learning-study-card.flipped .learning-study-card-face.back { display: grid; }
@@ -3229,8 +3747,9 @@ function renderHtml() {
     .learning-flow-lane h4 { margin: 0 0 8px; font-size: 15px; }
     .learning-flow-lane ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; }
     .learning-flow-lane li { display: block; min-width: 0; }
-    .learning-flow-lane button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: normal; align-items: start; }
+    .learning-flow-lane button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: break-word; align-items: start; line-height: 1.25; }
     .learning-flow-lane button > span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--kind, var(--accent)) 78%, #fff); color: #fff; font-weight: 800; font-size: 12px; }
+    .learning-flow-lane button > div { min-width: 0; display: grid; gap: 2px; }
     .learning-flow-lane strong { display: block; font-size: 13px; }
     .learning-flow-lane em { display: block; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: break-word; }
     .learning-plan-summary { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
@@ -4836,7 +5355,7 @@ function renderHtml() {
           body: JSON.stringify({ vault: chatSaveVault.value, question, answer: answerMarkdown })
         });
         const data = await response.json();
-        if (data.error) throw new Error(data.error);
+        if (data.error && !(data.topics || []).length) throw new Error(data.error);
         saveChatFeedback.textContent = "Saved to " + data.file;
         loadStatus();
       } catch (error) {
@@ -4894,8 +5413,8 @@ function renderHtml() {
       if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Loading vault files...", "files");
       try {
         const data = await fetchJsonWithTimeout("/api/files" + (options.refresh ? "?refresh=1" : ""));
-        if (data.error) throw new Error(data.error);
         const nextFiles = data.files || [];
+        if (data.error && !nextFiles.length) throw new Error(data.error);
         if (nextFiles.length) {
           filesLoadPolls = 0;
           filesCache = nextFiles;
@@ -4920,7 +5439,13 @@ function renderHtml() {
         populateSelect(filesStatusFilter, filesCache.map((file) => file.status), "All statuses");
         renderFilesTable();
       } catch (error) {
-        filesBody.innerHTML = tabStatusRow(7, error.message, "files", true);
+        filesLoadPolls = 9;
+        if (filesCache.length) {
+          renderFilesTable();
+          filesBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached files. Refresh failed: " + error.message, "files", true));
+        } else {
+          filesBody.innerHTML = tabStatusRow(7, error.message, "files", true);
+        }
       }
     }
 
@@ -5208,8 +5733,8 @@ function renderHtml() {
       if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Loading archive history...", "archives");
       try {
         const data = await fetchJsonWithTimeout("/api/archives" + (options.refresh ? "?refresh=1" : ""));
-        if (data.error) throw new Error(data.error);
         const nextArchives = data.archives || [];
+        if (data.error && !nextArchives.length) throw new Error(data.error);
         if (nextArchives.length) {
           archivesLoadPolls = 0;
           archivesCache = nextArchives;
@@ -5234,7 +5759,13 @@ function renderHtml() {
         populateSelect(archivesKindFilter, archivesCache.map((item) => item.kind), "All types");
         renderArchivesTable();
       } catch (error) {
-        archivesBody.innerHTML = tabStatusRow(7, error.message, "archives", true);
+        archivesLoadPolls = 9;
+        if (archivesCache.length) {
+          renderArchivesTable();
+          archivesBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached archives. Refresh failed: " + error.message, "archives", true));
+        } else {
+          archivesBody.innerHTML = tabStatusRow(7, error.message, "archives", true);
+        }
       }
     }
 
@@ -5479,8 +6010,8 @@ function renderHtml() {
       if (!topicsCache.length) topicsBody.innerHTML = tabStatusRow(7, "Loading topics...", "topics");
       try {
         const data = await fetchJsonWithTimeout("/api/topics" + (options.refresh ? "?refresh=1" : ""));
-        if (data.error) throw new Error(data.error);
         const nextTopics = data.topics || [];
+        if (data.error && !nextTopics.length) throw new Error(data.error);
         if (nextTopics.length) {
           topicsLoadPolls = 0;
           topicsCache = nextTopics.map((topic, index) => ({ ...topic, number: index + 1, tagsText: (topic.tags || []).join(", ") }));
@@ -5509,7 +6040,13 @@ function renderHtml() {
           applySideTopicsPayload(data);
         }
       } catch (error) {
-        topicsBody.innerHTML = tabStatusRow(7, error.message, "topics", true);
+        topicsLoadPolls = 9;
+        if (topicsCache.length) {
+          renderTopicsTable();
+          topicsBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached topics. Refresh failed: " + error.message, "topics", true));
+        } else {
+          topicsBody.innerHTML = tabStatusRow(7, error.message, "topics", true);
+        }
       }
     }
 
@@ -6265,10 +6802,10 @@ function renderHtml() {
       const allCards = (context.stats.allCards || [...(context.stats.dueCards || []), ...(context.stats.recentCards || [])])
         .filter((card, index, list) => list.findIndex((item) => (item.displayKey || item.id || item.front || item.cloze) === (card.displayKey || card.id || card.front || card.cloze)) === index);
       const filteredCards = filterLearningItems(allCards, learningCardsFilter);
-      const cards = filteredCards.slice(0, 24);
+      const cards = learningCardsFilter ? filteredCards : filteredCards.slice(0, 24);
       const allBits = context.stats.allBits || context.stats.recentBits || [];
       const filteredBits = filterLearningItems(allBits, learningCardsFilter);
-      const bits = filteredBits.slice(0, 24);
+      const bits = learningCardsFilter ? filteredBits : filteredBits.slice(0, 24);
       const groups = groupLearningCardsAndBits(cards, bits);
       return '<section id="learning-cards-bits" class="learning-study-surface learning-scroll-target" data-learning-anchor="cards-bits">' +
         '<div class="learning-study-header"><h3>Cards And Bits</h3><p>Practice concept-specific recall first, then inspect the related source-grounded bits when you need context.</p>' + renderLearningLegend() + '</div>' +
@@ -6357,7 +6894,8 @@ function renderHtml() {
         const group = groups.get(topic) || groups.get(nearestLearningTopic(topic, groups)) || null;
         if (group) group.bits.push(bit);
       }
-      return [...groups.values()].slice(0, 5);
+      const result = [...groups.values()];
+      return learningCardsFilter ? result : result.slice(0, 5);
     }
 
     function nearestLearningTopic(topic, groups) {
@@ -7097,17 +7635,30 @@ function renderHtml() {
       const supported = "Documents, images, audio/video, subtitles, web/text files, local URL files, and common data/text files are queued when readable.";
       captureScanStatus.innerHTML =
         '<strong>' + escapeHtml(scan.status || "scan") + '</strong>' +
-        '<div>Last scan: ' + escapeHtml(shortEventTime(scan.lastScanAt) || "now") + '</div>' +
-        '<div>Captured: ' + escapeHtml(String(scan.captured || 0)) + ' · duplicates: ' + escapeHtml(String(scan.duplicates || 0)) + ' · skipped: ' + escapeHtml(String(scan.skippedCount || groups.reduce((sum, item) => sum + Number(item.count || 0), 0))) + '</div>' +
-        '<div>Watch folders: ' + escapeHtml(String(scan.watchFoldersScanned || 0)) + ' scanned · ' + escapeHtml(String(scan.watchFilesDiscovered || 0)) + ' discovered · ' + escapeHtml(String(scan.watchFilesQueued || 0)) + ' queued · ' + escapeHtml(String(scan.watchFilesSkipped || 0)) + ' skipped</div>' +
-        '<div>Opened documents: ' + escapeHtml(String(scan.openedDocumentPreviews || 0)) + ' previewed · ' + escapeHtml(String(scan.openedDocumentCaptured || 0)) + ' captured · ' + escapeHtml(String(scan.openedDocumentSkipped || 0)) + ' skipped</div>' +
-        '<div>Collectors: ' + escapeHtml((scan.collectors || []).join(", ") || "none") + '</div>' +
-        '<div>' + escapeHtml(supported) + '</div>' +
-        (groups.length ? '<details open><summary>Skipped files by reason</summary><ul>' + groups.slice(0, 12).map((item) => {
-          const samples = Array.isArray(item.samples) && item.samples.length ? ' Samples: ' + item.samples.join(", ") : "";
-          return '<li><strong>' + escapeHtml(String(item.count || 0)) + ' ' + escapeHtml(item.extension || "file") + '</strong> · ' + escapeHtml(item.collector || "capture") + ': ' + escapeHtml(item.reason || "Skipped") + escapeHtml(samples) + '</li>';
-        }).join("") + '</ul></details>' : '') +
+        '<div class="capture-status-grid">' +
+          '<span><strong>' + escapeHtml(shortEventTime(scan.lastScanAt) || "now") + '</strong><small>last scan</small></span>' +
+          '<span><strong>' + escapeHtml(String(scan.captured || 0)) + '</strong><small>captured</small></span>' +
+          '<span><strong>' + escapeHtml(String(scan.duplicates || 0)) + '</strong><small>duplicates</small></span>' +
+          '<span><strong>' + escapeHtml(String(scan.skippedCount || groups.reduce((sum, item) => sum + Number(item.count || 0), 0))) + '</strong><small>skipped</small></span>' +
+          '<span><strong>' + escapeHtml(String(scan.watchFilesQueued || 0)) + '</strong><small>watch files queued</small></span>' +
+          '<span><strong>' + escapeHtml(String(scan.openedDocumentCaptured || 0)) + '</strong><small>opened docs captured</small></span>' +
+        '</div>' +
+        '<div><strong>Collectors:</strong> ' + escapeHtml((scan.collectors || []).join(", ") || "none") + '</div>' +
+        '<div><strong>Best effort:</strong> ' + escapeHtml(supported) + '</div>' +
+        (groups.length ? '<details open><summary>Skipped files by reason and extension</summary><div class="capture-skip-list">' + groups.slice(0, 12).map((item) => {
+          const samples = Array.isArray(item.samples) && item.samples.length ? '<div><small>Examples: ' + escapeHtml(item.samples.join(", ")) + '</small></div>' : "";
+          return '<div class="capture-skip-item"><strong>' + escapeHtml(String(item.count || 0)) + ' ' + escapeHtml(item.extension || "file") + '</strong><div>' + escapeHtml(item.collector || "capture") + ': ' + escapeHtml(friendlyCaptureSkipReason(item.reason || "Skipped")) + '</div>' + samples + '</div>';
+        }).join("") + '</div></details>' : '') +
         '<div><strong>Next:</strong> ' + escapeHtml(scan.nextAction || "Review ResourceInbox for captured sources.") + '</div>';
+    }
+
+    function friendlyCaptureSkipReason(reason) {
+      const text = String(reason || "Skipped");
+      if (/unsupported file type/i.test(text)) return "This extension is not yet supported for best-effort ingest.";
+      if (/already captured/i.test(text)) return "Already captured earlier; duplicate was not queued again.";
+      if (/permission|eperm|eacces|operation not permitted/i.test(text)) return "macOS or iCloud blocked file access. Move the file to a readable local folder or grant file access, then scan again.";
+      if (/directory|folder/i.test(text)) return text;
+      return text;
     }
 
     function groupSkippedForDisplay(items) {
@@ -8017,8 +8568,7 @@ function renderHtml() {
           path: item.dataset.path,
           title
         });
-        const response = await fetch("/api/topic-content?" + params.toString());
-        const data = await response.json();
+        const data = await fetchJsonWithTimeout("/api/topic-content?" + params.toString(), { timeoutMs: 9000 });
         lastLocalMarkdown = data.answer || data.error || "No topic content.";
         renderLocalResultBox();
       } catch (error) {
@@ -9112,8 +9662,7 @@ function renderHtml() {
           path: normalizeAnnotationPath(note.path),
           title: titleFromPath(note.path || note.selectedText || "Note")
         });
-        const response = await fetch("/api/topic-content?" + params.toString());
-        const data = await response.json();
+        const data = await fetchJsonWithTimeout("/api/topic-content?" + params.toString(), { timeoutMs: 9000 });
         lastLocalMarkdown = data.answer || data.error || "No related content.";
         renderLocalResultBox();
       } catch (error) {

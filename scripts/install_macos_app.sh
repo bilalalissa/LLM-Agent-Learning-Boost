@@ -7,7 +7,6 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/build/macos/LLM Agent Learning Boost.app"
 TARGET="/Applications/LLM Agent Learning Boost.app"
 
-osascript -e 'tell application "LLM Agent Learning Boost" to quit' >/dev/null 2>&1 || true
 pkill -x LLMWikiAgent >/dev/null 2>&1 || true
 pkill -f "$TARGET/Contents/Resources/agent/src/server.mjs" >/dev/null 2>&1 || true
 pkill -f "$ROOT/build/macos/LLM Agent Learning Boost.app/Contents/Resources/agent/src/server.mjs" >/dev/null 2>&1 || true
