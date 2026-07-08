@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { resolveCommand } from "./tool-paths.mjs";
 
 export function canProcessImageSource(file) {
   return new Set([".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif", ".ico"]).has(path.extname(file).toLowerCase());
@@ -16,6 +17,8 @@ export function processImageSource(file, options = {}) {
     kind: "image",
     title: path.basename(file, ext),
     text,
+    contentExtracted: Boolean(manual || ocr.text),
+    extractionStatus: manual ? "manual_description" : (ocr.text ? "ocr_extracted" : "pending_visual_text"),
     extension: ext,
     metadata,
     evidence: ocr.text ? [`OCR:${path.basename(file)}`] : [path.basename(file)],
@@ -31,7 +34,13 @@ export function extractImageOcr(file, options = {}) {
   if (options.disableOcr || process.env.LEARNING_BOOST_DISABLE_IMAGE_OCR === "1") {
     return { text: "", notes: ["Image OCR disabled by configuration."] };
   }
-  if (!commandAvailable("tesseract")) {
+  const tesseract = resolveCommand([
+    options.tesseractCommand || process.env.LEARNING_BOOST_TESSERACT_COMMAND,
+    "tesseract",
+    "/usr/local/bin/tesseract",
+    "/opt/homebrew/bin/tesseract"
+  ]);
+  if (!tesseract) {
     return { text: "", notes: ["Image OCR unavailable: tesseract is not installed."] };
   }
   const languages = String(options.ocrLanguages || process.env.LEARNING_BOOST_OCR_LANGUAGES || "eng+ara");
@@ -43,7 +52,7 @@ export function extractImageOcr(file, options = {}) {
   ]);
   const notes = [];
   for (const language of candidates) {
-    const result = runTesseract(file, language, timeout);
+    const result = runTesseract(tesseract, file, language, timeout);
     if (result.text) {
       return {
         text: `Local OCR text from image:\n${result.text}`,
@@ -55,9 +64,9 @@ export function extractImageOcr(file, options = {}) {
   return { text: "", notes };
 }
 
-function runTesseract(file, languages, timeout) {
+function runTesseract(tesseract, file, languages, timeout) {
   try {
-    const output = execFileSync("tesseract", [file, "stdout", "-l", languages], {
+    const output = execFileSync(tesseract, [file, "stdout", "-l", languages], {
       encoding: "utf8",
       timeout,
       maxBuffer: 2 * 1024 * 1024
@@ -84,19 +93,6 @@ function imageMetadata(file, ext) {
     metadata.dimensionsAvailable = false;
   }
   return metadata;
-}
-
-function commandAvailable(command) {
-  try {
-    execFileSync("/usr/bin/env", ["bash", "-lc", `command -v ${shellQuote(command)}`], { stdio: "ignore", timeout: 3000 });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
 function uniqueValues(values) {

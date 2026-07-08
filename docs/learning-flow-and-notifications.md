@@ -129,7 +129,7 @@ Files, Archive, Topics, and the side Topics list report explicit loading states:
 - `stale_refreshing`: cached rows remain visible while a background refresh runs.
 - `error`: indexing failed or timed out.
 
-The app no longer treats a loading index as “No processed files yet.” If indexing takes too long, a retry control appears instead of polling forever. Slow capture scans and background ingest work are kept off the main tab-loading path so these lists can stay responsive.
+The app no longer treats a loading index as “No processed files yet.” If indexing takes too long, the table shows a bounded status and then refreshes automatically on the next tab/sidebar read instead of polling forever or asking for a manual retry. Slow capture scans and background ingest work are kept off the main tab-loading path so these lists can stay responsive.
 
 Learning Boost now treats the configured vault root and its persisted vault cache as the normal vault source. Background tab workers receive that cached vault list directly, so they do not rediscover every Obsidian app vault on each refresh. The Obsidian registry file is opt-in only with `LLM_WIKI_INCLUDE_OBSIDIAN_REGISTRY=1`, so a slow or locked `obsidian.json` file does not block Files, Archive, Topics, side Topics, shared settings, or Learning startup.
 

@@ -5670,24 +5670,6 @@ function renderHtml() {
         if (table === "topics") renderTopicsTable();
       });
     });
-    document.addEventListener("click", (event) => {
-      const button = event.target.closest("[data-tab-refresh]");
-      if (!button) return;
-      const tab = button.dataset.tabRefresh;
-      if (tab === "files") {
-        filesLoadPolls = 0;
-        void loadFiles({ refresh: true });
-      } else if (tab === "archives") {
-        archivesLoadPolls = 0;
-        void loadArchives({ refresh: true });
-      } else if (tab === "topics") {
-        topicsLoadPolls = 0;
-        sideTopicsLoadPolls = 0;
-        void loadTopics({ refresh: true });
-        void loadSideTopics({ refresh: true });
-      }
-    });
-
     async function saveChatAsSource() {
       const question = input.value.trim();
       const answerMarkdown = lastChatMarkdown.trim();
@@ -5778,9 +5760,9 @@ function renderHtml() {
           if (filesCache.length) {
             renderFilesTable();
           } else {
-            filesBody.innerHTML = tabStatusRow(6, tabStatusMessage(data, "Vault files are still being indexed."), "files", filesLoadPolls > 8);
+            filesBody.innerHTML = tabStatusRow(6, tabStatusMessage(data, "Vault files are still being indexed."));
           }
-          if (filesLoadPolls <= 8) setTimeout(() => loadFiles(), 1400);
+          if (filesLoadPolls <= 18) setTimeout(() => loadFiles(), filesLoadPolls <= 8 ? 1400 : 8000);
           return;
         }
         filesLoadPolls = 0;
@@ -5792,9 +5774,9 @@ function renderHtml() {
         filesLoadPolls = 9;
         if (filesCache.length) {
           renderFilesTable();
-          filesBody.insertAdjacentHTML("afterbegin", tabStatusRow(6, "Showing cached files. Refresh failed: " + error.message, "files", true));
+          filesBody.insertAdjacentHTML("afterbegin", tabStatusRow(6, "Showing cached files. Automatic refresh failed: " + error.message));
         } else {
-          filesBody.innerHTML = tabStatusRow(6, error.message, "files", true);
+          filesBody.innerHTML = tabStatusRow(6, error.message);
         }
       }
     }
@@ -6098,9 +6080,9 @@ function renderHtml() {
           if (archivesCache.length) {
             renderArchivesTable();
           } else {
-            archivesBody.innerHTML = tabStatusRow(6, tabStatusMessage(data, "Archive history is still being indexed."), "archives", archivesLoadPolls > 8);
+            archivesBody.innerHTML = tabStatusRow(6, tabStatusMessage(data, "Archive history is still being indexed."));
           }
-          if (archivesLoadPolls <= 8) setTimeout(() => loadArchives(), 1400);
+          if (archivesLoadPolls <= 18) setTimeout(() => loadArchives(), archivesLoadPolls <= 8 ? 1400 : 8000);
           return;
         }
         archivesLoadPolls = 0;
@@ -6112,9 +6094,9 @@ function renderHtml() {
         archivesLoadPolls = 9;
         if (archivesCache.length) {
           renderArchivesTable();
-          archivesBody.insertAdjacentHTML("afterbegin", tabStatusRow(6, "Showing cached archives. Refresh failed: " + error.message, "archives", true));
+          archivesBody.insertAdjacentHTML("afterbegin", tabStatusRow(6, "Showing cached archives. Automatic refresh failed: " + error.message));
         } else {
-          archivesBody.innerHTML = tabStatusRow(6, error.message, "archives", true);
+          archivesBody.innerHTML = tabStatusRow(6, error.message);
         }
       }
     }
@@ -6376,9 +6358,9 @@ function renderHtml() {
           if (topicsCache.length) {
             renderTopicsTable();
           } else {
-            topicsBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Topics are still being indexed."), "topics", topicsLoadPolls > 8);
+            topicsBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Topics are still being indexed."));
           }
-          if (topicsLoadPolls <= 8) setTimeout(() => loadTopics(), 1400);
+          if (topicsLoadPolls <= 18) setTimeout(() => loadTopics(), topicsLoadPolls <= 8 ? 1400 : 8000);
           return;
         }
         topicsLoadPolls = 0;
@@ -6393,17 +6375,15 @@ function renderHtml() {
         topicsLoadPolls = 9;
         if (topicsCache.length) {
           renderTopicsTable();
-          topicsBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached topics. Refresh failed: " + error.message, "topics", true));
+          topicsBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached topics. Automatic refresh failed: " + error.message));
         } else {
-          topicsBody.innerHTML = tabStatusRow(7, error.message, "topics", true);
+          topicsBody.innerHTML = tabStatusRow(7, error.message);
         }
       }
     }
 
-    function tabStatusRow(colspan, message, tab, showRetry = false) {
-      return '<tr><td colspan="' + escapeHtml(String(colspan)) + '" class="muted">' + escapeHtml(message) +
-        (showRetry ? ' <button class="secondary" type="button" data-tab-refresh="' + escapeHtml(tab) + '">Retry refresh</button>' : '') +
-        '</td></tr>';
+    function tabStatusRow(colspan, message) {
+      return '<tr><td colspan="' + escapeHtml(String(colspan)) + '" class="muted">' + escapeHtml(message) + '</td></tr>';
     }
 
     function tabStatusMessage(data, fallback) {
@@ -8517,8 +8497,10 @@ function renderHtml() {
         const data = await fetchJsonWithTimeout("/api/topics" + (options.refresh ? "?refresh=1" : ""), { timeoutMs: 8000 });
         if (data.loading && !(data.topics || []).length) {
           sideTopicsLoadPolls += 1;
-          topicList.innerHTML = "Loading topics..." + (sideTopicsLoadPolls > 8 ? ' <button class="secondary" type="button" data-tab-refresh="topics">Retry refresh</button>' : "");
-          if (sideTopicsLoadPolls <= 8) setTimeout(() => loadSideTopics(), 1400);
+          topicList.textContent = sideTopicsLoadPolls > 8
+            ? "Topics are still indexing. They will appear automatically when ready."
+            : "Loading topics...";
+          if (sideTopicsLoadPolls <= 18) setTimeout(() => loadSideTopics(), sideTopicsLoadPolls <= 8 ? 1400 : 8000);
           return;
         }
         if (data.error && !(data.topics || []).length) throw new Error(data.error);

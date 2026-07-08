@@ -123,6 +123,39 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
 
   const media = mediaMetadata(assetPath, assetRel, mediaKind, ext);
   const processedSource = processSourceFile(assetPath, { ingestMaxChars: config.ingestMaxChars, assetRel });
+  if (mediaRequiresExtractedContent(mediaKind) && !hasMeaningfulExtractedContent(processedSource)) {
+    const analysis = pendingMediaAnalysis(media, { sourceTitle, processedSource });
+    fs.writeFileSync(sourcePagePath, renderMediaSourcePage({
+      date,
+      sourceTitle,
+      assetRel,
+      mediaKind,
+      ext,
+      media,
+      analysis,
+      processedSource
+    }));
+    updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages: [] });
+    appendLog(vaultPath, {
+      date,
+      sourceRel,
+      sourcePath,
+      processedRel: assetRel,
+      sourceTitle,
+      conceptPages: [],
+      receivedAt,
+      sourceKind: `${mediaKind} pending_content`
+    });
+    return {
+      vault: vaultName(vaultPath),
+      source: path.relative(vaultPath, sourcePath),
+      sourcePage: sourceRel,
+      processed: assetRel,
+      conceptPages: [],
+      learning: { cardsCreated: 0, bitsCreated: 0, pendingContent: true },
+      pendingContent: true
+    };
+  }
   const analysis = await analyzeMediaSource(provider, {
     sourceTitle,
     media,
@@ -196,7 +229,9 @@ async function reprocessPendingMediaPages(vaultPath, provider) {
     const ext = path.extname(assetPath).toLowerCase();
     const media = mediaMetadata(assetPath, assetRel, mediaKind, ext);
     const processedSource = processSourceFile(assetPath, { assetRel });
-    const analysis = await analyzeMediaSource(provider, { sourceTitle, media, assetPath, processedSource, vault: vaultName(vaultPath) });
+    const analysis = mediaRequiresExtractedContent(mediaKind) && !hasMeaningfulExtractedContent(processedSource)
+      ? pendingMediaAnalysis(media, { sourceTitle, processedSource })
+      : await analyzeMediaSource(provider, { sourceTitle, media, assetPath, processedSource, vault: vaultName(vaultPath) });
     const userNotes = text.match(/\n## User Notes[\s\S]*$/m)?.[0] || "";
     const sourceRel = path.relative(vaultPath, sourcePagePath).replace(/\\/g, "/");
 
@@ -211,7 +246,7 @@ async function reprocessPendingMediaPages(vaultPath, provider) {
       processedSource
     }) + userNotes);
 
-    const conceptPages = createConceptPages(vaultPath, { date, analysis, sourceRel });
+    const conceptPages = analysis.status === "pending_content" ? [] : createConceptPages(vaultPath, { date, analysis, sourceRel });
     updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages });
     appendLog(vaultPath, {
       date,
@@ -230,7 +265,8 @@ async function reprocessPendingMediaPages(vaultPath, provider) {
       sourcePage: sourceRel,
       processed: assetRel,
       conceptPages,
-      reprocessed: true
+      reprocessed: true,
+      pendingContent: analysis.status === "pending_content"
     });
   }
   return results;
@@ -379,6 +415,48 @@ function fallbackMediaAnalysis(media, error, input = {}) {
     mediaRefs: [media.assetRel]
   }));
   return parsed;
+}
+
+function pendingMediaAnalysis(media, input = {}) {
+  const notes = [
+    ...(input.processedSource?.processingNotes || []),
+    "Content extraction is pending; no Learning Boost cards, bits, concepts, or plans were created from metadata alone."
+  ];
+  return {
+    summary: `${media.kind} source preserved as a local asset. Learning analysis is pending because no readable transcript, OCR text, or manual description was available.`,
+    language: "unknown",
+    key_points: [
+      `Preserved local asset: ${media.assetRel}.`,
+      "No source claims were generated because the media content has not been transcribed or inspected."
+    ],
+    concepts: [],
+    entities: [],
+    open_questions: [{
+      question: "What does this media contain?",
+      answer: "Pending. Add a transcript, OCR-readable image text, or a manual description, then reprocess the source."
+    }],
+    contradictions: [],
+    source_learning_questions: [],
+    open_learning_questions: [],
+    processing_notes: uniqueStrings(notes),
+    analyzed: false,
+    status: "pending_content"
+  };
+}
+
+function mediaRequiresExtractedContent(kind) {
+  return new Set(["image", "audio", "video"]).has(String(kind || "").toLowerCase());
+}
+
+function hasMeaningfulExtractedContent(processedSource = {}) {
+  if (processedSource.contentExtracted === true) return true;
+  const status = String(processedSource.extractionStatus || "");
+  if (/pending|unavailable|failed/i.test(status)) return false;
+  const text = String(processedSource.text || "").trim();
+  if (!text) return false;
+  if (/preserved as a local (image|audio|video) asset/i.test(text)) return false;
+  if (/Visual content was not analyzed|Audio content was not transcribed|Visual\/audio content was not analyzed/i.test(text)) return false;
+  return text.replace(/\s+/g, " ").length >= 40;
 }
 
 function mediaMetadata(assetPath, assetRel, kind, ext) {
@@ -780,7 +858,7 @@ function extractTitle(text, sourcePath) {
 function renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource = {} }) {
   return `---
 type: source
-status: active
+status: ${analysis.status === "pending_content" ? "pending_content" : "active"}
 created: ${date}
 updated: ${date}
 language: ${yamlScalar(analysis.language || "unknown")}
@@ -842,7 +920,7 @@ function renderMediaSourcePage({ date, sourceTitle, assetRel, mediaKind, ext, me
   const preview = mediaKind === "image" ? `\n![[${assetRel}]]\n` : "";
   return `---
 type: source
-status: active
+status: ${analysis.status === "pending_content" ? "pending_content" : "active"}
 created: ${date}
 updated: ${date}
 language: ${yamlScalar(analysis.language || "unknown")}
@@ -876,7 +954,7 @@ ${media.width && media.height ? `- Dimensions: ${media.width} x ${media.height}`
 
 ${bulletList(analysis.key_points)}
 
-${renderLearningBoostSection(analysis.learning_boost)}
+${analysis.learning_boost ? renderLearningBoostSection(analysis.learning_boost) : "## Learning Boost\n\nNo learning cards or bits were created because source content extraction is still pending."}
 
 ## Source's Related Learning Questions
 

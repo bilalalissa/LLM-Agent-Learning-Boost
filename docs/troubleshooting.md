@@ -10,11 +10,11 @@ The app should keep cached rows visible while a background index refresh runs. I
 
 Learning Boost uses the configured `VAULTS_ROOT` and its persisted vault cache for normal tab loading. The Obsidian registry file is not read unless you explicitly set `LLM_WIKI_INCLUDE_OBSIDIAN_REGISTRY=1`, so a slow or locked `~/Library/Application Support/obsidian/obsidian.json` should not block normal tab loading.
 
-If Learning opens while a deep scan is slow, it uses the persisted Learning cache when available. If no cache exists yet, it opens a minimal vault-only view instead of blocking the app. Retry the tab refresh after iCloud finishes syncing if stale rows or a snapshot warning remain.
+If Learning opens while a deep scan is slow, it uses the persisted Learning cache when available. If no cache exists yet, it opens a minimal vault-only view instead of blocking the app. After iCloud finishes syncing, the tabs refresh again automatically; changing tabs also triggers a fresh bounded read.
 
 Startup Learning backfill is a background worker. It may repair older source pages and source-to-plan links, but it should not block the main server. If the app was updated while an older build was stuck, reinstalling with `./scripts/install_macos_app.sh` also stops stale orphan workers so old tab scans do not keep running beside the new app.
 
-If a Local sidebar topic opens with a cached summary instead of full page content, the app process could not read that live vault file quickly enough. The fallback uses the cached topic title, path, summary, type, and updated date so navigation still works. Grant `/Applications/LLM Agent Learning Boost.app` access to the vault/iCloud folder in macOS Privacy settings, make sure the file is downloaded locally, then use Retry refresh.
+If a Local sidebar topic opens with a cached summary instead of full page content, the app process could not read that live vault file quickly enough. The fallback uses the cached topic title, path, summary, type, and updated date so navigation still works. Grant `/Applications/LLM Agent Learning Boost.app` access to the vault/iCloud folder in macOS Privacy settings and make sure the file is downloaded locally. The sidebar will refresh automatically on the next bounded topic read.
 
 ## Local AI Unavailable
 
@@ -68,9 +68,9 @@ macOS may require Automation or Accessibility permission, and some apps do not e
 
 Safe capture scans do not start live screen recording or attach to private browser sessions. They only inspect configured local folders and approved ResourceInbox items.
 
-If an image, audio, or video file is captured but not fully analyzed, check the generated source note for the limitation. Learning Boost tries local OCR with `tesseract`, transcript sidecars, local ASR with `whisper`, and video keyframe OCR with `ffmpeg` when available. Missing command-line tools, missing OCR language packs, long files, large files, unreadable iCloud placeholders, and provider failures are reported in processor notes instead of silently creating a useful-looking source from metadata only.
+If an image, audio, or video file is captured but not fully analyzed, check the generated source note for the limitation. Learning Boost tries local OCR with `tesseract`, transcript sidecars, local ASR with `whisper`, and video keyframe OCR with `ffmpeg` when available. Missing command-line tools, missing OCR language packs, long files, large files, unreadable iCloud placeholders, and provider failures are reported in processor notes instead of silently creating useful-looking learning cards from metadata only. Metadata-only media is preserved as `pending_content` and does not produce cards, bits, concepts, or plans until real text/transcript/OCR/manual description is available.
 
-For audio/video transcription, install or expose a working `whisper` command on the app PATH, or set `LEARNING_BOOST_WHISPER_COMMAND` to the executable path before launch. For Arabic image OCR, install the Arabic `tesseract` language data; otherwise Learning Boost falls back to smaller available language sets and records the limitation.
+For audio/video transcription, install or expose a working `whisper` command on the app PATH, or set `LEARNING_BOOST_WHISPER_COMMAND` to the executable path before launch. The macOS app also checks common local paths such as `/Users/ba/Library/Python/3.11/bin/whisper`, `/usr/local/bin/ffmpeg`, `/usr/local/bin/ffprobe`, and `/usr/local/bin/tesseract` because app bundles often have a smaller PATH than Terminal. For Arabic image OCR, install the Arabic `tesseract` language data; otherwise Learning Boost falls back to smaller available language sets and records the limitation.
 
 ## Unexpected "Choose Application" Window
 

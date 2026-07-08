@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { normalizeTranscriptText } from "./text-processor.mjs";
+import { resolveCommand } from "./tool-paths.mjs";
 
 export function canProcessAudioSource(file) {
   return new Set([".mp3", ".wav", ".m4a", ".m4b", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr", ".caf", ".wma"]).has(path.extname(file).toLowerCase());
@@ -18,6 +19,8 @@ export function processAudioSource(file, options = {}) {
     kind: "audio",
     title: path.basename(file, ext),
     text: extractedText || `${path.basename(file)} is preserved as a local audio asset. Audio content was not transcribed because no transcript sidecar or local ASR output was available.`,
+    contentExtracted: Boolean(extractedText),
+    extractionStatus: extractedText ? "extracted" : "pending_transcript",
     extension: ext,
     metadata,
     evidence: transcript.evidence.length ? transcript.evidence : (asr.evidence.length ? asr.evidence : [path.basename(file)]),
@@ -34,9 +37,17 @@ export function extractAudioTranscript(file, metadata = {}, options = {}) {
   if (options.disableAsr || process.env.LEARNING_BOOST_DISABLE_LOCAL_ASR === "1") {
     return { text: "", evidence: [], notes: ["Local ASR disabled by configuration."] };
   }
-  const whisperCommand = String(options.whisperCommand || process.env.LEARNING_BOOST_WHISPER_COMMAND || "whisper");
-  if (!commandAvailable(whisperCommand)) {
-    return { text: "", evidence: [], notes: [`Local ASR unavailable: ${whisperCommand} is not installed or not on PATH.`] };
+  const requestedWhisper = String(options.whisperCommand || process.env.LEARNING_BOOST_WHISPER_COMMAND || "");
+  const whisperCommand = resolveCommand([
+    requestedWhisper,
+    "whisper",
+    "/Users/ba/Library/Python/3.11/bin/whisper",
+    "/opt/homebrew/bin/whisper",
+    "/usr/local/bin/whisper"
+  ]);
+  if (!whisperCommand) {
+    const requested = requestedWhisper || "whisper";
+    return { text: "", evidence: [], notes: [`Local ASR unavailable: ${requested} is not installed or not on PATH.`] };
   }
   const maxBytes = Number(options.asrMaxBytes || process.env.LEARNING_BOOST_ASR_MAX_BYTES || 450 * 1024 * 1024);
   const maxDuration = Number(options.asrMaxDurationSeconds || process.env.LEARNING_BOOST_ASR_MAX_DURATION_SECONDS || 60 * 60);
@@ -86,7 +97,9 @@ export function mediaMetadata(file) {
   const stats = fs.statSync(file);
   const metadata = { path: file, bytes: stats.size, modifiedAt: stats.mtime.toISOString() };
   try {
-    const raw = execFileSync("ffprobe", ["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", file], { encoding: "utf8", timeout: 10000 });
+    const ffprobe = resolveCommand(["ffprobe", "/usr/local/bin/ffprobe", "/opt/homebrew/bin/ffprobe"]);
+    if (!ffprobe) throw new Error("ffprobe unavailable");
+    const raw = execFileSync(ffprobe, ["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", file], { encoding: "utf8", timeout: 10000 });
     const parsed = JSON.parse(raw);
     metadata.duration = Number(parsed.format?.duration || 0) || undefined;
     metadata.format = parsed.format?.format_name || "";
@@ -173,17 +186,4 @@ function findTranscriptOutput(dir) {
   } catch {
     return "";
   }
-}
-
-function commandAvailable(command) {
-  try {
-    execFileSync("/usr/bin/env", ["bash", "-lc", `command -v ${shellQuote(command)}`], { stdio: "ignore", timeout: 3000 });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, "'\\''")}'`;
 }

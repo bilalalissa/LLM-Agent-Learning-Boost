@@ -102,7 +102,7 @@ Verified outputs are:
 
 ## Tab Loading
 
-Files, Archive, and Topics show explicit index states instead of ambiguous empty tables. During a first scan they show loading. If stale rows exist, those rows stay visible while the refresh runs. If the scan finishes with no rows, the tab shows an empty state. If the scan stalls or fails, the tab shows a retry control instead of polling forever.
+Files, Archive, and Topics show explicit index states instead of ambiguous empty tables. During a first scan they show loading. If stale rows exist, those rows stay visible while the refresh runs. If the scan finishes with no rows, the tab shows an empty state. If the scan stalls or fails, the tab shows the latest bounded status and refreshes automatically the next time the tab or sidebar is read; it does not leave the table in an infinite polling loop.
 
 The file-list endpoints return `ready`, `ready_empty`, `stale_refreshing`, `loading`, or `error`. The UI uses fetch timeouts so slow capture scans or background ingest work do not leave a table stuck on `Loading...`.
 

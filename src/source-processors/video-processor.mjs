@@ -4,6 +4,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { extractAudioTranscript, mediaMetadata, readSidecarTranscript } from "./audio-processor.mjs";
 import { extractImageOcr } from "./image-processor.mjs";
+import { resolveCommand } from "./tool-paths.mjs";
 
 export function canProcessVideoSource(file) {
   return new Set([".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp", ".m2ts", ".mts"]).has(path.extname(file).toLowerCase());
@@ -20,6 +21,8 @@ export function processVideoSource(file, options = {}) {
     kind: "video",
     title: path.basename(file, ext),
     text: extractedText || `${path.basename(file)} is preserved as a local video asset. Visual/audio content was not analyzed because no transcript, readable keyframe OCR, or permitted vision/ASR result was available.`,
+    contentExtracted: Boolean(extractedText),
+    extractionStatus: extractedText ? "extracted" : "pending_transcript_or_ocr",
     extension: ext,
     metadata,
     evidence: transcript.evidence.length ? transcript.evidence : (asr.evidence.length ? asr.evidence : (frameOcr.evidence.length ? frameOcr.evidence : [path.basename(file)])),
@@ -38,7 +41,13 @@ function extractVideoKeyframeOcr(file, metadata = {}, options = {}) {
   if (options.disableVideoOcr || process.env.LEARNING_BOOST_DISABLE_VIDEO_KEYFRAME_OCR === "1") {
     return { text: "", evidence: [], notes: ["Video keyframe OCR disabled by configuration."] };
   }
-  if (!commandAvailable("ffmpeg")) {
+  const ffmpeg = resolveCommand([
+    options.ffmpegCommand || process.env.LEARNING_BOOST_FFMPEG_COMMAND,
+    "ffmpeg",
+    "/usr/local/bin/ffmpeg",
+    "/opt/homebrew/bin/ffmpeg"
+  ]);
+  if (!ffmpeg) {
     return { text: "", evidence: [], notes: ["Video keyframe OCR unavailable: ffmpeg is not installed."] };
   }
   const maxBytes = Number(options.videoOcrMaxBytes || process.env.LEARNING_BOOST_VIDEO_OCR_MAX_BYTES || 350 * 1024 * 1024);
@@ -64,7 +73,7 @@ function extractVideoKeyframeOcr(file, metadata = {}, options = {}) {
       const time = Math.max(0, Math.floor(times[index]));
       const frame = path.join(tempDir, `frame-${index + 1}.jpg`);
       try {
-        execFileSync("ffmpeg", [
+        execFileSync(ffmpeg, [
           "-hide_banner",
           "-loglevel", "error",
           "-ss", String(time),
@@ -93,22 +102,9 @@ function extractVideoKeyframeOcr(file, metadata = {}, options = {}) {
   };
 }
 
-function commandAvailable(command) {
-  try {
-    execFileSync("/usr/bin/env", ["bash", "-lc", `command -v ${shellQuote(command)}`], { stdio: "ignore", timeout: 3000 });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function formatTime(seconds) {
   const value = Math.max(0, Math.floor(Number(seconds) || 0));
   const minutes = Math.floor(value / 60);
   const secs = value % 60;
   return `${minutes}:${String(secs).padStart(2, "0")}`;
-}
-
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, "'\\''")}'`;
 }

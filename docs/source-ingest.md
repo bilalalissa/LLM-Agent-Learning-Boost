@@ -7,7 +7,7 @@ The automatic flow now has two local-first entry points:
 - files already placed in `raw/`, `raw/inbox/`, or `raw/input/`;
 - approved ResourceInbox items queued into `raw/input/` before ingest.
 
-Approved local ResourceInbox files are copied into `raw/input/` with stable dedupe metadata. The original file is not deleted. URL-only or metadata-only resources are queued as traceable Markdown notes until a richer local capture path is available.
+Approved local ResourceInbox files are copied into `raw/input/` with stable dedupe metadata. The original file is not deleted. URL-only resources are queued as traceable Markdown notes until a richer local capture path is available. Metadata-only media is preserved as a pending source, but it does not create learning cards or bits until OCR, transcript, ASR, keyframe OCR, or a manual description provides real content.
 
 User-selected watch folders can feed this queue. The watch-folder collector filters to supported ingest extensions, skips unsafe or unsupported paths with grouped visible reasons, and dedupes repeated scans by path, size, and modified time. Common relative folder names such as `Downloads` are normalized to the user's home folder.
 
@@ -33,7 +33,7 @@ For media sources, Learning Boost tries local extraction before provider analysi
 - bounded local audio/video ASR through `whisper` when installed;
 - video keyframe OCR through `ffmpeg` plus `tesseract` for bounded, local visual text extraction.
 
-The saved source page lists processor notes so you can see whether the app used OCR, captions, metadata only, or a manual description.
+The saved source page lists processor notes so you can see whether the app used OCR, captions, ASR, keyframe OCR, or a manual description. If it only has metadata, the page is marked `pending_content`.
 
 ## Learning Outputs
 

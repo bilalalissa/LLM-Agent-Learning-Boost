@@ -222,7 +222,7 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
     "Undated",
     "ready_empty",
     "stale_refreshing",
-    "Retry refresh",
+    "Automatic refresh failed",
     "Export verified",
     "Export failed verification",
     "Checked file path(s)",
@@ -239,15 +239,18 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /state\.items\.length && state\.loading/);
   assert.doesNotMatch(serverSource, /refreshTabData\(kind\);/);
   assert.doesNotMatch(serverSource, /loading: status === "loading" \|\| status === "stale_refreshing"/);
-  assert.match(serverSource, /data-tab-refresh/);
+  assert.doesNotMatch(serverSource, /data-tab-refresh/);
+  assert.match(serverSource, /Topics are still indexing\. They will appear automatically when ready\./);
+  assert.match(serverSource, /document\.addEventListener\("pointerdown"/);
   assert.equal((serverSource.match(/function activateTab\(/g) || []).length, 1);
   assert.match(serverSource, /if \(name === "files"\) await loadFiles\(\);/);
   assert.match(serverSource, /if \(name === "archives"\) await loadArchives\(\);/);
   assert.match(serverSource, /if \(name === "topics"\) \{/);
-  assert.match(serverSource, /filesLoadPolls <= 8/);
-  assert.match(serverSource, /archivesLoadPolls <= 8/);
-  assert.match(serverSource, /topicsLoadPolls <= 8/);
-  assert.match(serverSource, /sideTopicsLoadPolls <= 8/);
+  assert.match(serverSource, /filesLoadPolls <= 18/);
+  assert.match(serverSource, /archivesLoadPolls <= 18/);
+  assert.match(serverSource, /topicsLoadPolls <= 18/);
+  assert.match(serverSource, /sideTopicsLoadPolls <= 18/);
+  assert.match(serverSource, /filesLoadPolls <= 8 \? 1400 : 8000/);
   assert.match(serverSource, /filesBody\.innerHTML = tabStatusRow\(6, "Loading vault files/);
   assert.match(serverSource, /archivesBody\.innerHTML = tabStatusRow\(6, "Loading archive history/);
   assert.doesNotMatch(serverSource, /filesBody\.innerHTML = tabStatusRow\(7/);

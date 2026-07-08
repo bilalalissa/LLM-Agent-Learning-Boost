@@ -228,6 +228,30 @@ printf 'Local transcript line\\nLocal transcript line\\nNext idea\\n' > "$outdir
   assert.match(source.processingNotes.join("\n"), /Local ASR transcribed audio/);
 });
 
+test("media ingest preserves unextracted assets without metadata-only learning cards", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "input", "photo.jpg");
+  fs.writeFileSync(source, "not a real image");
+  let providerCalled = false;
+
+  const result = await ingestFile(vault, source, config(root), {
+    async complete() {
+      providerCalled = true;
+      throw new Error("provider should not analyze metadata-only media");
+    }
+  });
+  const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+  const paths = learningPaths(vault);
+
+  assert.equal(providerCalled, false);
+  assert.equal(result.pendingContent, true);
+  assert.match(page, /media_analysis_status: pending_content/);
+  assert.match(page, /No learning cards or bits were created/);
+  assert.equal(fs.existsSync(path.join(paths.dir, "cards.jsonl")), false);
+  assert.equal(fs.existsSync(path.join(vault, result.processed)), true);
+  assert.equal(fs.existsSync(source), false);
+});
+
 test("ingestFile leaves text sources pending when provider is unavailable", async () => {
   const { root, vault } = makeVault();
   const source = path.join(vault, "raw", "inbox", "provider-down.md");
