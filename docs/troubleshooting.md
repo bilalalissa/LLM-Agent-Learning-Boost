@@ -10,7 +10,9 @@ The app should keep cached rows visible while a background index refresh runs. I
 
 Learning Boost uses the configured `VAULTS_ROOT` and its persisted vault cache for normal tab loading. The Obsidian registry file is not read unless you explicitly set `LLM_WIKI_INCLUDE_OBSIDIAN_REGISTRY=1`, so a slow or locked `~/Library/Application Support/obsidian/obsidian.json` should not block normal tab loading.
 
-If Learning opens while a deep scan is slow, it uses a fast local snapshot from `.llm-wiki/learning/` so the vault selector, cards, bits, plans, goals, and notification controls remain reachable. Retry the tab refresh after iCloud finishes syncing if stale rows or a snapshot warning remain.
+If Learning opens while a deep scan is slow, it uses the persisted Learning cache when available. If no cache exists yet, it opens a minimal vault-only view instead of blocking the app. Retry the tab refresh after iCloud finishes syncing if stale rows or a snapshot warning remain.
+
+Startup Learning backfill is a background worker. It may repair older source pages and source-to-plan links, but it should not block the main server. If the app was updated while an older build was stuck, reinstalling with `./scripts/install_macos_app.sh` also stops stale orphan workers so old tab scans do not keep running beside the new app.
 
 If a Local sidebar topic opens with a cached summary instead of full page content, the app process could not read that live vault file quickly enough. The fallback uses the cached topic title, path, summary, type, and updated date so navigation still works. Grant `/Applications/LLM Agent Learning Boost.app` access to the vault/iCloud folder in macOS Privacy settings, make sure the file is downloaded locally, then use Retry refresh.
 

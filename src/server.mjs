@@ -6,8 +6,6 @@ import { execFile, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { deleteArchivedItems } from "./archive-delete.mjs";
 import { restoreArchivedItems } from "./archive-restore.mjs";
-import { backfillLearningBoost, backfillSourceMap } from "./backfill-learning-boost.mjs";
-import { backfillLearningSections } from "./backfill-learning-sections.mjs";
 import { clearBehaviorData, exportBehaviorData, trackBehaviorEvent, updateBehaviorSettings } from "./behavior-tracker.mjs";
 import { createCalendarEvents, exportPlanIcs, previewPlanIcs } from "./calendar-integration.mjs";
 import { getConfig, readProviderConfigForUi, setConfigFilePath, updateProviderConfig } from "./config.mjs";
@@ -77,6 +75,7 @@ let autoIngestStartTimer = null;
 let autoIngestBackoffUntil = 0;
 let autoIngestWorker = null;
 let startupLearningBackfillStarted = false;
+let startupLearningBackfillWorker = null;
 let lastIngestMessage = compactStatusMessage("Auto-ingest has not run yet.");
 let ingestProgress = {
   percent: 0,
@@ -1325,27 +1324,52 @@ function scheduleStartupLearningBackfill() {
 }
 
 async function runStartupLearningBackfill() {
-  try {
-    const sectionResults = process.env.LLM_WIKI_DISABLE_STARTUP_SECTION_BACKFILL === "1"
-      ? []
-      : backfillLearningSections(config);
-    const learningResult = process.env.LLM_WIKI_DISABLE_STARTUP_LEARNING_OUTPUT_BACKFILL === "1"
-      ? { results: [] }
-      : await backfillLearningBoost(config, {
-        assumeProviderAvailable: true,
-        confirmLarge: true
-      });
-    const sourceMapResult = process.env.LLM_WIKI_DISABLE_STARTUP_SOURCE_MAP_BACKFILL === "1"
-      ? { results: [] }
-      : backfillSourceMap(config);
-    const learningGenerated = learningResult.results.reduce((sum, item) => sum + (item.generated || 0), 0);
-    const sourceLinks = sourceMapResult.results.reduce((sum, item) => sum + (item.linked || 0), 0);
-    if (sectionResults.length || learningGenerated || sourceLinks) {
-      console.log(`[backfill] sections=${sectionResults.length} learning_outputs=${learningGenerated} source_links=${sourceLinks}`);
-    }
-  } catch (error) {
-    console.warn(`[backfill] startup learning backfill failed: ${error.message}`);
+  if (startupLearningBackfillWorker) return;
+  const script = path.join(agentRoot, "src", "startup-learning-backfill-worker.mjs");
+  if (!fs.existsSync(script)) {
+    console.warn(`[backfill] startup worker missing: ${script}`);
+    return;
   }
+  const started = Date.now();
+  const worker = spawn(process.execPath, [script], {
+    cwd: agentRoot,
+    env: {
+      ...process.env,
+      LLM_WIKI_ENV_FILE: config.configFile
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  startupLearningBackfillWorker = worker;
+  let stdout = "";
+  let stderr = "";
+  const timeoutMs = positiveEnvNumber("LLM_WIKI_STARTUP_LEARNING_BACKFILL_TIMEOUT_MS", 120000);
+  const timeout = setTimeout(() => {
+    if (startupLearningBackfillWorker === worker) {
+      worker.kill("SIGTERM");
+      console.warn(`[backfill] startup worker timed out after ${timeoutMs}ms`);
+    }
+  }, timeoutMs);
+  worker.stdout.on("data", (chunk) => {
+    stdout += chunk.toString();
+  });
+  worker.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+  worker.on("exit", (code) => {
+    clearTimeout(timeout);
+    if (startupLearningBackfillWorker === worker) startupLearningBackfillWorker = null;
+    const detail = stdout.trim().split(/\r?\n/).at(-1) || "";
+    if (code === 0) {
+      if (detail) console.log(`[backfill] ${detail} in ${Date.now() - started}ms`);
+    } else {
+      console.warn(`[backfill] startup worker exited with code ${code}: ${compactWorkerText(stderr || stdout)}`);
+    }
+  });
+  worker.on("error", (error) => {
+    clearTimeout(timeout);
+    if (startupLearningBackfillWorker === worker) startupLearningBackfillWorker = null;
+    console.warn(`[backfill] startup worker failed: ${error.message}`);
+  });
 }
 
 function ensureAutoIngestScheduler() {
@@ -1620,12 +1644,12 @@ function cachedLearningPayload() {
   const state = tabDataCache.learning || cacheState();
   hydratePersistedLearningCache(state);
   if (!state.data?.vaults?.length) {
-    const fast = buildFastLearningPayload(config);
-    if (fast.vaults.length) {
-      state.data = fast;
+    const minimal = buildMinimalLearningPayload(config);
+    if (minimal.vaults.length) {
+      state.data = minimal;
       state.ready = true;
       state.loading = false;
-      state.error = state.error || "Showing a fast Learning snapshot while deeper learning scans refresh in the background.";
+      state.error = state.error || "Showing vault names while deeper Learning scans refresh in the background.";
       state.updatedAt = state.updatedAt || new Date().toISOString();
     }
   }
@@ -1699,11 +1723,93 @@ function hydratePersistedLearningCache(state) {
   updateVaultCacheFromLearning(state.data);
 }
 
+function buildMinimalLearningPayload(currentConfig) {
+  const vaultPaths = cachedVaultPaths(currentConfig);
+  return {
+    vaults: vaultPaths.map((vaultPath) => minimalLearningVault(vaultPath)),
+    appProfileIndex: { schemaVersion: 1, profiles: [] }
+  };
+}
+
 function buildFastLearningPayload(currentConfig) {
   const vaultPaths = cachedVaultPaths(currentConfig);
   return {
     vaults: vaultPaths.map((vaultPath) => fastLearningVault(vaultPath)),
     appProfileIndex: safeReadJson(appProfileIndexFile(), { schemaVersion: 1, profiles: [] })
+  };
+}
+
+function minimalLearningVault(vaultPath) {
+  const vault = vaultName(vaultPath);
+  return {
+    vault,
+    userProfile: {
+      profileId: "default",
+      displayName: "",
+      firstLanguage: "",
+      targetLanguages: [],
+      interfaceLanguage: "",
+      workingMemoryMode: "friendly",
+      preferredSessionMinutes: 25
+    },
+    learningProfile: {
+      activeProfileId: "default",
+      firstLanguage: "",
+      targetLanguages: [],
+      workingMemoryMode: "friendly",
+      preferredSessionMinutes: 25,
+      maxVisibleActions: 3,
+      maxNewConceptsPerSession: 5,
+      scheduler: "spaced"
+    },
+    learningStats: fastLearningStats({ bits: [], cards: [], reviews: [], plans: [], sourceLinks: [] }),
+    paths: {
+      userProfile: ".llm-wiki/learning/user-profile.json",
+      profile: ".llm-wiki/learning/profile.json",
+      learningDir: ".llm-wiki/learning",
+      dashboard: "wiki/learning/dashboard.md",
+      remnoteExport: ".llm-wiki/learning/exports/remnote-import.md",
+      remnoteTextExport: ".llm-wiki/learning/exports/remnote-import.txt",
+      remnoteMediaIndex: ".llm-wiki/learning/exports/remnote-media-index.md",
+      remnoteMediaDir: ".llm-wiki/learning/exports/remnote-media/"
+    },
+    onboardingQuestions: [],
+    nextActions: [
+      "Wait for the Learning scan to finish.",
+      "Use Refresh if the app has been open for a while.",
+      "Check Provider if processing remains blocked."
+    ],
+    sourceCapture: {
+      settings: defaultFastSourceCaptureSettings(),
+      groups: [],
+      lastScan: null
+    },
+    remoteResearch: { settings: {} },
+    automation: {
+      settings: defaultFastAutomationSettings(),
+      running: false,
+      status: "loading",
+      detail: "Learning data is loading in a background worker."
+    },
+    behavior: {
+      settings: defaultFastBehaviorSettings(),
+      recentEvents: [],
+      alerts: []
+    },
+    notifications: [],
+    bits: [],
+    cards: [],
+    reviews: [],
+    plans: [],
+    goals: [],
+    sourceLinks: [],
+    sourceMap: [],
+    planUpdateSuggestions: [],
+    externalWriteLog: [],
+    learningTimeline: [],
+    learningFlow: {},
+    exportPreview: null,
+    loading: true
   };
 }
 
@@ -3164,6 +3270,10 @@ function compactStatusMessage(value, maxChars = 320) {
     .trim();
   if (normalized.length <= maxChars) return normalized;
   return `${normalized.slice(0, maxChars - 1).trim()}...`;
+}
+
+function compactWorkerText(value, maxChars = 500) {
+  return compactStatusMessage(value, maxChars);
 }
 
 function summarizeStatusError(error) {

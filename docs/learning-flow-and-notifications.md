@@ -133,7 +133,9 @@ The app no longer treats a loading index as “No processed files yet.” If ind
 
 Learning Boost now treats the configured vault root and its persisted vault cache as the normal vault source. Background tab workers receive that cached vault list directly, so they do not rediscover every Obsidian app vault on each refresh. The Obsidian registry file is opt-in only with `LLM_WIKI_INCLUDE_OBSIDIAN_REGISTRY=1`, so a slow or locked `obsidian.json` file does not block Files, Archive, Topics, side Topics, shared settings, or Learning startup.
 
-When a deep Learning scan is slow, the Learning tab opens from a fast local snapshot: vault names, local profile files, source-capture settings, cards, bits, plans, goals, source links, and notifications that can be read directly from `.llm-wiki/learning/`. The deeper automation, coaching, and ResourceInbox refresh then catches up in the background. This means the vault selector and core Learning controls should remain reachable even while iCloud or Obsidian is still syncing.
+When a deep Learning scan is slow, the Learning tab opens from the persisted Learning cache if one is available. If no cache has been written yet, it opens a minimal vault-only view instead of blocking the whole app. The deeper automation, coaching, ResourceInbox, card/bit, and plan refresh then catches up in background workers. This means the vault selector and core app controls should remain reachable even while iCloud or Obsidian is still syncing.
+
+Startup Learning backfill also runs in a separate worker. It may repair old source pages and source-to-plan links in the background, but it should not block Files, Archive, Topics, Provider, or Status requests.
 
 ## Plans And Goals
 

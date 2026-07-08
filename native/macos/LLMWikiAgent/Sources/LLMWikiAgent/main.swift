@@ -53,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         isTerminating = true
         notificationPollTimer?.invalidate()
         closeNativeSnap()
-        serverProcess?.terminate()
+        terminateServerProcess()
     }
 
     private func makeWindow() {
@@ -811,8 +811,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func restartServerAndReload() {
-        serverProcess?.terminate()
-        serverProcess = nil
+        terminateServerProcess()
         startServer()
         loadAppWhenReady()
     }
@@ -1188,9 +1187,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         for line in output.split(separator: "\n") {
             let pid = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
             if !pid.isEmpty && pid != String(ProcessInfo.processInfo.processIdentifier) {
+                terminateChildren(of: pid)
                 _ = runQuick(["kill", pid])
             }
         }
+    }
+
+    private func terminateServerProcess() {
+        guard let process = serverProcess else { return }
+        let pid = String(process.processIdentifier)
+        terminateChildren(of: pid)
+        process.terminate()
+        serverProcess = nil
+    }
+
+    private func terminateChildren(of pid: String) {
+        guard !pid.isEmpty else { return }
+        _ = runQuick(["pkill", "-TERM", "-P", pid])
     }
 
     private func runStartupChecks() {
