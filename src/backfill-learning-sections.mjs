@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getConfig } from "./config.mjs";
+import { fallbackLearningBoost, renderLearningBoostSection } from "./learning-extraction.mjs";
 import { listVaults, vaultName } from "./vaults.mjs";
 
 const sectionNames = [
@@ -34,6 +35,7 @@ function ensureLearningSections(markdown, rel) {
   let body = userNotes ? markdown.slice(0, -userNotes.length).trimEnd() : markdown.trimEnd();
   body = repairStrandedKeyPoints(body);
   body = repairLearningLinesInKeyPoints(body);
+  body = ensureLearningBoostSection(body, rel, title);
 
   const openQuestions = renderLearningSection(
     "Open Questions",
@@ -61,6 +63,44 @@ function ensureLearningSections(markdown, rel) {
   const learningBlock = `${sourceLearning.trim()}\n\n${openLearning.trim()}`;
   const next = insertBeforeSection(insertAfterKeyPoints(body, learningBlock), "Contradictions", openQuestions);
   return `${next}${userNotes ? `\n${userNotes}` : ""}\n`;
+}
+
+function ensureLearningBoostSection(markdown, rel, title) {
+  if (!isSourcePage(markdown, rel) || hasSection(markdown, "Learning Boost")) return markdown;
+  const summary = sectionText(markdown, "Summary") || firstParagraph(markdown);
+  const keyPoints = sectionBullets(markdown, "Key Points");
+  const concepts = [
+    ...extractWikiLinks(extractSection(markdown, "Links")).map((link) => ({
+      name: link.title || link.path,
+      summary: `Linked concept from existing source page: ${link.path}`
+    })),
+    ...keyPoints.slice(0, 5).map((point) => ({
+      name: point.slice(0, 80),
+      summary: point
+    }))
+  ].filter((concept) => concept.name);
+  const boost = fallbackLearningBoost({
+    summary,
+    key_points: keyPoints,
+    concepts,
+    open_questions: parseQuestionAnswerItems(extractSection(markdown, "Open Questions"), "").map((item) => ({
+      question: item.question,
+      answer: item.answer
+    }))
+  }, {
+    sourceRel: rel,
+    sourceTitle: title,
+    summary,
+    evidence: [rel]
+  });
+  const block = renderLearningBoostSection({
+    ...boost,
+    processing_notes: [
+      ...(boost.processing_notes || []),
+      "Learning Boost section backfilled from existing source page summary and key points."
+    ]
+  });
+  return insertAfterKeyPoints(markdown, block).replace(/\n{3,}/g, "\n\n");
 }
 
 function repairStrandedKeyPoints(markdown) {
@@ -362,6 +402,27 @@ function sectionBullets(markdown, heading) {
     .filter((line) => !/^A:\s*/i.test(line))
     .map((line) => line.replace(/^Q:\s*/i, "").trim())
     .filter(Boolean);
+}
+
+function isSourcePage(markdown, rel) {
+  return /^type:\s*source\s*$/m.test(markdown) || /(^|\/)sources\/.+\.md$/.test(rel);
+}
+
+function firstParagraph(markdown) {
+  return String(markdown || "")
+    .replace(/^---[\s\S]*?---\s*/m, "")
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter((part) => part && !part.startsWith("#") && !part.startsWith("- "))
+    .find(Boolean) || "";
+}
+
+function extractWikiLinks(section) {
+  const links = [];
+  for (const match of String(section || "").matchAll(/\[\[([^|\]]+)(?:\|([^\]]+))?\]\]/g)) {
+    links.push({ path: match[1], title: match[2] || path.basename(match[1]) });
+  }
+  return links;
 }
 
 function stripWiki(value) {

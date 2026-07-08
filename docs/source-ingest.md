@@ -26,6 +26,14 @@ Opened documents can also feed the queue after preview approval. Metadata-only p
 
 Best-effort capture also queues common legacy or app-specific files such as `.doc`, `.xls`, `.ppt`, `.pages`, `.numbers`, `.key`, `.eml`, `.ics`, `.webarchive`, `.heif`, `.flac`, `.mkv`, `.log`, `.xml`, `.yaml`, and `.url`. If extraction is incomplete, the source remains pending or records a clear limitation instead of being marked fully processed.
 
+For media sources, Learning Boost tries local extraction before provider analysis:
+
+- image OCR through `tesseract` when installed;
+- audio/video sidecar captions with exact or language-suffixed names;
+- video keyframe OCR through `ffmpeg` plus `tesseract` for bounded, local visual text extraction.
+
+The saved source page lists processor notes so you can see whether the app used OCR, captions, metadata only, or a manual description.
+
 ## Learning Outputs
 
 Ingest writes Learning Boost sections into source pages and stores structured outputs under `.llm-wiki/learning/`:
@@ -36,6 +44,8 @@ Ingest writes Learning Boost sections into source pages and stores structured ou
 - RemNote export files
 
 Media-aware bits and cards use `mediaRefs` when image/audio/video assets are available.
+
+Existing source pages can be backfilled. On startup, the app adds missing Learning Boost sections to older `wiki/sources/*.md` pages from the page’s existing Summary, Key Points, links, and questions. The original raw file and any `## User Notes` section are preserved.
 
 ## Safety
 

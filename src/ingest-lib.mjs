@@ -309,8 +309,7 @@ Return strict JSON with this shape:
 }
 
 function parseMediaJson(text, media, input = {}) {
-  const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
-  const raw = JSON.parse(cleaned);
+  const raw = parseProviderJson(text);
   const parsed = {
     summary: String(raw.summary || ""),
     language: String(raw.language || ""),
@@ -330,10 +329,16 @@ function parseMediaJson(text, media, input = {}) {
     evidence: input.processedSource?.evidence || [media.assetRel],
     mediaRefs: [media.assetRel]
   });
+  const enriched = enrichParsedAnalysis(parsed, {
+    ...input,
+    sourceText: input.processedSource?.text || "",
+    sourceTitle: input.sourceTitle,
+    sourcePath: media.assetRel
+  }, "Provider returned sparse media JSON; local extracted text and metadata filled missing analysis fields.");
   return {
-    ...parsed,
-    processing_notes: asArray(raw.processing_notes),
-    learning_boost: normalizeLearningBoost(raw.learning_boost || {}, { ...context, summary: parsed.summary, language: parsed.language }),
+    ...enriched,
+    processing_notes: uniqueStrings([...asArray(raw.processing_notes), ...asArray(enriched.processing_notes)]),
+    learning_boost: normalizeLearningBoost(raw.learning_boost || {}, { ...context, summary: enriched.summary, language: enriched.language }),
     analyzed: true,
     status: "analyzed"
   };
@@ -430,9 +435,9 @@ function uniqueRel(vaultPath, initialRel) {
 }
 
 function mediaKindFor(ext) {
-  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".heic"].includes(ext)) return "image";
-  if ([".mp4", ".mov", ".m4v", ".webm"].includes(ext)) return "video";
-  if ([".mp3", ".wav", ".m4a", ".aiff", ".aac"].includes(ext)) return "audio";
+  if ([".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif"].includes(ext)) return "image";
+  if ([".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp"].includes(ext)) return "video";
+  if ([".mp3", ".wav", ".m4a", ".m4b", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr"].includes(ext)) return "audio";
   if (ext === ".pdf") return "PDF";
   return "media";
 }
@@ -500,32 +505,33 @@ ${input.sourceText}`;
 
 function fallbackSourceAnalysis(error, input = {}) {
   const sourceText = String(input.sourceText || "").trim();
+  const local = localSourceAnalysis(input, "Manual baseline source page created from local extracted text because AI analysis was explicitly skipped or unavailable.");
   const excerpt = sourceText.replace(/\s+/g, " ").slice(0, 360);
   const parsed = {
     summary: excerpt
       ? `Manual baseline source page created from local extracted text because AI analysis was explicitly skipped or unavailable. Excerpt: ${excerpt}${sourceText.length > 360 ? "..." : ""}`
       : "Manual baseline source page created because AI analysis was explicitly skipped or unavailable. The raw source was preserved for later review.",
     language: "unknown",
-    key_points: [
+    key_points: local.key_points.length ? local.key_points : [
       `Source title: ${input.sourceTitle || "Untitled source"}.`,
       `Original source path: ${input.sourcePath || "unknown"}.`,
       "AI-generated analysis was deferred by explicit baseline processing."
     ],
-    concepts: [{
+    concepts: local.concepts.length ? local.concepts : [{
       name: input.sourceTitle || "Unreviewed source",
       summary: "A locally processed source awaiting richer AI or human review."
     }],
     entities: [],
-    open_questions: [{
+    open_questions: local.open_questions.length ? local.open_questions : [{
       question: "What should be extracted from this source?",
       answer: "This remains open until the AI provider is available or the user reviews the processed source page."
     }],
     contradictions: [],
-    source_learning_questions: [{
+    source_learning_questions: local.source_learning_questions.length ? local.source_learning_questions : [{
       question: "What is the first useful review step for this source?",
       answer: "Open the processed source page, read the summary/excerpt, and rerun or revise analysis when the provider is responsive."
     }],
-    open_learning_questions: [{
+    open_learning_questions: local.open_learning_questions.length ? local.open_learning_questions : [{
       question: "How should this source connect to broader learning goals?",
       answer: "Connect it after its key concepts, claims, and evidence are reviewed."
     }],
@@ -542,9 +548,8 @@ function fallbackSourceAnalysis(error, input = {}) {
 }
 
 function parseJson(text, input = {}) {
-  const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
-  const data = JSON.parse(cleaned);
-  const parsed = {
+  const data = parseProviderJson(text);
+  const parsed = enrichParsedAnalysis({
     summary: String(data.summary || ""),
     language: String(data.language || ""),
     key_points: asArray(data.key_points),
@@ -555,11 +560,177 @@ function parseJson(text, input = {}) {
     source_learning_questions: asLearningItems(data.source_learning_questions),
     open_learning_questions: asLearningItems(data.open_learning_questions),
     processing_notes: asArray(data.processing_notes)
-  };
+  }, input, "Provider returned sparse JSON; local extracted text filled missing analysis fields.");
   parsed.learning_boost = data.learning_boost
     ? normalizeLearningBoost(data.learning_boost, { ...analysisContext(input), summary: parsed.summary, language: parsed.language })
     : fallbackLearningBoost(parsed, analysisContext(input));
   return parsed;
+}
+
+function parseProviderJson(text) {
+  const cleaned = String(text || "")
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (exactError) {
+    const objectText = firstBalancedJsonObject(cleaned);
+    if (!objectText) throw exactError;
+    return JSON.parse(objectText);
+  }
+}
+
+function firstBalancedJsonObject(text) {
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (start === -1) {
+      if (char === "{") {
+        start = i;
+        depth = 1;
+      }
+      continue;
+    }
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return "";
+}
+
+function enrichParsedAnalysis(parsed, input = {}, note = "") {
+  const local = localSourceAnalysis(input, note);
+  const merged = {
+    ...parsed,
+    summary: parsed.summary || local.summary,
+    language: parsed.language || local.language,
+    key_points: parsed.key_points.length ? parsed.key_points : local.key_points,
+    concepts: parsed.concepts.length ? parsed.concepts : local.concepts,
+    entities: parsed.entities.length ? parsed.entities : local.entities,
+    open_questions: parsed.open_questions.length ? parsed.open_questions : local.open_questions,
+    contradictions: parsed.contradictions,
+    source_learning_questions: parsed.source_learning_questions.length ? parsed.source_learning_questions : local.source_learning_questions,
+    open_learning_questions: parsed.open_learning_questions.length ? parsed.open_learning_questions : local.open_learning_questions,
+    processing_notes: parsed.processing_notes.length
+      ? parsed.processing_notes
+      : local.processing_notes
+  };
+  if (note && !parsed.summary && !merged.processing_notes.some((item) => item === note)) merged.processing_notes.push(note);
+  return merged;
+}
+
+function localSourceAnalysis(input = {}, note = "") {
+  const sourceText = String(input.sourceText || input.processedSource?.text || "").trim();
+  const sourceTitle = String(input.sourceTitle || "Untitled source").trim();
+  const sentences = meaningfulSentences(sourceText);
+  const headings = [...sourceText.matchAll(/^#{1,6}\s+(.+)$/gm)].map((match) => cleanLine(match[1])).filter(Boolean);
+  const keyPoints = uniqueStrings([
+    ...headings.slice(0, 4),
+    ...sentences.slice(0, 8)
+  ]).slice(0, 8);
+  const terms = uniqueStrings([
+    ...headings,
+    ...extractFrequentTerms(sourceText),
+    sourceTitle
+  ]).filter((item) => !genericSourceLabel(item)).slice(0, 8);
+  const concepts = terms.length
+    ? terms.map((term, index) => ({
+      name: term,
+      summary: keyPoints[index] || `A concept or topic extracted from ${sourceTitle}.`
+    }))
+    : [{ name: sourceTitle, summary: keyPoints[0] || "A locally extracted source topic awaiting richer analysis." }];
+  const summary = keyPoints.length
+    ? keyPoints.slice(0, 3).join(" ")
+    : (sourceText ? sourceText.replace(/\s+/g, " ").slice(0, 420) : `${sourceTitle} was preserved for learning analysis.`);
+  return {
+    summary,
+    language: "unknown",
+    key_points: keyPoints.length ? keyPoints : [`Source title: ${sourceTitle}.`],
+    concepts,
+    entities: [],
+    open_questions: [{
+      question: `What evidence would strengthen the understanding of ${concepts[0]?.name || sourceTitle}?`,
+      answer: "Compare this source with newer or broader sources, then update the linked concept page and learning cards."
+    }],
+    source_learning_questions: [{
+      question: `What is the key idea behind ${concepts[0]?.name || sourceTitle}?`,
+      answer: summary
+    }],
+    open_learning_questions: [{
+      question: `How does ${concepts[0]?.name || sourceTitle} connect to adjacent concepts or real workflows?`,
+      answer: "Use future sources and review notes to connect this idea without adding unsupported claims."
+    }],
+    processing_notes: note ? [note] : []
+  };
+}
+
+function meaningfulSentences(text) {
+  return String(text || "")
+    .replace(/^---[\s\S]*?---\s*/m, "")
+    .split(/(?<=[.!?؟])\s+|\n{2,}|\r?\n[-*]\s+/)
+    .map(cleanLine)
+    .filter((line) => line.length >= 24)
+    .filter((line) => !/^(metadata|source path|tags?|created|updated):/i.test(line))
+    .slice(0, 20);
+}
+
+function extractFrequentTerms(text) {
+  const candidates = [];
+  for (const match of String(text || "").matchAll(/\b[A-Z][A-Za-z0-9+#./-]{2,}(?:\s+[A-Z][A-Za-z0-9+#./-]{2,}){0,3}\b/g)) {
+    candidates.push(cleanLine(match[0]));
+  }
+  for (const match of String(text || "").matchAll(/[\p{Script=Arabic}]{3,}(?:\s+[\p{Script=Arabic}]{3,}){0,3}/gu)) {
+    candidates.push(cleanLine(match[0]));
+  }
+  return candidates
+    .filter((item) => item.length >= 3)
+    .filter((item) => !genericSourceLabel(item));
+}
+
+function cleanLine(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/^[#>*\-\s]+/, "")
+    .replace(/\[[^\]]+\]\([^)]*\)/g, "")
+    .trim()
+    .slice(0, 220);
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values.map(cleanLine).filter(Boolean)) {
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
+}
+
+function genericSourceLabel(value) {
+  return /^(browser clip|media from|transcript:?|pasted image|screenshot|source|untitled source)$/i.test(String(value || "").trim());
 }
 
 function analysisContext(input = {}, extra = {}) {

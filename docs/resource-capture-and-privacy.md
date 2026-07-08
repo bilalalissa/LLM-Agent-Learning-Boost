@@ -115,7 +115,7 @@ Copy failures, including iCloud or macOS permission errors such as `EPERM`, are 
 
 Screenshot capture is disabled by default. When enabled, Learning Boost scans only configured local folders and preserves readable image files as local evidence. It does not start live screen recording, attach to browser sessions, or call cloud services during the safe scan.
 
-Image, audio, and video files are queued as best-effort local sources when their extension is supported. If Learning Boost can only preserve metadata, the resulting pending source says that the content still needs local inspection or provider analysis. It is not marked fully processed until extraction and provider analysis succeed.
+Image, audio, and video files are queued as best-effort local sources when their extension is supported. Learning Boost first tries local extraction: `tesseract` OCR for images, transcript sidecars for audio/video, and bounded `ffmpeg` keyframe OCR for video when no transcript is available. If Learning Boost can only preserve metadata, the resulting pending source says that the content still needs local inspection or provider analysis. It is not marked fully processed until extraction and provider analysis succeed.
 
 ## Opened Documents
 

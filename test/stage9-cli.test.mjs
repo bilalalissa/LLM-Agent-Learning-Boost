@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { backfillLearningSections } from "../src/backfill-learning-sections.mjs";
 import { backfillLearningBoost, backfillSourceMap, detectExistingSourcePages } from "../src/backfill-learning-boost.mjs";
 import { activateLearningPlan, draftLearningPlans, readLearningGoals, readLearningPlans, readSourceLinks } from "../src/learning-planner.mjs";
 import { learningCheck, REQUIRED_DOCS, REQUIRED_SCRIPTS } from "../src/learning-check.mjs";
@@ -84,6 +85,19 @@ test("backfillLearningBoost generates learning outputs only once when provider i
   assert.equal(second.results[0].generated, 0);
   assert.ok(cards.length > 0);
   assert.ok(bits.length > 0);
+});
+
+test("backfillLearningSections adds Learning Boost to existing source pages without overwriting user notes", () => {
+  const { root, vault } = makeVaultRoot();
+  writeSourcePage(vault, "older-source.md");
+
+  const result = backfillLearningSections(makeConfig(root));
+  const page = fs.readFileSync(path.join(vault, "wiki", "sources", "older-source.md"), "utf8");
+
+  assert.equal(result.some((item) => item.file === "wiki/sources/older-source.md"), true);
+  assert.match(page, /## Learning Boost/);
+  assert.match(page, /### Learning Bits/);
+  assert.match(page, /Do not overwrite this note/);
 });
 
 test("backfillSourceMap links older processed sources without provider or duplicate cards", () => {

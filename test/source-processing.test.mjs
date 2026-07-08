@@ -141,6 +141,59 @@ test("ingestFile renders Learning Boost sections and writes learning JSONL outpu
   assert.equal(fs.existsSync(path.join(vault, result.processed)), true);
 });
 
+test("ingestFile accepts provider JSON wrapped in prose and fills sparse learning fields", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "input", "local-models.md");
+  fs.writeFileSync(source, "# Local Model Routing\n\nA router can select Ollama when it is healthy. Small local models work best when tasks are bounded.");
+
+  const result = await ingestFile(vault, source, config(root), {
+    async complete() {
+      return `Here is the analysis:\n${JSON.stringify({
+        language: "English",
+        summary: "Local routers should select a healthy runtime and keep tasks bounded.",
+        key_points: ["Router health matters before chat.", "Bounded tasks fit small local models."],
+        concepts: [{ name: "Local model routing", summary: "Choosing a reachable local runtime for a task." }],
+        source_learning_questions: [{ question: "Why does router health matter?", answer: "It proves the selected local runtime can answer." }]
+      })}\nDone.`;
+    }
+  });
+  const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+  const cards = fs.readFileSync(path.join(learningPaths(vault).dir, "cards.jsonl"), "utf8");
+
+  assert.match(page, /Local routers should select/);
+  assert.match(page, /## Learning Boost/);
+  assert.match(cards, /Local model routing/);
+  assert.equal(result.learning.cardsCreated >= 4, true);
+  assert.equal(result.learning.bitsCreated >= 3, true);
+});
+
+test("video processor finds language-suffixed transcript sidecars and collapses adjacent duplicate cues", () => {
+  const { root } = makeVault();
+  const video = path.join(root, "lesson.mp4");
+  const transcript = path.join(root, "lesson.ar-orig.srt");
+  fs.writeFileSync(video, "fake video bytes");
+  fs.writeFileSync(transcript, `1
+00:00:01,000 --> 00:00:02,000
+السلام عليكم
+
+2
+00:00:02,000 --> 00:00:03,000
+السلام عليكم
+
+3
+00:00:03,000 --> 00:00:04,000
+الفكرة المهمة
+`);
+
+  const source = processSourceFile(video, { assetRel: "raw/assets/lesson.mp4" });
+
+  assert.equal(source.kind, "video");
+  assert.match(source.text, /السلام عليكم/);
+  assert.match(source.text, /الفكرة المهمة/);
+  assert.equal((source.text.match(/السلام عليكم/g) || []).length, 1);
+  assert.match(source.processingNotes.join("\n"), /transcript sidecar/i);
+});
+
 test("ingestFile leaves text sources pending when provider is unavailable", async () => {
   const { root, vault } = makeVault();
   const source = path.join(vault, "raw", "inbox", "provider-down.md");

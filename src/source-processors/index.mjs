@@ -9,19 +9,21 @@ import { canProcessVideoSource, processVideoSource } from "./video-processor.mjs
 import { canProcessWebSource, processWebSource } from "./web-processor.mjs";
 
 export const STAGE_3_SOURCE_EXTENSIONS = new Set([
-  ".md", ".markdown", ".txt", ".html", ".htm", ".rtf", ".csv", ".tsv", ".json", ".jsonl",
-  ".log", ".xml", ".yaml", ".yml", ".docx", ".doc", ".xlsx", ".xls", ".odt", ".pptx", ".ppt",
-  ".odp", ".pages", ".numbers", ".key", ".epub", ".eml", ".ics", ".webarchive", ".pdf",
-  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif",
-  ".mp3", ".wav", ".m4a", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr",
-  ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi",
+  ".md", ".mdx", ".rst", ".markdown", ".txt", ".html", ".htm", ".mhtml", ".rtf", ".csv", ".tsv", ".json", ".jsonl",
+  ".log", ".ini", ".conf", ".toml", ".xml", ".yaml", ".yml", ".ipynb", ".bib", ".tex", ".sql", ".sh", ".bash", ".zsh",
+  ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css", ".scss", ".java", ".c", ".cc", ".cpp", ".h", ".hpp",
+  ".swift", ".go", ".rs", ".rb", ".php", ".docx", ".doc", ".xlsx", ".xls", ".odt", ".pptx", ".ppt", ".odp", ".pages",
+  ".numbers", ".key", ".epub", ".eml", ".msg", ".ics", ".webloc", ".webarchive", ".pdf", ".zip",
+  ".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif",
+  ".mp3", ".wav", ".m4a", ".m4b", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr",
+  ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp",
   ".vtt", ".srt", ".url"
 ]);
 
 export const ASSET_SOURCE_EXTENSIONS = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif",
-  ".mp3", ".wav", ".m4a", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr",
-  ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"
+  ".mp3", ".wav", ".m4a", ".m4b", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr",
+  ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp"
 ]);
 
 export function isStage3Ingestible(file) {

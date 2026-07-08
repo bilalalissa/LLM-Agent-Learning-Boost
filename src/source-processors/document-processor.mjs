@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 
 const documentExtensions = new Set([
   ".rtf", ".docx", ".doc", ".odt", ".pptx", ".ppt", ".odp",
-  ".xlsx", ".xls", ".pages", ".numbers", ".key", ".epub", ".eml", ".ics", ".webarchive"
+  ".xlsx", ".xls", ".pages", ".numbers", ".key", ".epub", ".eml", ".msg", ".ics", ".webarchive", ".zip"
 ]);
 
 export function canProcessDocumentSource(file) {
@@ -21,8 +21,9 @@ export function processDocumentSource(file, options = {}) {
   else if (ext === ".xlsx") text = unzipXml(file, ["xl/sharedStrings.xml", "xl/worksheets/sheet*.xml"], notes);
   else if ([".odt", ".odp", ".epub", ".pages", ".numbers", ".key"].includes(ext)) text = unzipXml(file, ["content.xml", "*.xhtml", "*.html", "index.xml", "Metadata/*.plist"], notes);
   else if (ext === ".webarchive") text = readTextLike(file, notes);
-  else if (ext === ".eml" || ext === ".ics") text = readTextLike(file, notes);
+  else if (ext === ".eml" || ext === ".msg" || ext === ".ics") text = readTextLike(file, notes);
   else if (ext === ".doc" || ext === ".ppt" || ext === ".xls") text = convertWithTextutil(file, notes);
+  else if (ext === ".zip") text = zipListing(file, notes);
   if (!text.trim()) {
     text = `${path.basename(file)} preserved for local review. Text extraction is unavailable without optional local document tools.`;
     notes.push(`Document text extraction fallback used for ${ext}.`);
@@ -38,6 +39,24 @@ export function processDocumentSource(file, options = {}) {
     mediaRefs: [],
     processingNotes: notes
   };
+}
+
+function zipListing(file, notes) {
+  try {
+    const listing = execFileSync("unzip", ["-Z1", file], { encoding: "utf8", timeout: 10000 })
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(0, 200);
+    notes.push("ZIP archive indexed by filename only; extract individual files for full content analysis.");
+    return [
+      `ZIP archive with ${listing.length} listed item(s).`,
+      "Files:",
+      ...listing.map((item) => `- ${item}`)
+    ].join("\n");
+  } catch (error) {
+    notes.push(`ZIP listing unavailable or failed: ${error.message}`);
+    return "";
+  }
 }
 
 function readTextLike(file, notes) {

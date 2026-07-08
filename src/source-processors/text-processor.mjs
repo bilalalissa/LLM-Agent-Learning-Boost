@@ -4,7 +4,14 @@ import path from "node:path";
 const transcriptExtensions = new Set([".vtt", ".srt"]);
 
 export function canProcessTextSource(file) {
-  return new Set([".md", ".markdown", ".txt", ".csv", ".tsv", ".log", ".xml", ".yaml", ".yml", ".json", ".jsonl", ".vtt", ".srt", ".url"]).has(path.extname(file).toLowerCase());
+  return new Set([
+    ".md", ".mdx", ".markdown", ".rst", ".txt", ".csv", ".tsv", ".log",
+    ".ini", ".conf", ".toml", ".xml", ".yaml", ".yml", ".json", ".jsonl",
+    ".ipynb", ".bib", ".tex", ".sql", ".sh", ".bash", ".zsh", ".py", ".js",
+    ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css", ".scss", ".java", ".c",
+    ".cc", ".cpp", ".h", ".hpp", ".swift", ".go", ".rs", ".rb", ".php",
+    ".mhtml", ".vtt", ".srt", ".url", ".webloc"
+  ]).has(path.extname(file).toLowerCase());
 }
 
 export function processTextSource(file, options = {}) {
@@ -12,29 +19,63 @@ export function processTextSource(file, options = {}) {
   const raw = fs.readFileSync(file, "utf8");
   if (ext === ".csv" || ext === ".tsv") return tableSource(file, raw, ext, options);
   if (ext === ".json" || ext === ".jsonl") return jsonSource(file, raw, ext, options);
+  if (ext === ".ipynb") return notebookSource(file, raw, ext, options);
   if (transcriptExtensions.has(ext)) return transcriptSource(file, raw, ext, options);
-  if (ext === ".url") return urlSource(file, raw, options);
+  if (ext === ".url" || ext === ".webloc") return urlSource(file, raw, options);
   return baseSource(file, raw, ext, options);
 }
 
 export function normalizeTranscriptText(text) {
   const lines = String(text || "")
-    .replace(/^WEBVTT[^\n]*\n/i, "")
+    .replace(/^\uFEFF?WEBVTT[^\n]*\n/i, "")
     .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .filter((line) => !/^\d+$/.test(line));
-  const chunks = [];
+    .map((line) => line.trim());
+  const cues = [];
   let currentTime = "";
+  let cueLines = [];
+  const flushCue = () => {
+    if (!cueLines.length) return;
+    const body = cleanTranscriptCue(cueLines.join(" "));
+    if (!body) {
+      cueLines = [];
+      return;
+    }
+    const previous = cues[cues.length - 1];
+    if (!previous || normalizeCue(previous.body) !== normalizeCue(body)) {
+      cues.push({ time: currentTime, body });
+    }
+    cueLines = [];
+  };
   for (const line of lines) {
+    if (!line) {
+      flushCue();
+      continue;
+    }
+    if (/^(NOTE|STYLE|REGION)(\s|$)/i.test(line)) continue;
+    if (/^\d+$/.test(line)) continue;
     const timing = line.match(/(?<start>\d{1,2}:\d{2}(?::\d{2})?(?:[,.]\d{1,3})?)\s+-->\s+(?<end>\d{1,2}:\d{2}(?::\d{2})?(?:[,.]\d{1,3})?)/);
     if (timing) {
+      flushCue();
       currentTime = timing.groups.start.replace(",", ".");
       continue;
     }
-    chunks.push(currentTime ? `[${currentTime}] ${line}` : line);
+    cueLines.push(line);
   }
-  return chunks.join("\n");
+  flushCue();
+  return cues.map((cue) => cue.time ? `[${cue.time}] ${cue.body}` : cue.body).join("\n");
+}
+
+function cleanTranscriptCue(value) {
+  return String(value || "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\{\\[^}]+\}/g, "")
+    .replace(/\s+(align|position|line|size):\S+/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeCue(value) {
+  return cleanTranscriptCue(value).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 function tableSource(file, raw, ext, options) {
@@ -75,6 +116,28 @@ function jsonSource(file, raw, ext, options) {
   };
 }
 
+function notebookSource(file, raw, ext, options) {
+  try {
+    const parsed = JSON.parse(raw);
+    const cells = Array.isArray(parsed.cells) ? parsed.cells : [];
+    const text = cells.slice(0, 80).map((cell, index) => {
+      const source = Array.isArray(cell.source) ? cell.source.join("") : String(cell.source || "");
+      return `Cell ${index + 1} (${cell.cell_type || "unknown"}):\n${source.trim()}`;
+    }).filter(Boolean).join("\n\n");
+    return {
+      ...baseSource(file, text || raw, ext, options),
+      kind: "notebook",
+      metadata: { cells: cells.length }
+    };
+  } catch (error) {
+    return {
+      ...baseSource(file, raw, ext, options),
+      kind: "notebook",
+      processingNotes: [`Notebook parser fallback used: ${error.message}`]
+    };
+  }
+}
+
 function transcriptSource(file, raw, ext, options) {
   const text = normalizeTranscriptText(raw);
   const evidence = [...text.matchAll(/\[(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d{1,3})?)\]/g)].slice(0, 12).map((match) => match[1]);
@@ -87,7 +150,7 @@ function transcriptSource(file, raw, ext, options) {
 }
 
 function urlSource(file, raw, options) {
-  const url = raw.match(/https?:\/\/\S+/i)?.[0] || raw.trim();
+  const url = raw.match(/https?:\/\/[^\s<]+/i)?.[0] || raw.trim();
   return {
     ...baseSource(file, url, ".url", options),
     kind: "url",
