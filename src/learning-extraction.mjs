@@ -267,7 +267,7 @@ ${evidenceMap(data)}
 `;
 }
 
-export function appendLearningOutputs(vaultPath, { sourceRel, sourceTitle, processedRel, boost, sourceKind = "source", processingNotes = [] }, config = {}) {
+export function appendLearningOutputs(vaultPath, { sourceRel, sourceTitle, processedRel, boost, sourceKind = "source", processingNotes = [], skipRemnoteExport = false }, config = {}) {
   ensureLearningScaffold(vaultPath, config);
   const paths = learningPaths(vaultPath);
   const normalized = normalizeLearningBoost(boost, { vault: vaultName(vaultPath), sourceRel, sourceTitle });
@@ -329,7 +329,7 @@ export function appendLearningOutputs(vaultPath, { sourceRel, sourceTitle, proce
       suggestedAction: "Review the source manually or configure the relevant local extraction tool."
     });
   }
-  exportRemnoteBundle(vaultPath, readJsonl(path.join(paths.dir, "cards.jsonl")));
+  if (!skipRemnoteExport) exportRemnoteBundle(vaultPath, readJsonl(path.join(paths.dir, "cards.jsonl")));
   return {
     bitsCreated: normalized.learning_bits.length,
     cardsCreated: normalized.cards.length,

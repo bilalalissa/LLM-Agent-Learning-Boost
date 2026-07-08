@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { getConfig } from "./config.mjs";
 import { fallbackLearningBoost, renderLearningBoostSection } from "./learning-extraction.mjs";
 import { listVaults, vaultName } from "./vaults.mjs";
@@ -477,7 +478,7 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const results = backfillLearningSections();
   for (const result of results) {
     console.log(`[${result.vault}] ${result.file}`);

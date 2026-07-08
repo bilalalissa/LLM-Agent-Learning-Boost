@@ -33,6 +33,8 @@ Files dropped into `raw/`, `raw/input/`, or `raw/inbox/` are candidates for proc
 
 If the selected provider cannot answer, Learning Boost leaves the file pending and records a blocker. It should not create a successful source page that only says a baseline page was made because AI was unavailable.
 
+When the app starts, it also checks older processed source pages. If a page already has Summary, Key Points, questions, and links but lacks Learning Boost sections or `.llm-wiki/learning/` card/bit records, the app repairs that from the existing source-page evidence. This makes already processed sources visible in the Learning tab without rewriting human notes or pretending a new provider analysis happened.
+
 ## Bits And Cards
 
 Each processed source is treated as a learning object, not only a saved note.

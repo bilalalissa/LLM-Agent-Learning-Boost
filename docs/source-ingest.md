@@ -45,7 +45,7 @@ Ingest writes Learning Boost sections into source pages and stores structured ou
 
 Media-aware bits and cards use `mediaRefs` when image/audio/video assets are available.
 
-Existing source pages can be backfilled. On startup, the app adds missing Learning Boost sections to older `wiki/sources/*.md` pages from the page’s existing Summary, Key Points, links, and questions. The original raw file and any `## User Notes` section are preserved.
+Existing source pages are backfilled at startup. The app adds missing Learning Boost sections to older `wiki/sources/*.md` pages from the page’s existing Summary, Key Points, links, and questions. It also creates missing `.llm-wiki/learning/` bits, cards, and source-map links for source pages that do not already have learning records. The original raw file and any `## User Notes` section are preserved, and the repair is skipped for sources that already have cards or bits.
 
 ## Safety
 

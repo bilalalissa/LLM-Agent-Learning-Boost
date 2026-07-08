@@ -132,6 +132,10 @@ export function configPointerFile() {
   return path.join(os.homedir(), "Library", "Application Support", "LLM Agent Learning Boost", "config-path.txt");
 }
 
+export function appSupportConfigFile() {
+  return path.join(os.homedir(), "Library", "Application Support", "LLM Agent Learning Boost", "config.env");
+}
+
 export function getConfigFilePath() {
   if (process.env.LLM_WIKI_ENV_FILE) return process.env.LLM_WIKI_ENV_FILE;
   const pointer = configPointerFile();
@@ -139,6 +143,8 @@ export function getConfigFilePath() {
     const selected = fs.readFileSync(pointer, "utf8").trim();
     if (selected) return expandTilde(selected);
   }
+  const appConfig = appSupportConfigFile();
+  if (fs.existsSync(appConfig)) return appConfig;
   return path.join(ROOT, ".env");
 }
 

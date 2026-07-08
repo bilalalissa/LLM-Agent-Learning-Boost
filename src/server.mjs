@@ -6,6 +6,7 @@ import { execFile, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { deleteArchivedItems } from "./archive-delete.mjs";
 import { restoreArchivedItems } from "./archive-restore.mjs";
+import { backfillLearningBoost, backfillSourceMap } from "./backfill-learning-boost.mjs";
 import { backfillLearningSections } from "./backfill-learning-sections.mjs";
 import { clearBehaviorData, exportBehaviorData, trackBehaviorEvent, updateBehaviorSettings } from "./behavior-tracker.mjs";
 import { createCalendarEvents, exportPlanIcs, previewPlanIcs } from "./calendar-integration.mjs";
@@ -75,6 +76,7 @@ let autoIngestIntervalMs = 0;
 let autoIngestStartTimer = null;
 let autoIngestBackoffUntil = 0;
 let autoIngestWorker = null;
+let startupLearningBackfillStarted = false;
 let lastIngestMessage = compactStatusMessage("Auto-ingest has not run yet.");
 let ingestProgress = {
   percent: 0,
@@ -1297,6 +1299,7 @@ server.listen(config.chatPort, config.bridgeHost, () => {
   setTimeout(() => {
     void localAiRouterSupervisor.start();
   }, 1000);
+  scheduleStartupLearningBackfill();
   if (process.env.LLM_WIKI_DISABLE_STARTUP_TAB_REFRESH !== "1") {
     ["files", "archives", "topics"].forEach((kind, index) => {
       setTimeout(() => scheduleTabDataRefresh(kind), startupTabRefreshDelayMs + (index * 2500));
@@ -1307,15 +1310,42 @@ server.listen(config.chatPort, config.bridgeHost, () => {
 
 async function startAutoIngest() {
   if (autoIngestTimer) return;
-  if (process.env.LLM_WIKI_BACKFILL_ON_START === "1") {
-    const backfilled = backfillLearningSections(config);
-    if (backfilled.length) {
-      console.log(`[backfill] added learning sections to ${backfilled.length} wiki page${backfilled.length === 1 ? "" : "s"}`);
-    }
-  }
   void runAutoIngest();
   autoIngestIntervalMs = config.watchIntervalMs;
   autoIngestTimer = setInterval(runAutoIngest, autoIngestIntervalMs);
+}
+
+function scheduleStartupLearningBackfill() {
+  if (startupLearningBackfillStarted || process.env.LLM_WIKI_DISABLE_STARTUP_LEARNING_BACKFILL === "1") return;
+  startupLearningBackfillStarted = true;
+  const delay = positiveEnvNumber("LLM_WIKI_STARTUP_LEARNING_BACKFILL_DELAY_MS", 15000);
+  setTimeout(() => {
+    void runStartupLearningBackfill();
+  }, Math.max(1000, delay));
+}
+
+async function runStartupLearningBackfill() {
+  try {
+    const sectionResults = process.env.LLM_WIKI_DISABLE_STARTUP_SECTION_BACKFILL === "1"
+      ? []
+      : backfillLearningSections(config);
+    const learningResult = process.env.LLM_WIKI_DISABLE_STARTUP_LEARNING_OUTPUT_BACKFILL === "1"
+      ? { results: [] }
+      : await backfillLearningBoost(config, {
+        assumeProviderAvailable: true,
+        confirmLarge: true
+      });
+    const sourceMapResult = process.env.LLM_WIKI_DISABLE_STARTUP_SOURCE_MAP_BACKFILL === "1"
+      ? { results: [] }
+      : backfillSourceMap(config);
+    const learningGenerated = learningResult.results.reduce((sum, item) => sum + (item.generated || 0), 0);
+    const sourceLinks = sourceMapResult.results.reduce((sum, item) => sum + (item.linked || 0), 0);
+    if (sectionResults.length || learningGenerated || sourceLinks) {
+      console.log(`[backfill] sections=${sectionResults.length} learning_outputs=${learningGenerated} source_links=${sourceLinks}`);
+    }
+  } catch (error) {
+    console.warn(`[backfill] startup learning backfill failed: ${error.message}`);
+  }
 }
 
 function ensureAutoIngestScheduler() {

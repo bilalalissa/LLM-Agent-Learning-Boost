@@ -6,6 +6,7 @@ import { fallbackLearningBoost, appendLearningOutputs } from "./learning-extract
 import { linkProcessedSourceToLearning, readSourceLinks, writeSourceMapPage } from "./learning-planner.mjs";
 import { ensureLearningScaffold, learningPaths } from "./learning-store.mjs";
 import { providerStatus } from "./provider-status.mjs";
+import { exportRemnoteBundle } from "./remnote-export.mjs";
 import { listVaults, vaultName } from "./vaults.mjs";
 
 export const BACKFILL_LARGE_CARD_THRESHOLD = 80;
@@ -58,7 +59,9 @@ export function backfillSourceMap(config = getConfig(), options = {}) {
 
 export async function backfillLearningBoost(config = getConfig(), options = {}) {
   const vaults = selectedVaults(config, options.vault);
-  const provider = options.providerStatus || await providerStatus(config);
+  const provider = options.assumeProviderAvailable === true
+    ? { statusColor: "green", statusDetail: "Using existing source pages for local Learning Boost backfill." }
+    : (options.providerStatus || await providerStatus(config));
   const providerAvailable = provider.statusColor === "green" || options.assumeProviderAvailable === true;
   const results = [];
   for (const vaultPath of vaults) {
@@ -111,11 +114,16 @@ export async function backfillLearningBoost(config = getConfig(), options = {}) 
         processedRel: page.rel,
         boost,
         sourceKind: "existing_source_page",
-        processingNotes: ["Stage 9 backfill generated from existing source page without modifying the page."]
+        processingNotes: ["Stage 9 backfill generated from existing source page without modifying the page."],
+        skipRemnoteExport: true
       }, config);
       generated += 1;
       cardsCreated += output.cardsCreated;
       bitsCreated += output.bitsCreated;
+    }
+    if (generated && options.skipRemnoteExport !== true) {
+      const paths = learningPaths(vaultPath);
+      exportRemnoteBundle(vaultPath, readJsonl(path.join(paths.dir, "cards.jsonl")));
     }
     const result = {
       vault: vaultName(vaultPath),

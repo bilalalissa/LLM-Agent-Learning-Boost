@@ -87,6 +87,22 @@ test("backfillLearningBoost generates learning outputs only once when provider i
   assert.ok(bits.length > 0);
 });
 
+test("backfillLearningBoost can derive outputs from existing source pages without provider probe", async () => {
+  const { root, vault } = makeVaultRoot();
+  writeSourcePage(vault, "local-existing-source.md");
+  const result = await backfillLearningBoost(makeConfig(root), {
+    assumeProviderAvailable: true
+  });
+  const paths = learningPaths(vault);
+  const cards = fs.readFileSync(path.join(paths.dir, "cards.jsonl"), "utf8").trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
+  const bits = fs.readFileSync(path.join(paths.dir, "bits.jsonl"), "utf8").trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
+
+  assert.equal(result.results[0].generated, 1);
+  assert.equal(result.provider.statusDetail, "Using existing source pages for local Learning Boost backfill.");
+  assert.ok(cards.some((card) => card.sourcePage === "wiki/sources/local-existing-source.md"));
+  assert.ok(bits.some((bit) => bit.sourcePage === "wiki/sources/local-existing-source.md"));
+});
+
 test("backfillLearningSections adds Learning Boost to existing source pages without overwriting user notes", () => {
   const { root, vault } = makeVaultRoot();
   writeSourcePage(vault, "older-source.md");
