@@ -275,6 +275,12 @@ test("media ingest preserves unextracted assets without metadata-only learning c
   assert.equal(providerCalled, false);
   assert.equal(result.pendingContent, true);
   assert.match(page, /media_analysis_status: pending_content/);
+  assert.match(page, /provider_raw_file_sent: false/);
+  assert.match(page, /provider_input_status: not_sent_no_extracted_content/);
+  assert.match(page, /Raw media file sent to provider: no/);
+  assert.match(page, /Provider call attempted: no/);
+  assert.match(page, /Extracted text\/transcript\/OCR sent: no/);
+  assert.match(page, /The selected provider did not receive a raw media copy/);
   assert.match(page, /No learning cards or bits were created/);
   assert.equal(fs.existsSync(path.join(paths.dir, "cards.jsonl")), false);
   assert.equal(fs.existsSync(path.join(vault, result.processed)), true);
@@ -303,6 +309,12 @@ test("media ingest with extracted text but provider failure creates no metadata 
     assert.equal(result.learning.cardsCreated, 0);
     assert.equal(result.learning.bitsCreated, 0);
     assert.match(page, /media_analysis_status: pending_provider_analysis/);
+    assert.match(page, /provider_raw_file_sent: false/);
+    assert.match(page, /provider_input_status: extracted_text_and_metadata_sent/);
+    assert.match(page, /Raw media file sent to provider: no/);
+    assert.match(page, /Provider call attempted: yes/);
+    assert.match(page, /Extracted text\/transcript\/OCR sent: yes/);
+    assert.match(page, /raw media bytes were not attached/i);
     assert.match(page, /No learning cards or bits were created because provider media analysis is still pending/);
     assert.equal(fs.existsSync(path.join(paths.dir, "cards.jsonl")), false);
     assert.equal(fs.existsSync(path.join(paths.dir, "bits.jsonl")), false);
@@ -330,6 +342,10 @@ test("document ingest preserves unextracted PDFs without metadata-only learning 
   assert.equal(providerCalled, false);
   assert.equal(result.pendingContent, true);
   assert.match(page, /status: pending_content/);
+  assert.match(page, /provider_raw_file_sent: false/);
+  assert.match(page, /Raw source file sent to provider: no/);
+  assert.match(page, /Provider call attempted: no/);
+  assert.match(page, /The selected provider did not receive the raw file/);
   assert.match(page, /Content extraction is pending/);
   assert.match(page, /No learning cards or bits were created/);
   assert.equal(fs.existsSync(path.join(paths.dir, "cards.jsonl")), false);

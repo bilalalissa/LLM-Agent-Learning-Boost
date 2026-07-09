@@ -347,13 +347,18 @@ Media file path: ${input.assetPath}
 Media metadata:
 ${JSON.stringify(input.media, null, 2)}
 
+Provider input boundary:
+- The selected provider receives this text prompt only.
+- Raw media bytes are not attached to provider requests by Learning Boost.
+- The local file path is traceability evidence for the vault; do not assume you can inspect that path.
+- Analyze only extracted OCR text, transcript text, manual description, and metadata supplied in this prompt.
+- If extracted content is insufficient, say that content analysis is incomplete instead of inventing visual, audio, or document facts.
+
 Extracted local text, transcript, or manual description if available:
 ${input.processedSource?.text || ""}
 
 Processor notes:
 ${(input.processedSource?.processingNotes || []).join("\n")}
-
-If you can inspect the local media file, extract visible/audible/document insights. If you cannot inspect the file content, use only metadata and clearly say that the content was not visually/audibly analyzed.
 
 Learning card quality rules:
 ${learningBoostCardQualityRules()}
@@ -421,12 +426,16 @@ function parseMediaJson(text, media, input = {}) {
 }
 
 function fallbackMediaAnalysis(media, error, input = {}) {
+  const extracted = hasMeaningfulExtractedContent(input.processedSource);
   return {
-    summary: `${media.kind} source preserved as a local asset. Provider analysis is pending because the configured provider did not return a usable media analysis.`,
+    summary: `${media.kind} source preserved as a local asset. Provider analysis is pending because the configured provider did not return usable analysis from the extracted local text/metadata. Raw media bytes were not sent to the provider.`,
     language: "unknown",
     key_points: [
       `Preserved local asset: ${media.assetRel}.`,
-      "No source claims were generated because provider media analysis did not complete."
+      extracted
+        ? "Extracted local text was available for the provider request, but provider media analysis did not complete."
+        : "No readable local text was available for provider analysis.",
+      "No source claims were generated from raw media bytes."
     ],
     concepts: [],
     entities: [],
@@ -439,6 +448,7 @@ function fallbackMediaAnalysis(media, error, input = {}) {
     open_learning_questions: [],
     processing_notes: [
       ...(input.processedSource?.processingNotes || []),
+      "Provider received a text prompt containing extracted local text/metadata only; raw media bytes were not attached.",
       `Provider media analysis failed: ${error.message}`
     ],
     analyzed: false,
@@ -453,11 +463,12 @@ function pendingMediaAnalysis(media, input = {}) {
     "Content extraction is pending; no Learning Boost cards, bits, concepts, or plans were created from metadata alone."
   ];
   return {
-    summary: `${media.kind} source preserved as a local asset. Learning analysis is pending because no readable transcript, OCR text, or manual description was available.`,
+    summary: `${media.kind} source preserved as a local asset. Learning analysis is pending because no readable transcript, OCR text, or manual description was available. The provider was not called and raw media bytes were not sent.`,
     language: "unknown",
     key_points: [
       `Preserved local asset: ${media.assetRel}.`,
-      "No source claims were generated because the media content has not been transcribed or inspected."
+      "No source claims were generated because the media content has not been transcribed or inspected.",
+      "The selected provider did not receive a raw media copy."
     ],
     concepts: [],
     entities: [],
@@ -489,11 +500,12 @@ function pendingFileAnalysis(processedSource = {}, input = {}) {
     "Content extraction is pending; no Learning Boost cards, bits, concepts, or plans were created from metadata alone."
   ];
   return {
-    summary: `${kind} source preserved for local review. Learning analysis is pending because readable text could not be extracted with the currently available local tools.`,
+    summary: `${kind} source preserved for local review. Learning analysis is pending because readable text could not be extracted with the currently available local tools. The provider was not called and the raw file was not sent.`,
     language: "unknown",
     key_points: [
       `Preserved source file: ${input.sourcePath || processedSource.metadata?.path || input.sourceTitle || "source"}.`,
-      "No source claims were generated because the document content was not extracted."
+      "No source claims were generated because the document content was not extracted.",
+      "The selected provider did not receive the raw file."
     ],
     concepts: [],
     entities: [],
@@ -928,6 +940,8 @@ created: ${date}
 updated: ${date}
 language: ${yamlScalar(analysis.language || "unknown")}
 source_path: ${processedRel}
+provider_raw_file_sent: false
+provider_input_status: ${providerInputStatus(analysis, processedSource)}
 sources: []
 tags:
   - llm-wiki
@@ -955,6 +969,10 @@ ${processedSource.mediaRefs?.length ? `- Media refs: ${processedSource.mediaRefs
 ${processedSource.processingNotes?.length ? `- Processor notes: ${processedSource.processingNotes.join("; ")}` : "- Processor notes: none"}
 ${analysis.processing_notes?.length ? `- Analysis notes: ${analysis.processing_notes.join("; ")}` : "- Analysis notes: none"}
 
+## Provider Input
+
+${renderProviderInputSection({ analysis, processedSource, rawLabel: "Raw source file" })}
+
 ## Source's Related Learning Questions
 
 ${learningBlock(learningQuestions(analysis.source_learning_questions, sourceTitle, analysis))}
@@ -981,6 +999,59 @@ ${bulletList(analysis.contradictions.length ? analysis.contradictions : ["None y
 `;
 }
 
+function providerInputStatus(analysis = {}, processedSource = {}) {
+  if (String(analysis.status || "").startsWith("pending_content")) return "not_sent_no_extracted_content";
+  if (hasMeaningfulExtractedContent(processedSource)) return "extracted_text_and_metadata_sent";
+  if (analysis.analyzed || analysis.status === "pending_provider_analysis") return "metadata_prompt_sent";
+  return "not_sent";
+}
+
+function renderProviderInputSection({ analysis = {}, processedSource = {}, rawLabel = "Raw source file", mediaKind = "" } = {}) {
+  const providerCalled = !String(analysis.status || "").startsWith("pending_content") && (analysis.analyzed || analysis.status === "pending_provider_analysis" || analysis.learning_boost);
+  const extracted = hasMeaningfulExtractedContent(processedSource);
+  const kind = String(mediaKind || processedSource.kind || "source").toLowerCase();
+  const next = providerInputNextAction(kind, extracted, analysis);
+  return [
+    `- ${rawLabel} sent to provider: no`,
+    `- Provider call attempted: ${providerCalled ? "yes" : "no"}`,
+    `- Extracted text/transcript/OCR sent: ${providerCalled && extracted ? "yes" : "no"}`,
+    `- Metadata sent: ${providerCalled ? "yes" : "no"}`,
+    "- Privacy boundary: Learning Boost keeps raw files in the local vault and sends providers text prompts only. Local file paths are evidence for you, not files the provider can open.",
+    `- Current blocker: ${providerInputBlocker(kind, extracted, analysis)}`,
+    `- Next action: ${next}`
+  ].join("\n");
+}
+
+function providerInputBlocker(kind, extracted, analysis = {}) {
+  if (analysis.analyzed) return "none; provider returned usable analysis.";
+  if (String(analysis.status || "").startsWith("pending_content")) {
+    if (kind === "image") return "no readable OCR text or manual image description was available.";
+    if (kind === "audio") return "no transcript sidecar or local ASR transcript was available.";
+    if (kind === "video") return "no transcript, local ASR transcript, or keyframe OCR text was available.";
+    if (kind === "pdf" || kind === "document") return "no readable document text was extracted.";
+    return "no readable content was extracted.";
+  }
+  if (analysis.status === "pending_provider_analysis") {
+    return extracted
+      ? "the selected provider received extracted text/metadata but did not return usable structured analysis."
+      : "the selected provider did not have meaningful extracted content to analyze.";
+  }
+  return "analysis is incomplete.";
+}
+
+function providerInputNextAction(kind, extracted, analysis = {}) {
+  if (analysis.analyzed) return "review the generated learning bits/cards and source evidence.";
+  if (analysis.status === "pending_provider_analysis" && extracted) {
+    return "refresh the selected provider, then reprocess this source. The raw media does not need to be recopied.";
+  }
+  if (kind === "image") return "install/configure Tesseract OCR, add a manual description, or use a future vision-capable adapter, then reprocess.";
+  if (kind === "audio") return "add a matching transcript sidecar or configure local Whisper ASR, then reprocess.";
+  if (kind === "video") return "add a matching transcript sidecar, enable local ASR/keyframe OCR tools, or clip a transcript, then reprocess.";
+  if (kind === "pdf") return "install/configure pdftotext or provide an OCR/text version of the PDF, then reprocess.";
+  if (kind === "document") return "install/configure the local document extractor or export the file to text/PDF with selectable text, then reprocess.";
+  return "provide readable text, a transcript, or a manual description, then reprocess.";
+}
+
 function renderMediaSourcePage({ date, sourceTitle, assetRel, mediaKind, ext, media, analysis, processedSource = {} }) {
   const preview = mediaKind === "image" ? `\n![[${assetRel}]]\n` : "";
   return `---
@@ -993,6 +1064,8 @@ source_path: ${assetRel}
 media_kind: ${mediaKind}
 media_analyzed: ${analysis.analyzed ? "true" : "false"}
 media_analysis_status: ${analysis.status || (analysis.analyzed ? "analyzed" : "fallback")}
+provider_raw_file_sent: false
+provider_input_status: ${providerInputStatus(analysis, processedSource)}
 sources: []
 tags:
   - llm-wiki
@@ -1032,6 +1105,10 @@ ${learningBlock(openLearningQuestions(analysis.open_learning_questions, sourceTi
 ## Processing Notes
 
 ${bulletList(analysis.processing_notes?.length ? analysis.processing_notes : ["Processed as a local media source."])}
+
+## Provider Input
+
+${renderProviderInputSection({ analysis, processedSource, rawLabel: "Raw media file", mediaKind })}
 
 ## Evidence
 

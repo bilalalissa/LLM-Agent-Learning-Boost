@@ -15,6 +15,29 @@ Stage 3 adds a processor pipeline for deeper local ingest before provider analys
 
 If OCR, transcript, ASR, or manual description succeeds but the selected provider cannot analyze the media, the source page is marked `pending_provider_analysis`. The asset and extracted local text stay preserved, but Learning Boost does not create cards, bits, concepts, source-to-plan links, or RemNote output until the selected provider returns real analysis.
 
+## Provider Input Boundary
+
+Learning Boost providers receive text prompts. Raw image, audio, video, PDF, and office-document bytes are kept in the local vault and are not attached to provider requests by the current provider adapters. A media or document source page now records this explicitly in a `## Provider Input` section and front matter such as:
+
+- `provider_raw_file_sent: false`
+- `provider_input_status: not_sent_no_extracted_content`
+- `provider_input_status: extracted_text_and_metadata_sent`
+
+That means a page saying provider analysis is pending does not necessarily mean the provider received a copy of the media. In the common pending cases:
+
+- `pending_content`: the provider was not called because no readable OCR text, transcript, ASR text, keyframe OCR text, selectable PDF text, or manual description existed.
+- `pending_provider_analysis`: Learning Boost called the selected provider with extracted text/metadata, but the provider failed, timed out, or returned unusable structured analysis. The raw file still was not sent.
+- `analyzed`: the provider returned usable analysis from the extracted text/metadata prompt.
+
+To prevent future pending media/document pages, make sure the relevant local extractor is available before capture:
+
+- Images: install/configure `tesseract`, set `LEARNING_BOOST_OCR_LANGUAGES` for needed languages such as `eng+ara`, or add a manual description.
+- Audio/video: add a matching transcript sidecar (`.srt`, `.vtt`, `.txt`) or configure local `whisper`; video can also use `ffmpeg` plus OCR for keyframes when available.
+- PDFs: install/configure `pdftotext`, or provide an OCR/selectable-text version of scanned PDFs.
+- Office/iWork/archive files: export to text/PDF with selectable text when the local extractor cannot read the original format.
+
+If the selected provider itself is unavailable, fix the Provider tab status first, then reprocess the pending source. The preserved raw asset does not need to be captured again.
+
 ## Learning Output
 
 Every processed source asks the provider for a `learning_boost` object. The app normalizes that object into:

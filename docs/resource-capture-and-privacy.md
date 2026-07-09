@@ -117,6 +117,8 @@ Screenshot capture is disabled by default. When enabled, Learning Boost scans on
 
 Image, audio, and video files are queued as best-effort local sources when their extension is supported. Learning Boost first tries local extraction: `tesseract` OCR for images, transcript sidecars for audio/video, bounded local `whisper` ASR for audio/video, and bounded `ffmpeg` keyframe OCR for video when no transcript is available. The macOS app checks common tool locations such as `/usr/local/bin`, `/opt/homebrew/bin`, and `/Users/ba/Library/Python/3.11/bin` because GUI apps do not always inherit the Terminal PATH. If Learning Boost can only preserve metadata, the resulting source is marked `pending_content`; it stays visible as a preserved asset but does not create cards, bits, concepts, or plans until extraction and provider analysis can use real content.
 
+The source page's `Provider Input` section tells you exactly what happened. `Raw media file sent to provider: no` is expected with the current provider adapters. Learning Boost sends extracted text, OCR, transcripts, manual descriptions, and metadata; it does not send raw image/audio/video bytes or raw document files. If the page says `Provider call attempted: no`, fix extraction first. If it says `Provider call attempted: yes` but the status is still pending, fix the selected provider and reprocess the same preserved asset.
+
 ## Opened Documents
 
 Opened-document detection is broad local capture. It is disabled unless Source Capture, Full Local Capture Mode, and `openedDocuments` are all enabled.
