@@ -168,7 +168,7 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /auto-ingest-worker\.mjs/);
   assert.match(serverSource, /Auto-ingest blocked/);
   assert.match(serverSource, /nextAutoIngestVault/);
-  assert.match(serverSource, /resourceLimit: 3/);
+  assert.match(serverSource, /resourceLimit: batchSize/);
   assert.match(serverSource, /Learning Autopilot is processing/);
   assert.match(serverSource, /\.provider-grid \.inline-toggle/);
   assert.match(serverSource, /Revise Plans And Goals/);

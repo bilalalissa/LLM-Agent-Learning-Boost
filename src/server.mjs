@@ -3130,18 +3130,19 @@ async function runAutoIngest() {
     return;
   }
   ingestRunning = true;
+  const batchSize = 1;
   try {
     ingestProgress = {
       percent: 0,
       completed: 0,
       total: Math.max(pendingVault.pendingRawCount, 1),
       vault: vaultName(pendingVault.vaultPath),
-      detail: `Learning Autopilot is processing ${Math.min(pendingVault.pendingRawCount, 3)} of ${pendingVault.pendingRawCount} pending file(s) in ${vaultName(pendingVault.vaultPath)}.`
+      detail: `Learning Autopilot is processing ${Math.min(pendingVault.pendingRawCount, batchSize)} of ${pendingVault.pendingRawCount} pending file(s) in ${vaultName(pendingVault.vaultPath)}.`
     };
     const workerResult = await runAutoIngestWorker({
       vaultPath: pendingVault.vaultPath,
-      options: { resourceLimit: 3 },
-      timeoutMs: Math.max(config.providerTimeoutMs || 60000, config.watchIntervalMs * 2, 180000)
+      options: { resourceLimit: batchSize },
+      timeoutMs: Math.max((config.providerTimeoutMs || 60000) * 5, 600000)
     });
     let count = 0;
     const completedVaults = workerResult.vaults || [];
@@ -3172,12 +3173,29 @@ async function runAutoIngest() {
     });
   } catch (error) {
     const summary = summarizeStatusError(error);
-    autoIngestBackoffUntil = Date.now() + Math.max(config.watchIntervalMs * 3, 60000);
-    lastIngestMessage = reportStatus(`Operation progress: ${ingestProgress.percent || 0}%. Auto-ingest blocked for ${vaultName(pendingVault.vaultPath)} at ${formatLocal(new Date())}: ${summary}`);
-    ingestProgress = {
-      ...ingestProgress,
-      detail: `Auto-ingest blocked: ${summary}. Pending raw files were left in place. Next retry after ${formatLocal(new Date(autoIngestBackoffUntil))}.`
-    };
+    const timedOut = /timed out/i.test(summary);
+    autoIngestBackoffUntil = Date.now() + (timedOut ? Math.max(config.watchIntervalMs * 2, 30000) : Math.max(config.watchIntervalMs * 3, 60000));
+    const retryAt = formatLocal(new Date(autoIngestBackoffUntil));
+    if (timedOut) {
+      const detail = `Learning Autopilot paused for ${vaultName(pendingVault.vaultPath)} after one slow file exceeded the background limit. Pending files were left in place; the next bounded run will retry after ${retryAt}.`;
+      setAutomationRuntime(pendingVault.vaultPath, {
+        running: false,
+        status: "paused",
+        detail,
+        lastPausedAt: new Date().toISOString()
+      });
+      lastIngestMessage = reportStatus(`Operation progress: ${ingestProgress.percent || 0}%. ${detail}`);
+      ingestProgress = {
+        ...ingestProgress,
+        detail
+      };
+    } else {
+      lastIngestMessage = reportStatus(`Operation progress: ${ingestProgress.percent || 0}%. Auto-ingest blocked for ${vaultName(pendingVault.vaultPath)} at ${formatLocal(new Date())}: ${summary}`);
+      ingestProgress = {
+        ...ingestProgress,
+        detail: `Auto-ingest blocked: ${summary}. Pending raw files were left in place. Next retry after ${retryAt}.`
+      };
+    }
     console.error(`[auto-ingest] ${error.stack || error.message}`);
   } finally {
     ingestRunning = false;
