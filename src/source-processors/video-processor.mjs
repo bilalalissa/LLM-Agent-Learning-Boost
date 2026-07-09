@@ -7,7 +7,10 @@ import { extractImageOcr } from "./image-processor.mjs";
 import { resolveCommand } from "./tool-paths.mjs";
 
 export function canProcessVideoSource(file) {
-  return new Set([".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp", ".m2ts", ".mts"]).has(path.extname(file).toLowerCase());
+  return new Set([
+    ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg",
+    ".3gp", ".m2t", ".m2ts", ".mts", ".vob", ".ogv", ".divx"
+  ]).has(path.extname(file).toLowerCase());
 }
 
 export function processVideoSource(file, options = {}) {

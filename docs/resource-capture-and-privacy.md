@@ -98,10 +98,10 @@ The collector normalizes common relative folders such as `Downloads` to the loca
 
 The collector queues best-effort sources for common formats instead of silently ignoring them:
 
-- Documents: `.pdf`, `.docx`, `.doc`, `.xlsx`, `.xls`, `.ods`, `.pptx`, `.ppt`, `.pages`, `.numbers`, `.key`, `.rtf`, `.html`, `.htm`, `.mhtml`, `.webarchive`, `.eml`, `.msg`, `.ics`, `.epub`.
-- Text, code, subtitles, and data: `.md`, `.mdx`, `.markdown`, `.rst`, `.txt`, `.log`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.ipynb`, `.xml`, `.yaml`, `.yml`, `.toml`, `.ini`, `.conf`, `.sql`, `.tex`, `.bib`, `.sh`, `.bash`, `.zsh`, `.py`, `.js`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.jsx`, `.css`, `.scss`, `.java`, `.c`, `.cc`, `.cpp`, `.h`, `.hpp`, `.swift`, `.go`, `.rs`, `.rb`, `.php`, `.srt`, `.vtt`, `.sbv`, `.smi`, `.lrc`, `.ass`, `.ssa`, `.url`, `.webloc`.
-- Images: `.png`, `.jpg`, `.jpeg`, `.jfif`, `.gif`, `.webp`, `.avif`, `.bmp`, `.tif`, `.tiff`, `.heic`, `.heif`, `.svg`, `.ico`.
-- Media and archives: `.mp3`, `.m4a`, `.m4b`, `.wav`, `.aiff`, `.aac`, `.flac`, `.ogg`, `.opus`, `.amr`, `.caf`, `.wma`, `.mp4`, `.mov`, `.m4v`, `.webm`, `.mkv`, `.avi`, `.wmv`, `.flv`, `.mpg`, `.mpeg`, `.3gp`, `.m2ts`, `.mts`, `.zip`.
+- Documents: `.pdf`, `.docx`, `.doc`, `.xlsx`, `.xls`, `.ods`, `.pptx`, `.ppt`, `.pages`, `.numbers`, `.key`, `.rtf`, `.html`, `.htm`, `.mhtml`, `.webarchive`, `.eml`, `.msg`, `.ics`, `.epub`, `.mobi`, `.azw3`, `.djvu`.
+- Text, code, subtitles, and data: `.md`, `.mdx`, `.markdown`, `.rst`, `.txt`, `.log`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.ipynb`, `.xml`, `.yaml`, `.yml`, `.toml`, `.ini`, `.conf`, `.sql`, `.tex`, `.bib`, `.sh`, `.bash`, `.zsh`, `.py`, `.js`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, `.scss`, `.java`, `.c`, `.cc`, `.cpp`, `.h`, `.hpp`, `.swift`, `.go`, `.rs`, `.rb`, `.php`, `.kt`, `.kts`, `.r`, `.pl`, `.lua`, `.srt`, `.vtt`, `.sbv`, `.smi`, `.lrc`, `.ass`, `.ssa`, `.url`, `.webloc`.
+- Images: `.png`, `.jpg`, `.jpeg`, `.jfif`, `.gif`, `.webp`, `.avif`, `.apng`, `.bmp`, `.tif`, `.tiff`, `.heic`, `.heif`, `.svg`, `.ico`, `.jxl`, `.dng`, `.raw`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.orf`, `.rw2`.
+- Media and archives: `.mp3`, `.mpga`, `.m4a`, `.m4b`, `.m4p`, `.wav`, `.wave`, `.aif`, `.aiff`, `.aac`, `.flac`, `.ogg`, `.oga`, `.opus`, `.amr`, `.caf`, `.wma`, `.mka`, `.ac3`, `.dts`, `.mp4`, `.mov`, `.m4v`, `.webm`, `.mkv`, `.avi`, `.wmv`, `.flv`, `.mpg`, `.mpeg`, `.3gp`, `.m2t`, `.m2ts`, `.mts`, `.vob`, `.ogv`, `.divx`, `.zip`.
 
 When full extraction is not available, the item can still become a pending document, media, or metadata source with a clear limitation. It is not marked fully processed until extraction and provider analysis actually succeed. A PDF without extracted page text, an office/iWork file without readable text, or a ZIP that only produced a filename listing stays `pending_content`; Learning Boost does not generate learning cards or plans from that metadata.
 

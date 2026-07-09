@@ -8,8 +8,9 @@ export function canProcessTextSource(file) {
     ".md", ".mdx", ".markdown", ".rst", ".txt", ".csv", ".tsv", ".log",
     ".ini", ".conf", ".toml", ".xml", ".yaml", ".yml", ".json", ".jsonl",
     ".ipynb", ".bib", ".tex", ".sql", ".sh", ".bash", ".zsh", ".py", ".js",
-    ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".css", ".scss", ".java", ".c",
+    ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".vue", ".svelte", ".css", ".scss", ".java", ".c",
     ".cc", ".cpp", ".h", ".hpp", ".swift", ".go", ".rs", ".rb", ".php",
+    ".kt", ".kts", ".r", ".pl", ".lua",
     ".mhtml", ".vtt", ".srt", ".sbv", ".smi", ".lrc", ".ass", ".ssa", ".url", ".webloc"
   ]).has(path.extname(file).toLowerCase());
 }

@@ -109,16 +109,22 @@ test("watch folder collector queues expanded code web image media and archive fo
     "notebook.ipynb",
     "script.py",
     "component.tsx",
+    "component.vue",
     "page.mhtml",
     "shortcut.webloc",
     "diagram.avif",
+    "camera.dng",
     "icon.ico",
+    "voice.mpga",
     "voice.m4b",
     "meeting.caf",
+    "movie.vob",
     "clip.3gp",
     "camera.m2ts",
     "captions.sbv",
     "captions.ass",
+    "book.mobi",
+    "scan.djvu",
     "sheet.ods",
     "bundle.zip"
   ]) {
@@ -132,8 +138,8 @@ test("watch folder collector queues expanded code web image media and archive fo
   });
   const collected = collectWatchFolderResources(vault, { settings, previewApproved: true });
 
-  assert.equal(collected.summary.filesDiscovered, 15);
-  assert.equal(collected.summary.filesQueued, 15);
+  assert.equal(collected.summary.filesDiscovered, 21);
+  assert.equal(collected.summary.filesQueued, 21);
   assert.equal(collected.summary.filesSkipped, 0);
 });
 

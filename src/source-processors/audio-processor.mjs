@@ -6,7 +6,10 @@ import { normalizeTranscriptText } from "./text-processor.mjs";
 import { resolveCommand } from "./tool-paths.mjs";
 
 export function canProcessAudioSource(file) {
-  return new Set([".mp3", ".wav", ".m4a", ".m4b", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr", ".caf", ".wma"]).has(path.extname(file).toLowerCase());
+  return new Set([
+    ".mp3", ".mpga", ".wav", ".wave", ".m4a", ".m4b", ".m4p", ".aif", ".aiff", ".aac",
+    ".flac", ".ogg", ".oga", ".opus", ".amr", ".caf", ".wma", ".mka", ".ac3", ".dts"
+  ]).has(path.extname(file).toLowerCase());
 }
 
 export function processAudioSource(file, options = {}) {

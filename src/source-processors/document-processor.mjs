@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 
 const documentExtensions = new Set([
   ".rtf", ".docx", ".doc", ".odt", ".ods", ".pptx", ".ppt", ".odp",
-  ".xlsx", ".xls", ".pages", ".numbers", ".key", ".epub", ".eml", ".msg", ".ics", ".webarchive", ".zip"
+  ".xlsx", ".xls", ".pages", ".numbers", ".key", ".epub", ".mobi", ".azw3", ".eml", ".msg", ".ics", ".webarchive", ".djvu", ".zip"
 ]);
 
 export function canProcessDocumentSource(file) {
@@ -20,10 +20,11 @@ export function processDocumentSource(file, options = {}) {
   else if (ext === ".docx") text = unzipXml(file, ["word/document.xml"], notes);
   else if (ext === ".pptx") text = unzipXml(file, ["ppt/slides/slide*.xml"], notes);
   else if (ext === ".xlsx") text = unzipXml(file, ["xl/sharedStrings.xml", "xl/worksheets/sheet*.xml"], notes);
-  else if ([".odt", ".ods", ".odp", ".epub", ".pages", ".numbers", ".key"].includes(ext)) text = unzipXml(file, ["content.xml", "*.xhtml", "*.html", "index.xml", "Metadata/*.plist"], notes);
+  else if ([".odt", ".ods", ".odp", ".epub", ".mobi", ".azw3", ".pages", ".numbers", ".key"].includes(ext)) text = unzipXml(file, ["content.xml", "*.xhtml", "*.html", "index.xml", "Metadata/*.plist"], notes);
   else if (ext === ".webarchive") text = readTextLike(file, notes);
   else if (ext === ".eml" || ext === ".msg" || ext === ".ics") text = readTextLike(file, notes);
   else if (ext === ".doc" || ext === ".ppt" || ext === ".xls") text = convertWithTextutil(file, notes);
+  else if (ext === ".djvu") text = convertWithDjvutxt(file, notes);
   else if (ext === ".zip") text = zipListing(file, notes);
   extracted = hasMeaningfulText(text) && !/^ZIP archive with \d+ listed item\(s\)\./i.test(text);
   if (!text.trim()) {
@@ -77,6 +78,15 @@ function convertWithTextutil(file, notes) {
     return execFileSync("textutil", ["-convert", "txt", "-stdout", file], { encoding: "utf8", timeout: 15000 });
   } catch (error) {
     notes.push(`Legacy document conversion unavailable or failed: ${error.message}`);
+    return "";
+  }
+}
+
+function convertWithDjvutxt(file, notes) {
+  try {
+    return execFileSync("djvutxt", [file], { encoding: "utf8", timeout: 15000 });
+  } catch (error) {
+    notes.push(`DjVu text extraction unavailable or failed: ${error.message}`);
     return "";
   }
 }

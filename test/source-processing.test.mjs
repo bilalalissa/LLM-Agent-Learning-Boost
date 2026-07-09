@@ -85,6 +85,35 @@ test("web processor extracts readable text, schema.org, and media refs", () => {
   assert.deepEqual(source.mediaRefs, ["https://example.com/image.png"]);
 });
 
+test("processor routes expanded learning source formats to best-effort extractors", () => {
+  const { root } = makeVault();
+  const samples = [
+    ["component.vue", "<template><h1>Vue learning note</h1></template>", "text"],
+    ["book.mobi", "not a real ebook", "document"],
+    ["scan.djvu", "not a real djvu", "document"],
+    ["camera.dng", "not a real raw image", "image"],
+    ["voice.mpga", "not real audio", "audio"],
+    ["clip.vob", "not real video", "video"]
+  ];
+
+  for (const [name, content, kind] of samples) {
+    const file = path.join(root, name);
+    fs.writeFileSync(file, content);
+    const source = processSourceFile(file, {
+      disableOcr: true,
+      disableAsr: true,
+      disableVideoOcr: true
+    });
+
+    assert.equal(source.kind, kind, name);
+    assert.notEqual(source.kind, "unsupported", name);
+    if (["image", "audio", "video", "document"].includes(kind)) {
+      assert.match(source.extractionStatus || "", /pending|manual|extracted/i, name);
+      assert.ok(source.processingNotes.length >= 1, name);
+    }
+  }
+});
+
 test("learning_boost normalization preserves cards, evidence, media, and staging", () => {
   const boost = normalizeLearningBoost({
     source_language: "English",

@@ -24,7 +24,7 @@ Opened documents can also feed the queue after preview approval. Metadata-only p
 - video files and transcript files
 - remote video URLs when transcript tools can provide source text
 
-Best-effort capture also queues common legacy or app-specific files such as `.doc`, `.xls`, `.ods`, `.ppt`, `.pages`, `.numbers`, `.key`, `.eml`, `.ics`, `.webarchive`, `.heif`, `.ico`, `.flac`, `.caf`, `.wma`, `.mkv`, `.m2ts`, `.mts`, `.sbv`, `.ass`, `.ssa`, `.log`, `.xml`, `.yaml`, and `.url`. If extraction is incomplete, the source remains pending or records a clear limitation instead of being marked fully processed.
+Best-effort capture also queues common legacy or app-specific files such as `.doc`, `.xls`, `.ods`, `.ppt`, `.pages`, `.numbers`, `.key`, `.mobi`, `.azw3`, `.djvu`, `.eml`, `.ics`, `.webarchive`, `.heif`, `.ico`, camera/raw images like `.dng`, `.cr2`, `.nef`, and `.arw`, voice/audio containers like `.mpga`, `.m4p`, `.aif`, `.oga`, `.mka`, `.ac3`, and `.dts`, video containers like `.vob`, `.ogv`, `.divx`, `.m2t`, `.m2ts`, and `.mts`, subtitle formats like `.sbv`, `.ass`, and `.ssa`, code/data files such as `.vue`, `.svelte`, `.kt`, `.kts`, `.r`, `.pl`, `.lua`, `.log`, `.xml`, `.yaml`, and local URL files. If extraction is incomplete, the source remains pending or records a clear limitation instead of being marked fully processed.
 
 For media sources, Learning Boost tries local extraction before provider analysis:
 

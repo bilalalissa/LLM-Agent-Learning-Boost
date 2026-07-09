@@ -4,7 +4,10 @@ import { execFileSync } from "node:child_process";
 import { resolveCommand } from "./tool-paths.mjs";
 
 export function canProcessImageSource(file) {
-  return new Set([".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif", ".ico"]).has(path.extname(file).toLowerCase());
+  return new Set([
+    ".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif", ".apng", ".bmp", ".tif", ".tiff",
+    ".svg", ".heic", ".heif", ".ico", ".jxl", ".dng", ".raw", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2"
+  ]).has(path.extname(file).toLowerCase());
 }
 
 export function processImageSource(file, options = {}) {
