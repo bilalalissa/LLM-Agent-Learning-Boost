@@ -172,7 +172,7 @@ Plans begin as `proposed`. Approval and activation require explicit confirmation
 - `Auto-draft plans/goals`: drafts proposed plans after enough learning context exists.
 - `Auto-suggest plan updates`: records suggested edits when new evidence affects a plan.
 - `Native macOS notifications`: lets the macOS wrapper deliver important alerts.
-- `Mirror alerts to Apple Reminders`: copies privacy-safe learning alerts into Apple Reminders so iCloud can sync them to other Apple devices.
+- `Sync alerts to Apple devices via Reminders`: copies privacy-safe learning alerts into Apple Reminders so iCloud can sync them to other Apple devices.
 - `Process pending now`: runs the same safe processing loop immediately.
 - `Send test notification`: queues a test alert and asks macOS to deliver it.
 - `Sync alerts to Reminders`: retries Apple Reminders mirroring for pending alerts.
@@ -222,7 +222,7 @@ The app only marks a notification as delivered after macOS accepts it. If macOS 
 
 Apple ecosystem delivery to other devices depends on your macOS, iCloud, Focus, and notification settings. Learning Boost can request and send macOS notifications, but it cannot force another device to mirror them.
 
-For alerts you also want on iPhone, iPad, or another Mac, enable `Mirror alerts to Apple Reminders` in Learning Autopilot. When enabled, Learning Boost creates privacy-safe reminder items in an Apple Reminders list named `Learning Boost`. Apple Reminders can sync those items through iCloud to your other Apple devices if your Apple ID, Reminders sync, Focus, and notification settings allow it.
+For alerts you also want on iPhone, iPad, or another Mac, enable `Sync alerts to Apple devices via Reminders` in Learning Autopilot. When enabled, Learning Boost creates privacy-safe reminder items in an Apple Reminders list named `Learning Boost`. Apple Reminders can sync those items through iCloud to your other Apple devices if your Apple ID, Reminders sync, Focus, and notification settings allow it.
 
 The Notification Center shows Reminders mirror state separately from macOS delivery:
 

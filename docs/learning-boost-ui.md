@@ -118,7 +118,7 @@ The scan does not silently start live screen recording, broad browser history im
 
 The Notification Center has a stack summary for unread, pending macOS delivery, delivered, blocked/failed, Reminders mirrored, and pending Reminders alerts. Delivered alerts stay visible until you choose Mark read or Dismiss.
 
-Use `Mirror alerts to Apple Reminders` when you want privacy-safe learning alerts to reach other Apple devices through iCloud Reminders. Use `Sync alerts to Reminders` to retry pending mirrors or diagnose macOS Automation permission blockers.
+Use `Sync alerts to Apple devices via Reminders` when you want privacy-safe learning alerts to reach other Apple devices through iCloud Reminders. Use `Sync alerts to Reminders` to retry pending mirrors or diagnose macOS Automation permission blockers.
 
 For the full user flow, see [Learning Flow and Notifications](learning-flow-and-notifications.md).
 

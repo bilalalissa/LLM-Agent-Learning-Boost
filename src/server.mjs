@@ -2019,7 +2019,7 @@ function defaultFastAutomationSettings() {
     autoDraftPlans: true,
     autoSuggestPlanUpdates: true,
     nativeMacNotifications: true,
-    mirrorNotificationsToReminders: false,
+    mirrorNotificationsToReminders: true,
     requireApprovalForExternalWrites: true
   };
 }
@@ -4649,7 +4649,7 @@ function renderHtml() {
               <label class="inline-toggle"><input id="auto-draft-plans-toggle" type="checkbox"> Auto-draft plans and goals</label>
               <label class="inline-toggle"><input id="auto-suggest-plan-updates-toggle" type="checkbox"> Auto-suggest plan updates</label>
               <label class="inline-toggle"><input id="native-mac-notifications-toggle" type="checkbox"> Native macOS notifications</label>
-              <label class="inline-toggle"><input id="reminders-notification-mirror-toggle" type="checkbox"> Mirror alerts to Apple Reminders</label>
+              <label class="inline-toggle"><input id="reminders-notification-mirror-toggle" type="checkbox"> Sync alerts to Apple devices via Reminders</label>
               <label class="inline-toggle"><input id="approval-gates-toggle" type="checkbox" checked disabled> Require approval for activation and external writes</label>
             </div>
             <div class="learning-button-row">
@@ -8788,7 +8788,7 @@ function renderHtml() {
         const annotations = annotationSummaryForPath(group.topic.vault, group.topic.path);
         const active = activeContentKeys().has(annotationKey(group.topic.vault, group.topic.path));
         const recentClass = recentTopicClass(group.topic);
-        return '<button class="' + recentClass + '" type="button" data-title="' + escapeHtml(group.topic.title) + '" data-vault="' + escapeHtml(group.topic.vault) + '" data-path="' + escapeHtml(group.topic.path) + '" title="' + escapeHtml(group.title) + '">' +
+        return '<button class="' + recentClass + '" type="button" data-title="' + escapeHtml(group.topic.title) + '" data-vault="' + escapeHtml(group.topic.vault) + '" data-path="' + escapeHtml(group.topic.path) + '" data-type="' + escapeHtml(group.topic.type || "") + '" data-updated="' + escapeHtml(group.updated || group.topic.updated || "") + '" data-tags="' + escapeHtml((group.tags || []).join(", ")) + '" title="' + escapeHtml(group.title) + '">' +
           '<span class="side-topic-title-row"><span class="side-topic-title-text">' + escapeHtml(group.topic.title) + '</span>' + renderAnnotationBadges({ ...annotations, active }) + '</span>' +
           '<span class="side-topic-meta">' + escapeHtml(group.meta) + '</span></button>';
     }
@@ -9046,8 +9046,32 @@ function renderHtml() {
         lastLocalMarkdown = data.answer || data.error || "No topic content.";
         renderLocalResultBox();
       } catch (error) {
-        localAnswer.textContent = error.message;
+        lastLocalMarkdown = sideTopicCachedMarkdown(item, error.message);
+        renderLocalResultBox();
       }
+    }
+
+    function sideTopicCachedMarkdown(item, detail = "") {
+      const vault = item?.dataset?.vault || "current vault";
+      const path = item?.dataset?.path || "";
+      const title = item?.dataset?.title || titleFromPath(path || "Selected topic");
+      const type = item?.dataset?.type || "";
+      const updated = item?.dataset?.updated || "";
+      const tags = item?.dataset?.tags || "";
+      return [
+        "# " + title,
+        "",
+        "The topic page is still indexing or unavailable from this app process, so this view is showing the cached sidebar entry.",
+        "",
+        "Vault: " + vault,
+        path ? "Path: " + path : "",
+        type ? "Type: " + type : "",
+        updated ? "Updated: " + updated : "",
+        tags ? "Tags: " + tags : "",
+        detail ? "Read detail: " + detail : "",
+        "",
+        "Open the item from Files or Topics after indexing finishes if you need the full page body."
+      ].filter(Boolean).join("\\n");
     }
 
     function isScaffoldTopic(topic) {

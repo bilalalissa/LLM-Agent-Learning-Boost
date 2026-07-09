@@ -33,7 +33,21 @@ test("learning automation defaults to safe autopilot with approval gates", () =>
   assert.equal(settings.autoSuggestPlanUpdates, true);
   assert.equal(settings.requireApprovalForPlanActivation, true);
   assert.equal(settings.nativeMacNotifications, true);
-  assert.equal(settings.mirrorNotificationsToReminders, false);
+  assert.equal(settings.mirrorNotificationsToReminders, true);
+});
+
+test("older automation settings migrate Apple-device notification mirror on", () => {
+  const { vault } = makeVault();
+  const file = path.join(vault, ".llm-wiki", "learning", "automation-settings.json");
+  fs.writeFileSync(file, JSON.stringify({
+    schemaVersion: 1,
+    learningAutopilot: true,
+    mirrorNotificationsToReminders: false
+  }, null, 2));
+  const settings = readAutomationSettings(vault);
+
+  assert.equal(settings.schemaVersion, 2);
+  assert.equal(settings.mirrorNotificationsToReminders, true);
 });
 
 test("automation settings can pause only the vault autopilot", () => {

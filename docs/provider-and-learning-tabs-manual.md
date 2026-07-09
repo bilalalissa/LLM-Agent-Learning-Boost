@@ -219,7 +219,7 @@ Controls:
 - Auto-draft plans/goals: draft proposed plans from gathered bits, cards, source links, and resources.
 - Auto-suggest plan updates: record plan edits that may help, without applying them automatically.
 - Native macOS notifications: allow the wrapper to send privacy-safe system alerts.
-- Mirror alerts to Apple Reminders: optionally copy privacy-safe learning alerts into an Apple Reminders list named `Learning Boost`; iCloud can sync those reminders to your other Apple devices if your system settings allow it.
+- Sync alerts to Apple devices via Reminders: optionally copy privacy-safe learning alerts into an Apple Reminders list named `Learning Boost`; iCloud can sync those reminders to your other Apple devices if your system settings allow it.
 - Process pending now: run the same safe loop immediately.
 - Send test notification: queue one alert and ask macOS to deliver it.
 - Sync alerts to Reminders: retry Apple Reminders mirroring for pending alerts.

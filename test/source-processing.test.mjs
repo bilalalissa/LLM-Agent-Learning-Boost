@@ -252,6 +252,37 @@ test("media ingest preserves unextracted assets without metadata-only learning c
   assert.equal(fs.existsSync(source), false);
 });
 
+test("media ingest with extracted text but provider failure creates no metadata cards", async () => {
+  const { root, vault } = makeVault();
+  const fakeTesseract = path.join(root, "fake-tesseract.sh");
+  fs.writeFileSync(fakeTesseract, "#!/bin/sh\necho 'Readable OCR text about local AI routing, model latency, and source evidence.'\n");
+  fs.chmodSync(fakeTesseract, 0o755);
+  const previous = process.env.LEARNING_BOOST_TESSERACT_COMMAND;
+  process.env.LEARNING_BOOST_TESSERACT_COMMAND = fakeTesseract;
+  const source = path.join(vault, "raw", "input", "diagram.png");
+  fs.writeFileSync(source, "not a real image but fake OCR ignores the bytes");
+
+  try {
+    const result = await ingestFile(vault, source, config(root), {
+      async complete() {
+        throw new Error("provider unavailable for media analysis");
+      }
+    });
+    const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+    const paths = learningPaths(vault);
+
+    assert.equal(result.learning.cardsCreated, 0);
+    assert.equal(result.learning.bitsCreated, 0);
+    assert.match(page, /media_analysis_status: pending_provider_analysis/);
+    assert.match(page, /No learning cards or bits were created because provider media analysis is still pending/);
+    assert.equal(fs.existsSync(path.join(paths.dir, "cards.jsonl")), false);
+    assert.equal(fs.existsSync(path.join(paths.dir, "bits.jsonl")), false);
+  } finally {
+    if (previous === undefined) delete process.env.LEARNING_BOOST_TESSERACT_COMMAND;
+    else process.env.LEARNING_BOOST_TESSERACT_COMMAND = previous;
+  }
+});
+
 test("document ingest preserves unextracted PDFs without metadata-only learning cards", async () => {
   const { root, vault } = makeVault();
   const source = path.join(vault, "raw", "input", "scanned.pdf");

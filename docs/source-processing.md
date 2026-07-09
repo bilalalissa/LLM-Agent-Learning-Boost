@@ -13,6 +13,8 @@ Stage 3 adds a processor pipeline for deeper local ingest before provider analys
 - `remote-video-processor.mjs`: remote video URL metadata/caption support through optional `yt-dlp`, without full video download by default.
 - `web-processor.mjs`: reader-style HTML cleanup, schema.org extraction, metadata, and media references.
 
+If OCR, transcript, ASR, or manual description succeeds but the selected provider cannot analyze the media, the source page is marked `pending_provider_analysis`. The asset and extracted local text stay preserved, but Learning Boost does not create cards, bits, concepts, source-to-plan links, or RemNote output until the selected provider returns real analysis.
+
 ## Learning Output
 
 Every processed source asks the provider for a `learning_boost` object. The app normalizes that object into:
@@ -30,6 +32,6 @@ Cards should be topic- or concept-specific. The source title and path remain evi
 
 Provider output is parsed defensively. If a local provider wraps JSON in a short explanation or returns only part of the requested shape, Learning Boost extracts the JSON object, fills missing summary/key-point/concept fields from the local text, and still normalizes the result into Learning Boost sections. If the selected provider cannot answer at all, automatic ingest leaves the raw file pending; only explicit manual baseline processing creates a baseline source page. For PDFs, documents, image/audio/video sources, provider analysis is only attempted after local extraction produces usable text, OCR text, transcript text, ASR text, keyframe OCR text, or a user-provided manual description. Metadata-only or filename-only sources are preserved and visible, but they do not become successful learning output.
 
-Older source pages are also repaired at startup by the local Learning Boost backfill. When an existing `wiki/sources/*.md` page lacks a `## Learning Boost` section, the app derives one from that page’s Summary, Key Points, links, and open questions while preserving `## User Notes`. If a source page has no corresponding records in `.llm-wiki/learning/bits.jsonl` or `cards.jsonl`, the app also creates safe local bits/cards from the existing source-page evidence and refreshes the source-to-plan map. This startup repair is idempotent and does not require a provider call; disable it with `LLM_WIKI_DISABLE_STARTUP_LEARNING_BACKFILL=1` only for troubleshooting.
+Older source pages are also repaired at startup by the local Learning Boost backfill. When an existing `wiki/sources/*.md` page lacks a `## Learning Boost` section, the app derives one from that page’s Summary, Key Points, links, and open questions while preserving `## User Notes`. If a source page has no corresponding records in `.llm-wiki/learning/bits.jsonl` or `cards.jsonl`, the app also creates safe local bits/cards from the existing source-page evidence and refreshes the source-to-plan map. Startup repair skips pending or metadata-only image, audio, and video pages so preserved assets do not become misleading practice cards. This startup repair is idempotent and does not require a provider call; disable it with `LLM_WIKI_DISABLE_STARTUP_LEARNING_BACKFILL=1` only for troubleshooting.
 
 Final RemNote formatting is implemented in Stage 4; see [RemNote Export](remnote-export.md).

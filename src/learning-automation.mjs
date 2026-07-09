@@ -18,14 +18,14 @@ export const LEARNING_NOTIFICATIONS_FILE = "notifications.jsonl";
 
 export function defaultAutomationSettings() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     learningAutopilot: true,
     autoProcessNewSources: true,
     autoDraftPlans: true,
     autoSuggestPlanUpdates: true,
     requireApprovalForPlanActivation: true,
     nativeMacNotifications: true,
-    mirrorNotificationsToReminders: false,
+    mirrorNotificationsToReminders: true,
     updated: new Date().toISOString()
   };
 }
@@ -286,17 +286,21 @@ export function updateLearningNotificationAction(vaultPath, id, action = "read",
 }
 
 function normalizeAutomationSettings(input = {}) {
+  const existingSchema = Number(input.schemaVersion || 0);
+  const hasReminderMirror = Object.prototype.hasOwnProperty.call(input, "mirrorNotificationsToReminders");
   return {
     ...defaultAutomationSettings(),
     ...input,
-    schemaVersion: 1,
+    schemaVersion: 2,
     learningAutopilot: input.learningAutopilot !== false,
     autoProcessNewSources: input.autoProcessNewSources !== false,
     autoDraftPlans: input.autoDraftPlans !== false,
     autoSuggestPlanUpdates: input.autoSuggestPlanUpdates !== false,
     requireApprovalForPlanActivation: input.requireApprovalForPlanActivation !== false,
     nativeMacNotifications: input.nativeMacNotifications !== false,
-    mirrorNotificationsToReminders: input.mirrorNotificationsToReminders === true,
+    mirrorNotificationsToReminders: existingSchema < 2 || !hasReminderMirror
+      ? true
+      : input.mirrorNotificationsToReminders === true,
     updated: input.updated || new Date().toISOString()
   };
 }

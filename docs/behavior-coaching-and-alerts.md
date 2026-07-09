@@ -52,7 +52,7 @@ Notification alerts avoid sensitive source text unless detailed notifications ar
 
 In the native macOS app, Learning Boost uses `UserNotifications`. A notification is marked delivered only after macOS accepts it. If permission is denied, not enabled, or the macOS add request fails, the in-app Notification Center keeps the alert visible and shows the native delivery blocker. Browser notifications are only a fallback outside the native wrapper.
 
-For other Apple devices, enable `Mirror alerts to Apple Reminders` in Learning Autopilot. Learning Boost creates privacy-safe reminder items in the `Learning Boost` Reminders list on this Mac; iCloud/Reminders can then sync those items to iPhone, iPad, or other Macs if your Apple ID and Focus/notification settings allow it. Reminders mirroring has its own status: mirrored, pending, or failed.
+For other Apple devices, enable `Sync alerts to Apple devices via Reminders` in Learning Autopilot. Learning Boost creates privacy-safe reminder items in the `Learning Boost` Reminders list on this Mac; iCloud/Reminders can then sync those items to iPhone, iPad, or other Macs if your Apple ID and Focus/notification settings allow it. Reminders mirroring has its own status: mirrored, pending, or failed.
 
 ## Alert Rules
 

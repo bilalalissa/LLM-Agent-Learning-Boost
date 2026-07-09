@@ -16,7 +16,7 @@ export function backfillSourceMap(config = getConfig(), options = {}) {
   const results = [];
   for (const vaultPath of vaults) {
     ensureLearningScaffold(vaultPath, config);
-    const sourcePages = detectExistingSourcePages(vaultPath);
+    const sourcePages = detectExistingSourcePages(vaultPath).filter((page) => !isPendingOrMetadataOnlySourcePage(page));
     const paths = learningPaths(vaultPath);
     if (options.rebuildSourceMap === true) fs.writeFileSync(path.join(paths.dir, "source-links.jsonl"), "");
     const existingLinks = new Set(options.rebuildSourceMap === true ? [] : readSourceLinks(vaultPath).map((item) => item.sourcePage).filter(Boolean));
@@ -66,7 +66,7 @@ export async function backfillLearningBoost(config = getConfig(), options = {}) 
   const results = [];
   for (const vaultPath of vaults) {
     ensureLearningScaffold(vaultPath, config);
-    const sourcePages = detectExistingSourcePages(vaultPath);
+    const sourcePages = detectExistingSourcePages(vaultPath).filter((page) => !isPendingOrMetadataOnlySourcePage(page));
     const alreadyBackfilled = existingSourcePages(vaultPath);
     const pending = sourcePages.filter((page) => !alreadyBackfilled.has(page.rel));
     const estimatedCards = pending.length * 6;
@@ -171,8 +171,27 @@ function sourcePageInfo(vaultPath, file) {
     relatedLearningQuestions: listSectionItems(markdown, "Source's Related Learning Questions"),
     openLearningQuestions: listSectionItems(markdown, "Open Learning Questions"),
     openQuestions: listSectionItems(markdown, "Open Questions"),
-    links: extractWikiLinks(extractSection(markdown, "Links"))
+    links: extractWikiLinks(extractSection(markdown, "Links")),
+    pendingOrMetadataOnly: isPendingOrMetadataOnlySourceMarkdown(markdown)
   };
+}
+
+function isPendingOrMetadataOnlySourcePage(page = {}) {
+  return page.pendingOrMetadataOnly === true;
+}
+
+function isPendingOrMetadataOnlySourceMarkdown(markdown = "") {
+  const text = String(markdown || "");
+  const status = frontmatterValue(text, "status").toLowerCase();
+  const mediaStatus = frontmatterValue(text, "media_analysis_status").toLowerCase();
+  const mediaAnalyzed = frontmatterValue(text, "media_analyzed").toLowerCase();
+  if (status === "pending_content") return true;
+  if (/^pending_|fallback/.test(mediaStatus)) return true;
+  if (mediaAnalyzed === "false" && /^media_kind:\s*.+$/m.test(text)) return true;
+  if (/No learning cards or bits were created because source content extraction is still pending/i.test(text)) return true;
+  if (/No learning cards or bits were created because provider media analysis is still pending/i.test(text)) return true;
+  if (/preserved as a local (image|audio|video) asset/i.test(text) && /not analyzed|not transcribed|pending/i.test(text)) return true;
+  return false;
 }
 
 function boostFromSourcePage(page) {

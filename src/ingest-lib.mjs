@@ -205,17 +205,20 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
     processedSource
   }));
 
-  const conceptPages = createConceptPages(vaultPath, { date, analysis, sourceRel });
+  const learningReady = Boolean(analysis.learning_boost);
+  const conceptPages = learningReady ? createConceptPages(vaultPath, { date, analysis, sourceRel }) : [];
 
   updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages });
-  const learningResult = appendLearningOutputs(vaultPath, {
-    sourceRel,
-    sourceTitle,
-    processedRel: assetRel,
-    boost: analysis.learning_boost,
-    sourceKind: mediaKind,
-    processingNotes: [...(processedSource.processingNotes || []), ...(analysis.processing_notes || [])]
-  }, config);
+  const learningResult = learningReady
+    ? appendLearningOutputs(vaultPath, {
+      sourceRel,
+      sourceTitle,
+      processedRel: assetRel,
+      boost: analysis.learning_boost,
+      sourceKind: mediaKind,
+      processingNotes: [...(processedSource.processingNotes || []), ...(analysis.processing_notes || [])]
+    }, config)
+    : { cardsCreated: 0, bitsCreated: 0, pendingProviderAnalysis: true };
   appendLog(vaultPath, {
     date,
     sourceRel,
@@ -224,7 +227,7 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
     sourceTitle,
     conceptPages,
     receivedAt,
-    sourceKind: mediaKind
+    sourceKind: learningReady ? mediaKind : `${mediaKind} pending_provider_analysis`
   });
 
   return {
@@ -276,7 +279,8 @@ async function reprocessPendingMediaPages(vaultPath, provider) {
       processedSource
     }) + userNotes);
 
-    const conceptPages = analysis.status === "pending_content" ? [] : createConceptPages(vaultPath, { date, analysis, sourceRel });
+    const learningReady = Boolean(analysis.learning_boost);
+    const conceptPages = learningReady ? createConceptPages(vaultPath, { date, analysis, sourceRel }) : [];
     updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages });
     appendLog(vaultPath, {
       date,
@@ -296,7 +300,8 @@ async function reprocessPendingMediaPages(vaultPath, provider) {
       processed: assetRel,
       conceptPages,
       reprocessed: true,
-      pendingContent: analysis.status === "pending_content"
+      pendingContent: analysis.status === "pending_content",
+      pendingProviderAnalysis: analysis.status === "pending_provider_analysis"
     });
   }
   return results;
@@ -411,40 +416,30 @@ function parseMediaJson(text, media, input = {}) {
 }
 
 function fallbackMediaAnalysis(media, error, input = {}) {
-  const parsed = {
-    summary: `${media.kind} source preserved as a local asset. The configured provider did not return a media analysis, so this page records metadata and keeps the source available for later review.`,
+  return {
+    summary: `${media.kind} source preserved as a local asset. Provider analysis is pending because the configured provider did not return a usable media analysis.`,
     language: "unknown",
     key_points: [
-      `Local asset path: ${media.assetRel}.`,
-      `Media kind: ${media.kind}.`,
-      `File size: ${media.sizeLabel}.`
+      `Preserved local asset: ${media.assetRel}.`,
+      "No source claims were generated because provider media analysis did not complete."
     ],
-    concepts: [{ name: `${media.kind} source`, summary: `A locally preserved ${media.kind} file awaiting deeper interpretation.` }],
+    concepts: [],
     entities: [],
     open_questions: [{
       question: "What does this media show, contain, or prove?",
-      answer: "This remains unresolved until the media content is inspected or the user supplies a reliable description."
+      answer: "Pending. Reprocess the source after the selected provider can analyze the extracted transcript, OCR text, or description."
     }],
     contradictions: [],
-    source_learning_questions: [{
-      question: `What should I learn from this ${media.kind} source before connecting it to other notes?`,
-      answer: `Use the preserved metadata and any later human or provider inspection to identify what the ${media.kind} source actually contains before drawing conclusions.`
-    }],
-    open_learning_questions: [{
-      question: `How does this ${media.kind} source connect to broader concepts, tools, or real-world contexts?`,
-      answer: "Treat this as an open connection until the media content is inspected; then link it to the relevant concepts, tools, systems, or examples."
-    }],
-    processing_notes: [`Media analysis fallback used: ${error.message}`],
+    source_learning_questions: [],
+    open_learning_questions: [],
+    processing_notes: [
+      ...(input.processedSource?.processingNotes || []),
+      `Provider media analysis failed: ${error.message}`
+    ],
     analyzed: false,
-    status: "fallback"
+    status: "pending_provider_analysis",
+    learning_boost: null
   };
-  parsed.learning_boost = fallbackLearningBoost(parsed, analysisContext(input, {
-    sourceTitle: input.sourceTitle,
-    processedRel: media.assetRel,
-    evidence: input.processedSource?.evidence || [media.assetRel],
-    mediaRefs: [media.assetRel]
-  }));
-  return parsed;
 }
 
 function pendingMediaAnalysis(media, input = {}) {
@@ -479,7 +474,7 @@ function mediaRequiresExtractedContent(kind) {
 }
 
 function sourceRequiresExtractedContent(processedSource = {}) {
-  return new Set(["pdf", "document"]).has(String(processedSource.kind || "").toLowerCase());
+  return new Set(["pdf", "document", "image", "audio", "video"]).has(String(processedSource.kind || "").toLowerCase());
 }
 
 function pendingFileAnalysis(processedSource = {}, input = {}) {
@@ -923,7 +918,7 @@ function extractTitle(text, sourcePath) {
 function renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource = {} }) {
   return `---
 type: source
-status: ${analysis.status === "pending_content" ? "pending_content" : "active"}
+status: ${String(analysis.status || "").startsWith("pending_") ? "pending_content" : "active"}
 created: ${date}
 updated: ${date}
 language: ${yamlScalar(analysis.language || "unknown")}
@@ -944,7 +939,7 @@ ${analysis.summary}
 
 ${bulletList(analysis.key_points)}
 
-${analysis.learning_boost ? renderLearningBoostSection(analysis.learning_boost) : "## Learning Boost\n\nNo learning cards or bits were created because source content extraction is still pending."}
+${analysis.learning_boost ? renderLearningBoostSection(analysis.learning_boost) : `## Learning Boost\n\nNo learning cards or bits were created because ${analysis.status === "pending_provider_analysis" ? "provider media analysis is still pending." : "source content extraction is still pending."}`}
 
 ## Source Processing
 
@@ -985,7 +980,7 @@ function renderMediaSourcePage({ date, sourceTitle, assetRel, mediaKind, ext, me
   const preview = mediaKind === "image" ? `\n![[${assetRel}]]\n` : "";
   return `---
 type: source
-status: ${analysis.status === "pending_content" ? "pending_content" : "active"}
+status: ${String(analysis.status || "").startsWith("pending_") ? "pending_content" : "active"}
 created: ${date}
 updated: ${date}
 language: ${yamlScalar(analysis.language || "unknown")}
@@ -1019,7 +1014,7 @@ ${media.width && media.height ? `- Dimensions: ${media.width} x ${media.height}`
 
 ${bulletList(analysis.key_points)}
 
-${analysis.learning_boost ? renderLearningBoostSection(analysis.learning_boost) : "## Learning Boost\n\nNo learning cards or bits were created because source content extraction is still pending."}
+${analysis.learning_boost ? renderLearningBoostSection(analysis.learning_boost) : `## Learning Boost\n\nNo learning cards or bits were created because ${analysis.status === "pending_provider_analysis" ? "provider media analysis is still pending." : "source content extraction is still pending."}`}
 
 ## Source's Related Learning Questions
 

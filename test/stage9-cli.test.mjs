@@ -40,6 +40,32 @@ function writeSourcePage(vault, name = "existing-source.md") {
   return file;
 }
 
+function writePendingMediaSourcePage(vault, name = "pending-audio.md") {
+  const file = path.join(vault, "wiki", "sources", name);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `---
+type: source
+status: pending_content
+media_kind: audio
+media_analyzed: false
+media_analysis_status: pending_content
+source_path: raw/assets/pending-audio.mp3
+---
+
+# Pending Audio
+
+## Summary
+
+audio source preserved as a local asset. Learning analysis is pending because no readable transcript, OCR text, or manual description was available.
+
+## Key Points
+
+- Preserved local asset: raw/assets/pending-audio.mp3.
+- No source claims were generated because the media content has not been transcribed or inspected.
+`);
+  return file;
+}
+
 test("detectExistingSourcePages finds source markdown without touching user notes", () => {
   const { vault } = makeVaultRoot();
   writeSourcePage(vault);
@@ -87,6 +113,20 @@ test("backfillLearningBoost generates learning outputs only once when provider i
   assert.ok(bits.length > 0);
 });
 
+test("backfillLearningBoost skips pending metadata-only media pages", async () => {
+  const { root, vault } = makeVaultRoot();
+  writePendingMediaSourcePage(vault);
+  const result = await backfillLearningBoost(makeConfig(root), {
+    providerStatus: { statusColor: "green", statusDetail: "Connected" }
+  });
+  const paths = learningPaths(vault);
+
+  assert.equal(result.results[0].detected, 0);
+  assert.equal(result.results[0].generated, 0);
+  assert.equal(fs.readFileSync(path.join(paths.dir, "cards.jsonl"), "utf8").trim(), "");
+  assert.equal(fs.readFileSync(path.join(paths.dir, "bits.jsonl"), "utf8").trim(), "");
+});
+
 test("backfillLearningBoost can derive outputs from existing source pages without provider probe", async () => {
   const { root, vault } = makeVaultRoot();
   writeSourcePage(vault, "local-existing-source.md");
@@ -114,6 +154,17 @@ test("backfillLearningSections adds Learning Boost to existing source pages with
   assert.match(page, /## Learning Boost/);
   assert.match(page, /### Learning Bits/);
   assert.match(page, /Do not overwrite this note/);
+});
+
+test("backfillLearningSections does not add learning sections to pending media", () => {
+  const { root, vault } = makeVaultRoot();
+  writePendingMediaSourcePage(vault, "pending-media-source.md");
+
+  const result = backfillLearningSections(makeConfig(root));
+  const page = fs.readFileSync(path.join(vault, "wiki", "sources", "pending-media-source.md"), "utf8");
+
+  assert.equal(result.some((item) => item.file === "wiki/sources/pending-media-source.md"), false);
+  assert.doesNotMatch(page, /## Learning Boost/);
 });
 
 test("backfillSourceMap links older processed sources without provider or duplicate cards", () => {

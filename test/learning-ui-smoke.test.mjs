@@ -133,7 +133,7 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /macOS delivered/);
   assert.match(serverSource, /macOS notifications blocked/);
   assert.match(serverSource, /Apple Reminders mirrored/);
-  assert.match(serverSource, /Mirror alerts to Apple Reminders/);
+  assert.match(serverSource, /Sync alerts to Apple devices via Reminders/);
   assert.match(serverSource, /Sync alerts to Reminders/);
   assert.match(serverSource, /syncNotificationsToReminders/);
   assert.match(serverSource, /pollNow/);
