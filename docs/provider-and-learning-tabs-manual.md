@@ -219,12 +219,16 @@ Controls:
 - Auto-draft plans/goals: draft proposed plans from gathered bits, cards, source links, and resources.
 - Auto-suggest plan updates: record plan edits that may help, without applying them automatically.
 - Native macOS notifications: allow the wrapper to send privacy-safe system alerts.
+- Mirror alerts to Apple Reminders: optionally copy privacy-safe learning alerts into an Apple Reminders list named `Learning Boost`; iCloud can sync those reminders to your other Apple devices if your system settings allow it.
 - Process pending now: run the same safe loop immediately.
 - Send test notification: queue one alert and ask macOS to deliver it.
+- Sync alerts to Reminders: retry Apple Reminders mirroring for pending alerts.
 
 The in-app Notification Center remains the durable alert log. It shows native delivery state such as pending, delivered, blocked by permission, or failed after retry attempts.
 
 macOS delivery and in-app reading are separate. A notification can be delivered by macOS and still remain unread in the app until you choose Mark read or Dismiss. The stack summary shows unread, pending macOS delivery, delivered, and blocked/failed counts.
+
+Apple Reminders mirroring is separate from macOS Notification Center delivery. It is the practical cross-device path: Learning Boost creates Reminders items on this Mac, then Apple/iCloud handles syncing them to other devices. If macOS Automation access to Reminders is blocked, the Notification Center shows the mirror failure instead of clearing the alert.
 
 ### Plan Actions
 

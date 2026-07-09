@@ -101,6 +101,8 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /Notification delivery stack/);
   assert.match(serverSource, /Pending macOS/);
   assert.match(serverSource, /Blocked\/failed/);
+  assert.match(serverSource, /Reminders mirrored/);
+  assert.match(serverSource, /Pending Reminders/);
   assert.match(serverSource, /notificationStackSummary/);
   assert.match(serverSource, /notificationTargetType/);
   assert.match(serverSource, /prefers-reduced-motion/);
@@ -109,6 +111,7 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /api\/learning\/process-pending/);
   assert.match(serverSource, /api\/learning\/notifications/);
   assert.match(serverSource, /api\/native\/notification-test/);
+  assert.match(serverSource, /api\/learning\/notification-reminder-sync/);
   assert.match(serverSource, /api\/learning\/export-preview/);
   assert.match(serverSource, /api\/learning\/export-confirm/);
   assert.match(serverSource, /learning-export-review/);
@@ -129,6 +132,10 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /notificationDeliveryLabel/);
   assert.match(serverSource, /macOS delivered/);
   assert.match(serverSource, /macOS notifications blocked/);
+  assert.match(serverSource, /Apple Reminders mirrored/);
+  assert.match(serverSource, /Mirror alerts to Apple Reminders/);
+  assert.match(serverSource, /Sync alerts to Reminders/);
+  assert.match(serverSource, /syncNotificationsToReminders/);
   assert.match(serverSource, /pollNow/);
   assert.match(serverSource, /Plan Actions/);
   assert.match(serverSource, /Learner Profile/);

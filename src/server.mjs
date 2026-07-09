@@ -16,6 +16,7 @@ import { ingestVault } from "./ingest-lib.mjs";
 import { enrichLearningBitForDisplay, enrichLearningCardForDisplay } from "./learning-card-display.mjs";
 import {
   learningAutomationStatus,
+  readAutomationSettings,
   readLearningNotifications,
   recordLearningNotification,
   updateAutomationSettings,
@@ -362,9 +363,10 @@ const server = http.createServer(async (request, response) => {
         status: settings.learningAutopilot ? "watching" : "paused",
         detail: settings.learningAutopilot ? "Learning Autopilot is watching for safe work." : "Learning Autopilot is paused for this vault."
       });
+      const reminderMirror = await syncNotificationReminderMirrorIfEnabled(vaultPath);
       refreshTabData("learning");
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ vault: vaultName(vaultPath), settings, automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)) }));
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), settings, reminderMirror, automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)) }));
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: error.message }));
@@ -405,6 +407,9 @@ const server = http.createServer(async (request, response) => {
       });
       lastIngestMessage = reportStatus(result.detail || "Learning automation finished.");
       refreshChangedTabsAfterIngest();
+      void syncNotificationReminderMirrorIfEnabled(vaultPath).then(() => refreshTabData("learning")).catch((error) => {
+        console.error(`[learning-reminders] ${error.stack || error.message}`);
+      });
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result, automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)) }));
     } catch (error) {
@@ -475,8 +480,25 @@ const server = http.createServer(async (request, response) => {
         detail: "This is a privacy-safe test notification.",
         actions: ["Open Learning", "Review alerts"]
       });
+      const reminderMirror = await syncNotificationReminderMirrorIfEnabled(vaultPath);
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ vault: vaultName(vaultPath), notification }));
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), notification, reminderMirror }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/notification-reminder-sync") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault);
+      const result = await syncNotificationReminderMirrorIfEnabled(vaultPath, { force: payload.force === true });
+      refreshTabData("learning");
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: error.message }));
@@ -1849,7 +1871,10 @@ function fastLearningVault(vaultPath) {
     .reverse();
   const sourceSettings = safeReadJson(path.join(dir, "source-capture-settings.json"), defaultFastSourceCaptureSettings());
   const behaviorSettings = safeReadJson(path.join(dir, "behavior-settings.json"), defaultFastBehaviorSettings());
-  const automationSettings = safeReadJson(path.join(dir, "automation-settings.json"), defaultFastAutomationSettings());
+  const automationSettings = {
+    ...defaultFastAutomationSettings(),
+    ...safeReadJson(path.join(dir, "automation-settings.json"), {})
+  };
   const remoteSettings = safeReadJson(path.join(dir, "remote-research-settings.json"), {});
   const stats = fastLearningStats({ bits, cards, reviews, plans, sourceLinks });
   return {
@@ -1994,6 +2019,7 @@ function defaultFastAutomationSettings() {
     autoDraftPlans: true,
     autoSuggestPlanUpdates: true,
     nativeMacNotifications: true,
+    mirrorNotificationsToReminders: false,
     requireApprovalForExternalWrites: true
   };
 }
@@ -2702,6 +2728,73 @@ function appleScriptString(value) {
   return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+async function syncNotificationReminderMirrorIfEnabled(vaultPath, options = {}) {
+  const settings = readAutomationSettings(vaultPath);
+  if (settings.mirrorNotificationsToReminders !== true && options.force !== true) {
+    return { enabled: false, mirrored: 0, failed: 0, detail: "Apple Reminders notification mirror is off." };
+  }
+  if (process.platform !== "darwin") {
+    return { enabled: true, mirrored: 0, failed: 0, detail: "Apple Reminders notification mirror requires macOS." };
+  }
+  const notifications = readLearningNotifications(vaultPath, {
+    limit: Math.max(1, Math.min(Number(options.limit || 8), 20)),
+    pendingReminderOnly: true
+  }).reverse();
+  let mirrored = 0;
+  let failed = 0;
+  for (const item of notifications) {
+    try {
+      const reminderExternalId = await createAppleReminderForLearningNotification(vaultPath, item);
+      updateLearningNotificationAction(vaultPath, item.id, "reminder_mirrored", { reminderExternalId });
+      mirrored += 1;
+    } catch (error) {
+      updateLearningNotificationAction(vaultPath, item.id, "reminder_failed", {
+        reminderMirrorError: summarizeStatusError(error)
+      });
+      failed += 1;
+    }
+  }
+  return {
+    enabled: true,
+    mirrored,
+    failed,
+    detail: notifications.length
+      ? `Mirrored ${mirrored} learning notification(s) to Apple Reminders${failed ? `; ${failed} failed` : ""}.`
+      : "No learning notifications needed Apple Reminders mirroring."
+  };
+}
+
+function createAppleReminderForLearningNotification(vaultPath, item = {}) {
+  const listName = "Learning Boost";
+  const title = `[Learning Boost] ${compactReminderText(item.title || "Learning alert", 120)}`;
+  const body = compactReminderText([
+    item.body || "",
+    item.detail || "",
+    `Vault: ${vaultName(vaultPath)}`,
+    "Open Learning Boost for actions, source links, and read/dismiss controls."
+  ].filter(Boolean).join("\n\n"), 900);
+  return runOsascript([
+    "tell application \"Reminders\"",
+    `if not (exists list ${appleScriptLiteral(listName)}) then make new list with properties {name:${appleScriptLiteral(listName)}}`,
+    `set targetList to list ${appleScriptLiteral(listName)}`,
+    `set newReminder to make new reminder at end of reminders of targetList with properties {name:${appleScriptLiteral(title)}, body:${appleScriptLiteral(body)}}`,
+    "id of newReminder",
+    "end tell"
+  ]);
+}
+
+function appleScriptLiteral(value) {
+  return `"${String(value || "")
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\r?\n/g, "\\n")}"`;
+}
+
+function compactReminderText(value, max) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text;
+}
+
 function resolveHelpMedia(file) {
   const normalized = decodeURIComponent(String(file || ""))
     .replace(/\\/g, "/")
@@ -2899,6 +2992,9 @@ async function runAutoIngest() {
       updateRuntimeFromAutomationResult(vaultPath, item.automationResult || {});
       const results = item.automationResult?.results || [];
       count += results.length;
+      void syncNotificationReminderMirrorIfEnabled(vaultPath).catch((error) => {
+        console.error(`[learning-reminders] ${error.stack || error.message}`);
+      });
       for (const result of results) {
         console.log(`[auto-ingest] ${result.vault}: ${result.source} -> ${result.sourcePage}`);
       }
@@ -4551,12 +4647,14 @@ function renderHtml() {
               <label class="inline-toggle"><input id="auto-draft-plans-toggle" type="checkbox"> Auto-draft plans and goals</label>
               <label class="inline-toggle"><input id="auto-suggest-plan-updates-toggle" type="checkbox"> Auto-suggest plan updates</label>
               <label class="inline-toggle"><input id="native-mac-notifications-toggle" type="checkbox"> Native macOS notifications</label>
+              <label class="inline-toggle"><input id="reminders-notification-mirror-toggle" type="checkbox"> Mirror alerts to Apple Reminders</label>
               <label class="inline-toggle"><input id="approval-gates-toggle" type="checkbox" checked disabled> Require approval for activation and external writes</label>
             </div>
             <div class="learning-button-row">
               <button class="primary" type="submit">Save Autopilot settings</button>
               <button id="process-pending-learning" class="secondary" type="button">Process pending now</button>
               <button id="test-native-notification" class="secondary" type="button">Send test notification</button>
+              <button id="sync-reminder-notifications" class="secondary" type="button">Sync alerts to Reminders</button>
             </div>
           </form>
         </details>
@@ -4990,8 +5088,10 @@ function renderHtml() {
     const autoDraftPlansToggle = document.querySelector("#auto-draft-plans-toggle");
     const autoSuggestPlanUpdatesToggle = document.querySelector("#auto-suggest-plan-updates-toggle");
     const nativeMacNotificationsToggle = document.querySelector("#native-mac-notifications-toggle");
+    const remindersNotificationMirrorToggle = document.querySelector("#reminders-notification-mirror-toggle");
     const processPendingLearning = document.querySelector("#process-pending-learning");
     const testNativeNotification = document.querySelector("#test-native-notification");
+    const syncReminderNotifications = document.querySelector("#sync-reminder-notifications");
     const behaviorCaptureToggle = document.querySelector("#behavior-capture-toggle");
     const behaviorCoachingToggle = document.querySelector("#behavior-coaching-toggle");
     const expandedMonitoringToggle = document.querySelector("#expanded-monitoring-toggle");
@@ -5353,6 +5453,7 @@ function renderHtml() {
     learningAutomationForm.addEventListener("submit", saveLearningAutomationSettings);
     processPendingLearning.addEventListener("click", processPendingLearningNow);
     testNativeNotification.addEventListener("click", sendNativeNotificationTest);
+    syncReminderNotifications.addEventListener("click", syncNotificationsToReminders);
     exportRemnote.addEventListener("click", () => openLearningExportReview("remnote"));
     pauseBehavior.addEventListener("click", toggleBehaviorPause);
     exportBehavior.addEventListener("click", exportBehaviorData);
@@ -5412,6 +5513,7 @@ function renderHtml() {
       }
       if (action === "mark-notification-read") markLearningNotification(actionButton.dataset.vault, actionButton.dataset.notificationId, "read");
       if (action === "dismiss-notification") markLearningNotification(actionButton.dataset.vault, actionButton.dataset.notificationId, "dismiss");
+      if (action === "sync-notification-reminder") syncNotificationsToReminders();
       if (action === "clear-card-filter") {
         learningCardsFilter = null;
         renderLearningProfile();
@@ -6779,6 +6881,7 @@ function renderHtml() {
       autoDraftPlansToggle.checked = automationSettings.autoDraftPlans !== false;
       autoSuggestPlanUpdatesToggle.checked = automationSettings.autoSuggestPlanUpdates !== false;
       nativeMacNotificationsToggle.checked = automationSettings.nativeMacNotifications !== false;
+      remindersNotificationMirrorToggle.checked = automationSettings.mirrorNotificationsToReminders === true;
       pauseBehavior.textContent = coachSettings.paused ? "Resume coaching" : "Pause coaching";
       enableBehaviorAlerts.textContent = coachSettings.notificationPermission === "granted" ? "Alerts enabled" : "Enable alerts";
       learningNotificationControl.textContent = coachSettings.notificationPermission === "granted" ? "Learning notifications enabled" : "Enable learning notifications";
@@ -7296,10 +7399,12 @@ function renderHtml() {
           '<span><strong>' + escapeHtml(String(deliverySummary.pendingNative)) + '</strong>Pending macOS</span>' +
           '<span><strong>' + escapeHtml(String(deliverySummary.delivered)) + '</strong>Delivered</span>' +
           '<span><strong>' + escapeHtml(String(deliverySummary.blocked)) + '</strong>Blocked/failed</span>' +
+          '<span><strong>' + escapeHtml(String(deliverySummary.mirrored)) + '</strong>Reminders mirrored</span>' +
+          '<span><strong>' + escapeHtml(String(deliverySummary.pendingReminder)) + '</strong>Pending Reminders</span>' +
         '</div>' +
         '<ul>' + (rows.length ? rows.map((item) =>
           '<li id="learning-notification-' + escapeHtml(item.id || "") + '" class="learning-scroll-target ' + escapeHtml(item.severity || "info") + '" data-learning-notification="' + escapeHtml(item.id || "") + '"><div><button class="learning-target-button" type="button" data-learning-target="' + escapeHtml(notificationTargetType(item)) + '" data-vault="' + escapeHtml(item.vault || state.vault) + '" data-source-page="' + escapeHtml(item.sourcePage || "") + '" data-plan-id="' + escapeHtml(item.planId || "") + '" data-goal-id="' + escapeHtml(item.goalId || "") + '"><strong>' + escapeHtml(item.title || "Learning Boost") + '</strong></button><p>' + escapeHtml(item.body || item.detail || "") + '</p><small>' + escapeHtml([shortEventTime(item.created), item.detail, notificationDeliveryLabel(item)].filter(Boolean).join(" · ")) + '</small></div>' +
-          (!item.readAt ? '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="mark-notification-read" data-vault="' + escapeHtml(item.vault || state.vault) + '" data-notification-id="' + escapeHtml(item.id || "") + '">Mark read</button><button class="secondary" type="button" data-learning-action="dismiss-notification" data-vault="' + escapeHtml(item.vault || state.vault) + '" data-notification-id="' + escapeHtml(item.id || "") + '">Dismiss</button></div>' : '') +
+          (!item.readAt ? '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="mark-notification-read" data-vault="' + escapeHtml(item.vault || state.vault) + '" data-notification-id="' + escapeHtml(item.id || "") + '">Mark read</button><button class="secondary" type="button" data-learning-action="dismiss-notification" data-vault="' + escapeHtml(item.vault || state.vault) + '" data-notification-id="' + escapeHtml(item.id || "") + '">Dismiss</button>' + (item.reminderMirrorStatus !== "mirrored" ? '<button class="secondary" type="button" data-learning-action="sync-notification-reminder" data-vault="' + escapeHtml(item.vault || state.vault) + '">Sync to Reminders</button>' : '') + '</div>' : '') +
           '</li>'
         ).join("") : '<li><div><strong>No alerts right now</strong><p>Autopilot will notify you when a source is processed, a provider blocks work, or a plan needs confirmation.</p></div></li>') + '</ul>' +
       '</section>';
@@ -7312,8 +7417,11 @@ function renderHtml() {
         if (status === "pending" || (status === "failed" && (item.deliveryAttempts || 0) < 3)) summary.pendingNative += 1;
         if (status === "delivered") summary.delivered += 1;
         if (status === "permission_denied" || status === "failed") summary.blocked += 1;
+        if (item.reminderMirrorStatus === "mirrored") summary.mirrored += 1;
+        if (item.reminderMirrorStatus === "pending" || (item.reminderMirrorStatus === "failed" && (item.reminderMirrorAttempts || 0) < 3)) summary.pendingReminder += 1;
+        if (item.reminderMirrorStatus === "failed") summary.blocked += 1;
         return summary;
-      }, { unread: 0, pendingNative: 0, delivered: 0, blocked: 0 });
+      }, { unread: 0, pendingNative: 0, delivered: 0, blocked: 0, mirrored: 0, pendingReminder: 0 });
     }
 
     function notificationTargetType(item) {
@@ -7326,11 +7434,22 @@ function renderHtml() {
 
     function notificationDeliveryLabel(item) {
       const status = item.nativeDeliveryStatus || (item.deliveredAt ? "delivered" : "pending");
-      if (status === "delivered") return "macOS delivered";
-      if (status === "permission_denied") return "macOS notifications blocked: " + (item.nativeError || "permission not enabled");
-      if (status === "failed") return "macOS delivery failed: " + (item.nativeError || "will retry if possible");
-      if ((item.deliveryAttempts || 0) > 0) return "macOS pending, attempts: " + item.deliveryAttempts;
-      return "macOS pending";
+      const reminder = notificationReminderLabel(item);
+      const native = (() => {
+        if (status === "delivered") return "macOS delivered";
+        if (status === "permission_denied") return "macOS notifications blocked: " + (item.nativeError || "permission not enabled");
+        if (status === "failed") return "macOS delivery failed: " + (item.nativeError || "will retry if possible");
+        if ((item.deliveryAttempts || 0) > 0) return "macOS pending, attempts: " + item.deliveryAttempts;
+        return "macOS pending";
+      })();
+      return [native, reminder].filter(Boolean).join(" · ");
+    }
+
+    function notificationReminderLabel(item) {
+      if (item.reminderMirrorStatus === "mirrored") return "Apple Reminders mirrored";
+      if (item.reminderMirrorStatus === "failed") return "Apple Reminders mirror failed: " + (item.reminderMirrorError || "will retry if enabled");
+      if ((item.reminderMirrorAttempts || 0) > 0) return "Apple Reminders pending, attempts: " + item.reminderMirrorAttempts;
+      return "";
     }
 
     function renderLearningFlow(state, context) {
@@ -7764,6 +7883,7 @@ function renderHtml() {
             autoDraftPlans: autoDraftPlansToggle.checked,
             autoSuggestPlanUpdates: autoSuggestPlanUpdatesToggle.checked,
             nativeMacNotifications: nativeMacNotificationsToggle.checked,
+            mirrorNotificationsToReminders: remindersNotificationMirrorToggle.checked,
             requireApprovalForPlanActivation: true
           }
         });
@@ -7798,6 +7918,7 @@ function renderHtml() {
       learningFeedback.textContent = "Sending test notification...";
       try {
         await postLearningAction("/api/native/notification-test", { vault });
+        if (remindersNotificationMirrorToggle.checked) await postLearningAction("/api/learning/notification-reminder-sync", { vault });
         if (window.webkit?.messageHandlers?.learningNotification) {
           window.webkit.messageHandlers.learningNotification.postMessage({
             action: "pollNow"
@@ -7810,6 +7931,22 @@ function renderHtml() {
         await loadLearning();
       } catch (error) {
         learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function syncNotificationsToReminders() {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      syncReminderNotifications.disabled = true;
+      learningFeedback.textContent = "Syncing learning alerts to Apple Reminders...";
+      try {
+        const result = await postLearningAction("/api/learning/notification-reminder-sync", { vault, force: true });
+        learningFeedback.textContent = result.detail || "Apple Reminders sync finished";
+        await loadLearning();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      } finally {
+        syncReminderNotifications.disabled = false;
       }
     }
 

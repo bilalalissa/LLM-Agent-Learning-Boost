@@ -25,6 +25,7 @@ export function defaultAutomationSettings() {
     autoSuggestPlanUpdates: true,
     requireApprovalForPlanActivation: true,
     nativeMacNotifications: true,
+    mirrorNotificationsToReminders: false,
     updated: new Date().toISOString()
   };
 }
@@ -71,7 +72,8 @@ export function learningAutomationStatus(vaultPath, runtime = {}) {
     resourceInboxCount: resources.length,
     sourceCaptureAutoProcess: sourceSettings.autoProcessCapturedResources !== false,
     notificationsUnread: notifications.filter((item) => !item.readAt && item.status !== "dismissed").length,
-    notificationsPendingNative: notifications.filter((item) => nativeDeliveryPending(item)).length
+    notificationsPendingNative: notifications.filter((item) => nativeDeliveryPending(item)).length,
+    notificationsPendingReminderMirror: notifications.filter((item) => reminderMirrorPending(item)).length
   };
 }
 
@@ -199,11 +201,13 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
 export function readLearningNotifications(vaultPath, options = {}) {
   const includeDismissed = options.includeDismissed === true;
   const pendingNativeOnly = options.pendingNativeOnly === true;
+  const pendingReminderOnly = options.pendingReminderOnly === true;
   const limit = Math.max(1, Number(options.limit || 50));
   return readJsonl(learningNotificationsPath(vaultPath))
     .map(normalizeLearningNotification)
     .filter((item) => includeDismissed || item.status !== "dismissed")
     .filter((item) => !pendingNativeOnly || nativeDeliveryPending(item))
+    .filter((item) => !pendingReminderOnly || reminderMirrorPending(item))
     .slice(-limit)
     .reverse();
 }
@@ -255,6 +259,24 @@ export function updateLearningNotificationAction(vaultPath, id, action = "read",
       nativeError: String(details.nativeError || details.error || "macOS notification permission is not enabled."),
       updated: now
     });
+    if (action === "reminder_mirrored") return normalizeLearningNotification({
+      ...item,
+      reminderMirrorStatus: "mirrored",
+      reminderMirrorAttempts: Number(item.reminderMirrorAttempts || 0) + 1,
+      reminderMirrorAttemptAt: now,
+      reminderMirrorError: "",
+      reminderExternalId: String(details.reminderExternalId || details.externalId || item.reminderExternalId || ""),
+      reminderMirroredAt: item.reminderMirroredAt || now,
+      updated: now
+    });
+    if (action === "reminder_failed") return normalizeLearningNotification({
+      ...item,
+      reminderMirrorStatus: "failed",
+      reminderMirrorAttempts: Number(item.reminderMirrorAttempts || 0) + 1,
+      reminderMirrorAttemptAt: now,
+      reminderMirrorError: String(details.reminderMirrorError || details.error || "Apple Reminders did not accept the notification mirror."),
+      updated: now
+    });
     if (action === "dismiss") return normalizeLearningNotification({ ...item, status: "dismissed", readAt: item.readAt || now, updated: now });
     return normalizeLearningNotification({ ...item, status: "read", readAt: item.readAt || now, updated: now });
   });
@@ -274,6 +296,7 @@ function normalizeAutomationSettings(input = {}) {
     autoSuggestPlanUpdates: input.autoSuggestPlanUpdates !== false,
     requireApprovalForPlanActivation: input.requireApprovalForPlanActivation !== false,
     nativeMacNotifications: input.nativeMacNotifications !== false,
+    mirrorNotificationsToReminders: input.mirrorNotificationsToReminders === true,
     updated: input.updated || new Date().toISOString()
   };
 }
@@ -283,6 +306,9 @@ function normalizeLearningNotification(input = {}) {
   const nativeDeliveryStatus = ["pending", "delivered", "permission_denied", "failed"].includes(input.nativeDeliveryStatus)
     ? input.nativeDeliveryStatus
     : (input.deliveredAt ? "delivered" : "pending");
+  const reminderMirrorStatus = ["pending", "mirrored", "failed"].includes(input.reminderMirrorStatus)
+    ? input.reminderMirrorStatus
+    : (input.reminderMirroredAt || input.reminderExternalId ? "mirrored" : "pending");
   return {
     id: String(input.id || ""),
     type: String(input.type || "learning_event"),
@@ -303,7 +329,13 @@ function normalizeLearningNotification(input = {}) {
     lastDeliveryAttemptAt: input.lastDeliveryAttemptAt || "",
     nativeError: String(input.nativeError || ""),
     deliveredAt: input.deliveredAt || "",
-    readAt: input.readAt || ""
+    readAt: input.readAt || "",
+    reminderMirrorStatus,
+    reminderMirrorAttempts: Math.max(0, Number(input.reminderMirrorAttempts || 0)),
+    reminderMirrorAttemptAt: input.reminderMirrorAttemptAt || "",
+    reminderMirrorError: String(input.reminderMirrorError || ""),
+    reminderExternalId: String(input.reminderExternalId || ""),
+    reminderMirroredAt: input.reminderMirroredAt || ""
   };
 }
 
@@ -314,6 +346,13 @@ function nativeDeliveryPending(item = {}) {
     && normalized.nativeDeliveryStatus !== "permission_denied"
     && !normalized.deliveredAt
     && normalized.deliveryAttempts < 3;
+}
+
+function reminderMirrorPending(item = {}) {
+  const normalized = normalizeLearningNotification(item);
+  return normalized.status !== "dismissed"
+    && normalized.reminderMirrorStatus !== "mirrored"
+    && normalized.reminderMirrorAttempts < 3;
 }
 
 async function providerReadiness(provider, config = {}) {

@@ -33,6 +33,7 @@ test("learning automation defaults to safe autopilot with approval gates", () =>
   assert.equal(settings.autoSuggestPlanUpdates, true);
   assert.equal(settings.requireApprovalForPlanActivation, true);
   assert.equal(settings.nativeMacNotifications, true);
+  assert.equal(settings.mirrorNotificationsToReminders, false);
 });
 
 test("automation settings can pause only the vault autopilot", () => {
@@ -61,6 +62,35 @@ test("notification queue supports native delivery and read actions", () => {
   assert.equal(readLearningNotifications(vault)[0].readAt, "");
   updateLearningNotificationAction(vault, notice.id, "read");
   assert.equal(readLearningNotifications(vault)[0].status, "read");
+});
+
+test("notification queue tracks Apple Reminders mirror state separately", () => {
+  const { vault } = makeVault();
+  const notice = recordLearningNotification(vault, {
+    type: "plan_drafted",
+    title: "Plan drafted",
+    body: "A plan is ready to review."
+  });
+
+  assert.equal(readLearningNotifications(vault, { pendingReminderOnly: true }).length, 1);
+  updateLearningNotificationAction(vault, notice.id, "reminder_mirrored", { reminderExternalId: "x-apple-reminder-1" });
+  let current = readLearningNotifications(vault)[0];
+  assert.equal(current.reminderMirrorStatus, "mirrored");
+  assert.equal(current.reminderExternalId, "x-apple-reminder-1");
+  assert.equal(current.status, "unread");
+  assert.equal(readLearningNotifications(vault, { pendingReminderOnly: true }).length, 0);
+
+  const failed = recordLearningNotification(vault, {
+    type: "provider_blocked",
+    title: "Provider blocked",
+    body: "Provider is not answering."
+  });
+  updateLearningNotificationAction(vault, failed.id, "reminder_failed", { reminderMirrorError: "Automation permission denied" });
+  current = readLearningNotifications(vault)[0];
+  assert.equal(current.reminderMirrorStatus, "failed");
+  assert.equal(current.reminderMirrorAttempts, 1);
+  assert.match(current.reminderMirrorError, /Automation permission denied/);
+  assert.equal(readLearningNotifications(vault, { pendingReminderOnly: true }).length, 1);
 });
 
 test("notification native failures track retryable and blocked delivery states", () => {
