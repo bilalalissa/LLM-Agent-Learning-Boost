@@ -188,6 +188,10 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /recentEvents/);
   assert.match(serverSource, /Practice Learning Cards And Bits/);
   assert.match(serverSource, /Open practice window/);
+  assert.match(serverSource, /Practice \/ edit/);
+  assert.match(serverSource, /Study \/ edit bit/);
+  assert.match(serverSource, /learningCardsFilter \? filterLearningItems/);
+  assert.match(serverSource, /Due and unread items appear first/);
   assert.match(serverSource, /api\/learning\/bit-review/);
   assert.match(serverSource, /api\/learning\/card-edit/);
   assert.match(serverSource, /api\/learning\/bit-edit/);

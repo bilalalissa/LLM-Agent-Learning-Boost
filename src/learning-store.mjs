@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { enrichLearningBitForDisplay, enrichLearningCardForDisplay } from "./learning-card-display.mjs";
 import { normalizeLearningProfile } from "./learning-model.mjs";
+import { formatLocalDateKey } from "./time.mjs";
 import { normalizeUserProfile, onboardingQuestions } from "./user-profile.mjs";
 import { listVaults, vaultName } from "./vaults.mjs";
 
@@ -403,7 +404,7 @@ function learningStats(paths) {
   const displayBits = prioritizeStudyItems(bits
     .map((bit) => enrichLearningBitForDisplay(bit, { sourceLinks }))
     .map((bit) => withReviewState({ ...bit, displayKey: bitKey(bit) }, bitReviews.get(bitKey(bit)))));
-  const today = new Date().toISOString().slice(0, 10);
+  const today = formatLocalDateKey(new Date());
   const bestPlan = selectBestLearningPlan(plans);
   const planSources = sourcePagesForPlan(bestPlan, sourceLinks);
   const dueCards = fallbackCards.filter((card) => isDueForStudy(card, today)).slice(0, 10);
@@ -453,7 +454,7 @@ function latestReviews(reviews, type, idKey) {
 }
 
 function withReviewState(item, event) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = formatLocalDateKey(new Date());
   const next = String(event?.nextReviewAt || "").slice(0, 10);
   const reviewed = Boolean(event);
   const due = !reviewed || !next || next <= today || (item.due && item.due <= today);

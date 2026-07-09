@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { formatLocalDateTime, resolveLocalTimeZone } from "./time.mjs";
+import { formatLocalDateKey, formatLocalDateTime, resolveLocalTimeZone } from "./time.mjs";
 import { deleteArchivedItems } from "./archive-delete.mjs";
 import { restoreArchivedItems } from "./archive-restore.mjs";
 import { clearBehaviorData, exportBehaviorData, trackBehaviorEvent, updateBehaviorSettings } from "./behavior-tracker.mjs";
@@ -2010,7 +2010,7 @@ function fastLearningStats({ bits, cards, reviews, plans, sourceLinks }) {
   const allBits = prioritizeFastStudyItems(bits
     .map((bit) => enrichLearningBitForDisplay(bit, { sourceLinks }))
     .map((bit) => fastReviewState({ ...bit, displayKey: fastBitKey(bit) }, bitReviews.get(fastBitKey(bit)))));
-  const today = new Date().toISOString().slice(0, 10);
+  const today = formatLocalDateKey(new Date(), { timeZone: config.timeZone });
   const bestPlan = selectFastBestLearningPlan(plans);
   const planSources = fastSourcePagesForPlan(bestPlan, sourceLinks);
   return {
@@ -5911,11 +5911,21 @@ function renderHtml() {
     function openLearningPracticeWindow(button) {
       const state = selectedLearningVault();
       const stats = state?.learningStats || {};
-      const cards = (stats.studyQueueCards?.length ? stats.studyQueueCards : stats.allCards || [])
-        .filter((card) => card.displayDemoted !== true)
+      const allCardItems = (stats.allCards || []).filter((card) => card.displayDemoted !== true);
+      const allBitItems = stats.allBits || [];
+      const filteredCardItems = learningCardsFilter ? filterLearningItems(allCardItems, learningCardsFilter) : allCardItems;
+      const filteredBitItems = learningCardsFilter ? filterLearningItems(allBitItems, learningCardsFilter) : allBitItems;
+      const dueFilteredCards = filteredCardItems.filter((card) => !card.displayRead || card.displayReviewDue);
+      const dueFilteredBits = filteredBitItems.filter((bit) => !bit.displayRead || bit.displayReviewDue);
+      const queueCards = learningCardsFilter
+        ? (dueFilteredCards.length ? dueFilteredCards : filteredCardItems)
+        : (stats.studyQueueCards?.length ? stats.studyQueueCards : dueFilteredCards.length ? dueFilteredCards : allCardItems);
+      const queueBits = learningCardsFilter
+        ? (dueFilteredBits.length ? dueFilteredBits : filteredBitItems)
+        : (stats.studyQueueBits?.length ? stats.studyQueueBits : dueFilteredBits.length ? dueFilteredBits : allBitItems);
+      const cards = queueCards
         .map((card) => ({ kind: "card", key: card.displayKey || card.id || "", item: card }));
-      const bits = (stats.studyQueueBits?.length ? stats.studyQueueBits : stats.allBits || [])
-        .map((bit) => ({ kind: "bit", key: bit.displayKey || bit.id || "", item: bit }));
+      const bits = queueBits.map((bit) => ({ kind: "bit", key: bit.displayKey || bit.id || "", item: bit }));
       learningPracticeQueue = [...cards, ...bits].filter((entry, index, list) =>
         entry.key && list.findIndex((candidate) => candidate.kind === entry.kind && candidate.key === entry.key) === index
       );
@@ -5947,7 +5957,7 @@ function renderHtml() {
       const state = selectedLearningVault();
       const entry = learningPracticeQueue[learningPracticeIndex];
       const plan = state?.learningStats?.bestPlan || {};
-      learningPracticeSummary.textContent = (plan.title ? "Plan: " + plan.title + ". " : "") + "Item " + (learningPracticeQueue.length ? learningPracticeIndex + 1 : 0) + " of " + learningPracticeQueue.length + ". Due and unread items appear first.";
+      learningPracticeSummary.textContent = (plan.title ? "Plan: " + plan.title + ". " : "") + "Item " + (learningPracticeQueue.length ? learningPracticeIndex + 1 : 0) + " of " + learningPracticeQueue.length + ". Due and unread items appear first." + (learningCardsFilter ? " Filter: " + (learningCardsFilter.label || learningCardsFilter.topic || learningCardsFilter.sourcePage || "selected cards") + "." : "");
       if (!entry) {
         learningPracticeBody.innerHTML = '<div class="learning-practice-empty">No unread or due cards/bits are ready. Process another source or clear a filter, then try again.</div>';
         return;
@@ -7712,7 +7722,7 @@ function renderHtml() {
           '</section>'
         ).join("") : '<div class="learning-empty-state">No cards yet. Autopilot will create concept-specific cards after a provider successfully processes sources.</div>') + '</div>' +
         '<div class="learning-bit-explorer"><h4>Recent learning bits</h4>' + (bits.length ? bits.map((bit) =>
-          '<details class="learning-scroll-target" data-learning-bit="' + escapeHtml(bit.displayKey || bit.id || bit.title || "") + '"><summary>' + escapeHtml(bit.title || bit.displayTopic || bit.type || "Learning bit") + (bit.displayRead ? " · read" : "") + '</summary><p>' + escapeHtml(bit.body || "") + '</p><div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(bit.level || "core") + '</span>' + (bit.displayRead ? '<span class="learning-chip learning-study-card-read">Read</span>' : '') + '<button class="learning-chip capture" type="button" data-learning-target="source-page" data-vault="' + escapeHtml(state.vault || "") + '" data-source-page="' + escapeHtml(bit.sourcePage || "") + '">' + escapeHtml(bit.displayEvidence || bit.sourcePage || "source pending") + '</button></div><div class="learning-action-row"><button class="secondary" type="button" data-learning-action="mark-bit-read" data-bit-id="' + escapeHtml(bit.displayKey || bit.id || "") + '" data-bit-title="' + escapeHtml(bit.title || "") + '" data-bit-topic="' + escapeHtml(bit.displayTopic || bit.learningFocus || "") + '" data-source-page="' + escapeHtml(bit.sourcePage || "") + '">Mark bit read</button><button class="secondary" type="button" data-learning-action="open-practice" data-practice-type="bit" data-practice-id="' + escapeHtml(bit.displayKey || bit.id || "") + '">Study bit</button></div></details>'
+          '<details class="learning-scroll-target" data-learning-bit="' + escapeHtml(bit.displayKey || bit.id || bit.title || "") + '"><summary>' + escapeHtml(bit.title || bit.displayTopic || bit.type || "Learning bit") + (bit.displayRead ? " · read" : "") + '</summary><p>' + escapeHtml(bit.body || "") + '</p><div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(bit.level || "core") + '</span>' + (bit.displayRead ? '<span class="learning-chip learning-study-card-read">Read</span>' : '') + '<button class="learning-chip capture" type="button" data-learning-target="source-page" data-vault="' + escapeHtml(state.vault || "") + '" data-source-page="' + escapeHtml(bit.sourcePage || "") + '">' + escapeHtml(bit.displayEvidence || bit.sourcePage || "source pending") + '</button></div><div class="learning-action-row"><button class="secondary" type="button" data-learning-action="mark-bit-read" data-bit-id="' + escapeHtml(bit.displayKey || bit.id || "") + '" data-bit-title="' + escapeHtml(bit.title || "") + '" data-bit-topic="' + escapeHtml(bit.displayTopic || bit.learningFocus || "") + '" data-source-page="' + escapeHtml(bit.sourcePage || "") + '">Mark bit read</button><button class="secondary" type="button" data-learning-action="open-practice" data-practice-type="bit" data-practice-id="' + escapeHtml(bit.displayKey || bit.id || "") + '">Study / edit bit</button></div></details>'
         ).join("") : '<p class="muted">No recent bits yet. Processed sources will appear here automatically.</p>') + '</div>' +
       '</section>';
     }
@@ -7754,7 +7764,7 @@ function renderHtml() {
           '<div class="learning-chip-row"><span class="learning-chip ' + escapeHtml(kind) + '">' + escapeHtml(card.displayType || card.type || "card") + '</span><span class="learning-chip bit">' + escapeHtml(card.displayTopic || card.learningFocus || "Key concept") + '</span>' + (card.displayRead ? '<span class="learning-chip learning-study-card-read">Read</span>' : '') + '</div>' +
           '<h4>' + escapeHtml(card.displayPrompt || card.front || card.cloze || "Recall prompt") + '</h4>' +
           (card.hint ? '<p class="muted">' + escapeHtml(card.hint) + '</p>' : '') +
-          '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="flip-card" data-card-id="' + escapeHtml(card.displayKey || card.id || "") + '" data-card-prompt="' + escapeHtml(card.displayPrompt || card.front || card.cloze || "") + '" data-card-topic="' + escapeHtml(card.displayTopic || card.learningFocus || "") + '" data-source-page="' + escapeHtml(card.sourcePage || "") + '">Show answer</button><button class="secondary" type="button" data-learning-action="open-practice" data-practice-type="card" data-practice-id="' + escapeHtml(card.displayKey || card.id || "") + '">Practice</button></div></div>' +
+          '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="flip-card" data-card-id="' + escapeHtml(card.displayKey || card.id || "") + '" data-card-prompt="' + escapeHtml(card.displayPrompt || card.front || card.cloze || "") + '" data-card-topic="' + escapeHtml(card.displayTopic || card.learningFocus || "") + '" data-source-page="' + escapeHtml(card.sourcePage || "") + '">Show answer</button><button class="secondary" type="button" data-learning-action="open-practice" data-practice-type="card" data-practice-id="' + escapeHtml(card.displayKey || card.id || "") + '">Practice / edit</button></div></div>' +
         '<div class="learning-study-card-face back"><h4>Answer</h4><p>' + escapeHtml(card.back || card.explanation || "No answer text saved yet.") + '</p>' +
           '<div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(card.learningFocus || card.displayTopic || "concept") + '</span><button class="learning-chip capture learning-evidence-label" type="button" title="' + escapeHtml(card.sourcePage || card.displayEvidence || "") + '" data-learning-target="source-page" data-vault="' + escapeHtml(card.sourceVault || "") + '" data-source-page="' + escapeHtml(card.sourcePage || "") + '">' + escapeHtml(shortLearningSourceLabel(card.displayEvidence || card.sourcePage || "No source link")) + '</button></div>' +
           (card.displayQuality === "repaired" ? '<small>Prompt clarified for display; stored card was not rewritten.</small>' : '') +
