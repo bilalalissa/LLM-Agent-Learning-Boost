@@ -16,6 +16,18 @@ Startup Learning backfill is a background worker. It may repair older source pag
 
 If a Local sidebar topic opens with a cached summary instead of full page content, the app process could not read that live vault file quickly enough. The fallback uses the cached topic title, path, summary, type, and updated date so navigation still works. Grant `/Applications/LLM Agent Learning Boost.app` access to the vault/iCloud folder in macOS Privacy settings and make sure the file is downloaded locally. The sidebar will refresh automatically on the next bounded topic read.
 
+## Time Or Date Looks Wrong
+
+Learning Boost stores machine timestamps as ISO UTC, but all user-facing dates and times should display in Regina/Saskatchewan time by default: `America/Regina`.
+
+The macOS app passes this timezone to the local Node server when launched from Finder. You can override it in `config.env` if needed:
+
+```bash
+LEARNING_BOOST_TIME_ZONE=America/Regina
+```
+
+If you still see an unexpected day or time, rebuild/reinstall the app and relaunch it from `/Applications/LLM Agent Learning Boost.app`. File lists, archive lists, topics, ingest status messages, learning timelines, event timestamps, and source logs use this display timezone.
+
 ## Local AI Unavailable
 
 Open the Provider tab. For `local_auto`, check:

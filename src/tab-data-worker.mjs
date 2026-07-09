@@ -12,6 +12,7 @@ import { listVaults, readIfExists, vaultName } from "./vaults.mjs";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { formatLocalDateTime } from "./time.mjs";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -286,9 +287,7 @@ function parseLocalDateMs(value) {
 
 function formatLocalDate(ms) {
   if (!ms) return "";
-  const date = new Date(ms);
-  const pad = (value) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())} ${Intl.DateTimeFormat().resolvedOptions().timeZone || ""}`;
+  return formatLocalDateTime(ms);
 }
 
 function isArchiveRel(value) {

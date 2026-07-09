@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { formatLocalDateTime } from "./time.mjs";
 import { isIngestibleRawFile, listVaults, readIfExists, vaultName } from "./vaults.mjs";
 
 export function listFileHistory(config) {
@@ -257,21 +258,5 @@ function walk(dir, result, options = {}) {
 }
 
 function formatLocal(ms) {
-  const date = new Date(ms);
-  const zone = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" })
-    .formatToParts(date)
-    .find((part) => part.type === "timeZoneName")?.value || "";
-  return [
-    date.getFullYear(),
-    pad(date.getMonth() + 1),
-    pad(date.getDate())
-  ].join("-") + " " + [
-    pad(date.getHours()),
-    pad(date.getMinutes()),
-    pad(date.getSeconds())
-  ].join(":") + (zone ? ` ${zone}` : "");
-}
-
-function pad(value) {
-  return String(value).padStart(2, "0");
+  return formatLocalDateTime(ms);
 }

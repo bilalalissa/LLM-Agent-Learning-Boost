@@ -2,12 +2,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseProviderPriority } from "./local-ai.mjs";
+import { DEFAULT_LOCAL_TIME_ZONE, resolveLocalTimeZone } from "./time.mjs";
 
 export const ROOT = process.cwd();
 
 export const PROVIDER_CONFIG_KEYS = [
   "AUTO_INGEST_ON_START",
   "WATCH_INTERVAL_MS",
+  "LEARNING_BOOST_TIME_ZONE",
   "AI_PROVIDER_TIMEOUT_MS",
   "AI_ACCESS_METHOD",
   "DEFAULT_AI_PROVIDER",
@@ -66,6 +68,7 @@ const PROVIDER_SECRET_KEY_SET = new Set(PROVIDER_SECRET_KEYS);
 const PROVIDER_DEFAULTS = {
   AUTO_INGEST_ON_START: "true",
   WATCH_INTERVAL_MS: "5000",
+  LEARNING_BOOST_TIME_ZONE: DEFAULT_LOCAL_TIME_ZONE,
   AI_PROVIDER_TIMEOUT_MS: "60000",
   AI_ACCESS_METHOD: "local_first",
   DEFAULT_AI_PROVIDER: "local_auto",
@@ -185,6 +188,7 @@ export function getConfig() {
     accessMethod: env.AI_ACCESS_METHOD || "api_key",
     vaultsRoot: path.resolve(ROOT, expandTilde(env.VAULTS_ROOT || ".")),
     watchIntervalMs: Number(env.WATCH_INTERVAL_MS || 5000),
+    timeZone: resolveLocalTimeZone(env.LEARNING_BOOST_TIME_ZONE || env.LLM_WIKI_TIME_ZONE || env.TZ),
     autoIngestOnStart: env.AUTO_INGEST_ON_START !== "false",
     providerTimeoutMs: Number(env.AI_PROVIDER_TIMEOUT_MS || 60000),
     ingestMaxChars: Number(env.INGEST_MAX_CHARS || 60000),

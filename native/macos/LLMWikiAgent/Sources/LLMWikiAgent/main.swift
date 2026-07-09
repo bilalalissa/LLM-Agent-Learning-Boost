@@ -785,6 +785,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         var env = ProcessInfo.processInfo.environment
         env["LLM_WIKI_ENV_FILE"] = configURL.path
+        env["LEARNING_BOOST_TIME_ZONE"] = env["LEARNING_BOOST_TIME_ZONE"] ?? "America/Regina"
+        env["TZ"] = env["TZ"] ?? "America/Regina"
         env["PATH"] = expandedPath()
         process.environment = env
         process.terminationHandler = { [weak self, weak process] terminatedProcess in

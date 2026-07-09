@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { formatLocalDateTime } from "./time.mjs";
 import { execFileSync } from "node:child_process";
 import { createProvider } from "./provider.mjs";
 import {
@@ -1211,22 +1212,7 @@ Next:
 }
 
 function formatLocal(date) {
-  const zone = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" })
-    .formatToParts(date)
-    .find((part) => part.type === "timeZoneName")?.value || "";
-  return [
-    date.getFullYear(),
-    pad(date.getMonth() + 1),
-    pad(date.getDate())
-  ].join("-") + " " + [
-    pad(date.getHours()),
-    pad(date.getMinutes()),
-    pad(date.getSeconds())
-  ].join(":") + (zone ? ` ${zone}` : "");
-}
-
-function pad(value) {
-  return String(value).padStart(2, "0");
+  return formatLocalDateTime(date);
 }
 
 function bulletList(items) {

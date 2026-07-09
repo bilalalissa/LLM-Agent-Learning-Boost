@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { formatLocalDateTime, resolveLocalTimeZone } from "./time.mjs";
 import { deleteArchivedItems } from "./archive-delete.mjs";
 import { restoreArchivedItems } from "./archive-restore.mjs";
 import { clearBehaviorData, exportBehaviorData, trackBehaviorEvent, updateBehaviorSettings } from "./behavior-tracker.mjs";
@@ -63,6 +64,7 @@ import { collectWatchFolderResources } from "./source-collectors/watch-folder-co
 import { listVaults, readIfExists, vaultName } from "./vaults.mjs";
 
 let config = getConfig();
+process.env.LEARNING_BOOST_TIME_ZONE = config.timeZone || resolveLocalTimeZone();
 let provider = createProvider(config);
 const localAiRouterSupervisor = createLocalAiRouterSupervisor({
   getConfig: () => config,
@@ -1432,7 +1434,8 @@ function reloadRuntimeConfig() {
     vault: "",
     detail: "Config reloaded."
   };
-  lastIngestMessage = reportStatus(`Config reloaded from ${config.configFile} at ${formatLocal(new Date())}.`);
+    process.env.LEARNING_BOOST_TIME_ZONE = config.timeZone || resolveLocalTimeZone();
+    lastIngestMessage = reportStatus(`Config reloaded from ${config.configFile} at ${formatLocal(new Date())}.`);
   ensureAutoIngestScheduler();
 }
 
@@ -4972,6 +4975,7 @@ function renderHtml() {
     </div>
   </div>
   <script>
+    const APP_TIME_ZONE = ${JSON.stringify(config.timeZone || resolveLocalTimeZone())};
     const form = document.querySelector("#form");
     const input = document.querySelector("#question");
     const button = document.querySelector("#ask");
@@ -7178,7 +7182,18 @@ function renderHtml() {
     }
 
     function dateKey(date) {
-      return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-");
+      try {
+        const parts = new Intl.DateTimeFormat("en-CA", {
+          timeZone: APP_TIME_ZONE,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit"
+        }).formatToParts(date);
+        const part = (type) => parts.find((item) => item.type === type)?.value || "";
+        return [part("year"), part("month"), part("day")].filter(Boolean).join("-");
+      } catch {
+        return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-");
+      }
     }
 
     function renderLearningStepByStepFlow(state, context) {
@@ -8554,7 +8569,7 @@ function renderHtml() {
       if (!value) return "";
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return String(value).slice(0, 16);
-      return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      return date.toLocaleString([], { timeZone: APP_TIME_ZONE, month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
     }
 
     function eventLabel(event) {
@@ -11128,18 +11143,7 @@ function serverEscapeHtml(value) {
 }
 
 function formatLocal(date) {
-  const zone = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" })
-    .formatToParts(date)
-    .find((part) => part.type === "timeZoneName")?.value || "";
-  return [
-    date.getFullYear(),
-    pad(date.getMonth() + 1),
-    pad(date.getDate())
-  ].join("-") + " " + [
-    pad(date.getHours()),
-    pad(date.getMinutes()),
-    pad(date.getSeconds())
-  ].join(":") + (zone ? ` ${zone}` : "");
+  return formatLocalDateTime(date, { timeZone: config.timeZone });
 }
 
 function pad(value) {
