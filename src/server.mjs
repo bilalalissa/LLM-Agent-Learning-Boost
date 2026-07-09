@@ -4081,8 +4081,8 @@ function renderHtml() {
     .learning-type-legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
     .learning-type-legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
     .learning-type-legend span::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--kind, var(--accent)); border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 60%, var(--line)); }
-    .learning-action-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
-    .learning-action-row button, .learning-button-row button { flex: 0 1 auto; min-width: min(180px, 100%); max-width: 100%; white-space: normal; overflow-wrap: break-word; word-break: normal; text-align: center; }
+    .learning-action-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; min-width: 0; }
+    .learning-action-row button, .learning-button-row button { flex: 0 1 auto; min-width: min(180px, 100%); max-width: 100%; white-space: normal; overflow-wrap: break-word; word-break: keep-all; text-align: center; }
     .learning-card.danger { border-color: color-mix(in srgb, #dc2626 45%, var(--line)); }
     .learning-card.warning { border-color: color-mix(in srgb, #f59e0b 55%, var(--line)); }
     .learning-flowchart { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(128px, 100%), 1fr)); gap: 8px; align-items: stretch; margin: 10px 0 14px; }
@@ -4187,11 +4187,13 @@ function renderHtml() {
     .learning-flow-lane h4 { margin: 0 0 8px; font-size: 15px; }
     .learning-flow-lane ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; }
     .learning-flow-lane li { display: block; min-width: 0; }
-    .learning-flow-lane .learning-flow-step-button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: break-word; align-items: start; line-height: 1.25; }
+    .learning-flow-lane .learning-flow-step-button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: keep-all; overflow-wrap: break-word; align-items: start; line-height: 1.25; }
     .learning-flow-lane .learning-flow-step-button > span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--kind, var(--accent)) 78%, #fff); color: #fff; font-weight: 800; font-size: 12px; }
     .learning-flow-lane .learning-flow-step-button > div { min-width: 0; display: grid; gap: 2px; }
     .learning-flow-lane strong { display: block; font-size: 13px; }
     .learning-flow-lane em { display: block; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: break-word; }
+    .learning-flow-lane .learning-action-row { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+    .learning-flow-lane .learning-action-row button { width: 100%; min-width: 0; overflow-wrap: normal; word-break: keep-all; }
     .learning-plan-summary { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
     .learning-plan-summary strong { font-size: 16px; }
     .learning-plan-summary span:not(.learning-chip) { color: var(--muted); }
@@ -4385,7 +4387,7 @@ function renderHtml() {
           </tr>
         </thead>
         <tbody id="files-body">
-          <tr><td colspan="6" class="muted">Loading...</td></tr>
+          <tr><td colspan="7" class="muted">Loading...</td></tr>
         </tbody>
       </table>
     </section>
@@ -4418,7 +4420,7 @@ function renderHtml() {
           </tr>
         </thead>
         <tbody id="archives-body">
-          <tr><td colspan="6" class="muted">Loading...</td></tr>
+          <tr><td colspan="7" class="muted">Loading...</td></tr>
         </tbody>
       </table>
     </section>
@@ -5844,7 +5846,7 @@ function renderHtml() {
     }
 
     async function loadFiles(options = {}) {
-      if (!filesCache.length) filesBody.innerHTML = tabStatusRow(6, "Loading vault files...", "files");
+      if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Loading vault files...", "files");
       try {
         const data = await fetchJsonWithTimeout("/api/files" + (options.refresh ? "?refresh=1" : ""));
         const nextFiles = data.files || [];
@@ -5862,9 +5864,10 @@ function renderHtml() {
           if (filesCache.length) {
             renderFilesTable();
           } else {
-            filesBody.innerHTML = tabStatusRow(6, tabStatusMessage(data, "Vault files are still being indexed."));
+            filesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Vault files are still being indexed."));
           }
-          if (filesLoadPolls <= 18) setTimeout(() => loadFiles(), filesLoadPolls <= 8 ? 1400 : 8000);
+          if (filesLoadPolls <= 4) setTimeout(() => loadFiles(), filesLoadPolls <= 2 ? 1400 : 5000);
+          else if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Vault files are still indexing in the background. The table will update when rows are available.");
           return;
         }
         filesLoadPolls = 0;
@@ -5876,9 +5879,9 @@ function renderHtml() {
         filesLoadPolls = 9;
         if (filesCache.length) {
           renderFilesTable();
-          filesBody.insertAdjacentHTML("afterbegin", tabStatusRow(6, "Showing cached files. Automatic refresh failed: " + error.message));
+          filesBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached files. Automatic refresh failed: " + error.message));
         } else {
-          filesBody.innerHTML = tabStatusRow(6, error.message);
+          filesBody.innerHTML = tabStatusRow(7, error.message);
         }
       }
     }
@@ -5890,12 +5893,12 @@ function renderHtml() {
         .filter((file) => !filesStatusFilter.value || file.status === filesStatusFilter.value), "files");
       if (!filesCache.length) {
         tableSelection.files.visibleKeys = [];
-        filesBody.innerHTML = '<tr><td colspan="6" class="muted">No processed files yet.</td></tr>';
+        filesBody.innerHTML = '<tr><td colspan="7" class="muted">No processed files yet.</td></tr>';
         return;
       }
       if (!files.length) {
         tableSelection.files.visibleKeys = [];
-        filesBody.innerHTML = '<tr><td colspan="6" class="muted">No files match the current filters.</td></tr>';
+        filesBody.innerHTML = '<tr><td colspan="7" class="muted">No files match the current filters.</td></tr>';
         return;
       }
       tableSelection.files.visibleKeys = files.map((file) => sourceSelectionKey(file));
@@ -6164,7 +6167,7 @@ function renderHtml() {
     }
 
     async function loadArchives(options = {}) {
-      if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(6, "Loading archive history...", "archives");
+      if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Loading archive history...", "archives");
       try {
         const data = await fetchJsonWithTimeout("/api/archives" + (options.refresh ? "?refresh=1" : ""));
         const nextArchives = data.archives || [];
@@ -6182,9 +6185,10 @@ function renderHtml() {
           if (archivesCache.length) {
             renderArchivesTable();
           } else {
-            archivesBody.innerHTML = tabStatusRow(6, tabStatusMessage(data, "Archive history is still being indexed."));
+            archivesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Archive history is still being indexed."));
           }
-          if (archivesLoadPolls <= 18) setTimeout(() => loadArchives(), archivesLoadPolls <= 8 ? 1400 : 8000);
+          if (archivesLoadPolls <= 4) setTimeout(() => loadArchives(), archivesLoadPolls <= 2 ? 1400 : 5000);
+          else if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Archive history is still indexing in the background. The table will update when rows are available.");
           return;
         }
         archivesLoadPolls = 0;
@@ -6196,9 +6200,9 @@ function renderHtml() {
         archivesLoadPolls = 9;
         if (archivesCache.length) {
           renderArchivesTable();
-          archivesBody.insertAdjacentHTML("afterbegin", tabStatusRow(6, "Showing cached archives. Automatic refresh failed: " + error.message));
+          archivesBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached archives. Automatic refresh failed: " + error.message));
         } else {
-          archivesBody.innerHTML = tabStatusRow(6, error.message);
+          archivesBody.innerHTML = tabStatusRow(7, error.message);
         }
       }
     }
@@ -6210,12 +6214,12 @@ function renderHtml() {
         .filter((item) => !archivesKindFilter.value || item.kind === archivesKindFilter.value), "archives");
       if (!archivesCache.length) {
         tableSelection.archives.visibleKeys = [];
-        archivesBody.innerHTML = '<tr><td colspan="6" class="muted">No archived sources yet.</td></tr>';
+        archivesBody.innerHTML = '<tr><td colspan="7" class="muted">No archived sources yet.</td></tr>';
         return;
       }
       if (!archives.length) {
         tableSelection.archives.visibleKeys = [];
-        archivesBody.innerHTML = '<tr><td colspan="6" class="muted">No archived items match the current filters.</td></tr>';
+        archivesBody.innerHTML = '<tr><td colspan="7" class="muted">No archived items match the current filters.</td></tr>';
         return;
       }
       tableSelection.archives.visibleKeys = archives.map((item) => archiveSelectionKey(item));
@@ -6462,7 +6466,8 @@ function renderHtml() {
           } else {
             topicsBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Topics are still being indexed."));
           }
-          if (topicsLoadPolls <= 18) setTimeout(() => loadTopics(), topicsLoadPolls <= 8 ? 1400 : 8000);
+          if (topicsLoadPolls <= 4) setTimeout(() => loadTopics(), topicsLoadPolls <= 2 ? 1400 : 5000);
+          else if (!topicsCache.length) topicsBody.innerHTML = tabStatusRow(7, "Topics are still indexing in the background. The table will update when rows are available.");
           return;
         }
         topicsLoadPolls = 0;

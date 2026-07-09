@@ -103,13 +103,13 @@ The collector queues best-effort sources for common formats instead of silently 
 - Images: `.png`, `.jpg`, `.jpeg`, `.jfif`, `.gif`, `.webp`, `.avif`, `.bmp`, `.tif`, `.tiff`, `.heic`, `.heif`, `.svg`, `.ico`.
 - Media and archives: `.mp3`, `.m4a`, `.m4b`, `.wav`, `.aiff`, `.aac`, `.flac`, `.ogg`, `.opus`, `.amr`, `.caf`, `.wma`, `.mp4`, `.mov`, `.m4v`, `.webm`, `.mkv`, `.avi`, `.wmv`, `.flv`, `.mpg`, `.mpeg`, `.3gp`, `.m2ts`, `.mts`, `.zip`.
 
-When full extraction is not available, the item can still become a pending media or metadata source with a clear limitation. It is not marked fully processed until extraction and provider analysis actually succeed.
+When full extraction is not available, the item can still become a pending document, media, or metadata source with a clear limitation. It is not marked fully processed until extraction and provider analysis actually succeed. A PDF without extracted page text, an office/iWork file without readable text, or a ZIP that only produced a filename listing stays `pending_content`; Learning Boost does not generate learning cards or plans from that metadata.
 
 Unsupported files, missing folders, unreadable files, files already in `raw/processed`, and files in capture output asset folders are skipped with a visible grouped reason in scan status. Instead of repeating `Unsupported file type` hundreds of times, the UI groups skipped files by collector, extension, reason, count, and sample filenames.
 
 Watch-folder dedupe uses local path, file size, and modified time. Repeated scans do not keep re-adding the same file. In the default `ready_for_ingest` mode, supported files in an explicitly selected watch folder are approved for local queueing into `raw/input/`. In `needs_review` mode, the file is recorded in ResourceInbox but is not copied into `raw/input/` until approved later.
 
-Copy failures, including iCloud or macOS permission errors such as `EPERM`, are recorded on that one ResourceInbox item. They do not stop the entire app or block other tabs from loading. Fix the file permission, move the file to a readable local folder, or choose a different watch folder, then scan again.
+Copy failures, including iCloud or macOS permission errors such as `EPERM`, are recorded on that one ResourceInbox item or skipped group. They do not stop the entire app or block Files, Archive, Topics, or Learning from loading. Fix the file permission, move the file to a readable local folder, or choose a different watch folder, then scan again.
 
 ## Screenshot and Media Privacy
 

@@ -61,6 +61,36 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
     vault: vaultName(vaultPath),
     allowBaselineFallback: config.allowBaselineAnalysis === true || config.ingestAllowBaselineFallback === true
   };
+  if (sourceRequiresExtractedContent(processedSource) && !hasMeaningfulExtractedContent(processedSource)) {
+    const analysis = pendingFileAnalysis(processedSource, analysisInput);
+    ensureDir(path.join(vaultPath, "wiki/sources"));
+    ensureDir(path.join(vaultPath, "raw/processed"));
+    fs.writeFileSync(path.join(vaultPath, sourceRel), renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource }));
+    updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages: [] });
+    appendLog(vaultPath, {
+      date,
+      sourceRel,
+      sourcePath,
+      processedRel,
+      sourceTitle,
+      conceptPages: [],
+      receivedAt,
+      sourceKind: `${processedSource.kind || "source"} pending_content`
+    });
+    const processedPath = path.join(vaultPath, processedRel);
+    if (path.resolve(sourcePath) !== path.resolve(processedPath)) {
+      fs.renameSync(sourcePath, processedPath);
+    }
+    return {
+      vault: vaultName(vaultPath),
+      source: path.relative(vaultPath, sourcePath),
+      sourcePage: sourceRel,
+      processed: processedRel,
+      conceptPages: [],
+      learning: { cardsCreated: 0, bitsCreated: 0, pendingContent: true },
+      pendingContent: true
+    };
+  }
   const analysis = await analyzeSource(provider, analysisInput);
 
   ensureDir(path.join(vaultPath, "wiki/sources"));
@@ -448,6 +478,39 @@ function mediaRequiresExtractedContent(kind) {
   return new Set(["image", "audio", "video"]).has(String(kind || "").toLowerCase());
 }
 
+function sourceRequiresExtractedContent(processedSource = {}) {
+  return new Set(["pdf", "document"]).has(String(processedSource.kind || "").toLowerCase());
+}
+
+function pendingFileAnalysis(processedSource = {}, input = {}) {
+  const kind = processedSource.kind || "source";
+  const notes = [
+    ...(processedSource.processingNotes || []),
+    "Content extraction is pending; no Learning Boost cards, bits, concepts, or plans were created from metadata alone."
+  ];
+  return {
+    summary: `${kind} source preserved for local review. Learning analysis is pending because readable text could not be extracted with the currently available local tools.`,
+    language: "unknown",
+    key_points: [
+      `Preserved source file: ${input.sourcePath || processedSource.metadata?.path || input.sourceTitle || "source"}.`,
+      "No source claims were generated because the document content was not extracted."
+    ],
+    concepts: [],
+    entities: [],
+    open_questions: [{
+      question: "What does this document contain?",
+      answer: "Pending. Install or configure a local extractor, add a text transcript/summary, or convert the file to a readable text/PDF format, then reprocess the source."
+    }],
+    contradictions: [],
+    source_learning_questions: [],
+    open_learning_questions: [],
+    processing_notes: uniqueStrings(notes),
+    analyzed: false,
+    status: "pending_content",
+    learning_boost: null
+  };
+}
+
 function hasMeaningfulExtractedContent(processedSource = {}) {
   if (processedSource.contentExtracted === true) return true;
   const status = String(processedSource.extractionStatus || "");
@@ -455,6 +518,8 @@ function hasMeaningfulExtractedContent(processedSource = {}) {
   const text = String(processedSource.text || "").trim();
   if (!text) return false;
   if (/preserved as a local (image|audio|video) asset/i.test(text)) return false;
+  if (/preserved for local review\. Text extraction is unavailable/i.test(text)) return false;
+  if (/PDF text extraction is unavailable/i.test(text)) return false;
   if (/Visual content was not analyzed|Audio content was not transcribed|Visual\/audio content was not analyzed/i.test(text)) return false;
   return text.replace(/\s+/g, " ").length >= 40;
 }
@@ -879,7 +944,7 @@ ${analysis.summary}
 
 ${bulletList(analysis.key_points)}
 
-${renderLearningBoostSection(analysis.learning_boost)}
+${analysis.learning_boost ? renderLearningBoostSection(analysis.learning_boost) : "## Learning Boost\n\nNo learning cards or bits were created because source content extraction is still pending."}
 
 ## Source Processing
 

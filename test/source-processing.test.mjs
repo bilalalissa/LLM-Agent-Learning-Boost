@@ -252,6 +252,32 @@ test("media ingest preserves unextracted assets without metadata-only learning c
   assert.equal(fs.existsSync(source), false);
 });
 
+test("document ingest preserves unextracted PDFs without metadata-only learning cards", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "input", "scanned.pdf");
+  fs.writeFileSync(source, "%PDF-1.4\n% fake scanned pdf without extractable text\n");
+  let providerCalled = false;
+
+  const result = await ingestFile(vault, source, config(root), {
+    async complete() {
+      providerCalled = true;
+      throw new Error("provider should not analyze unextracted pdf metadata");
+    }
+  });
+  const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+  const paths = learningPaths(vault);
+
+  assert.equal(providerCalled, false);
+  assert.equal(result.pendingContent, true);
+  assert.match(page, /status: pending_content/);
+  assert.match(page, /Content extraction is pending/);
+  assert.match(page, /No learning cards or bits were created/);
+  assert.equal(fs.existsSync(path.join(paths.dir, "cards.jsonl")), false);
+  assert.equal(fs.existsSync(path.join(paths.dir, "bits.jsonl")), false);
+  assert.equal(fs.existsSync(path.join(vault, result.processed)), true);
+  assert.equal(fs.existsSync(source), false);
+});
+
 test("ingestFile leaves text sources pending when provider is unavailable", async () => {
   const { root, vault } = makeVault();
   const source = path.join(vault, "raw", "inbox", "provider-down.md");

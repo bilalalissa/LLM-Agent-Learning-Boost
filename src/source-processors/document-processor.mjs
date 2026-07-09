@@ -15,6 +15,7 @@ export function processDocumentSource(file, options = {}) {
   const ext = path.extname(file).toLowerCase();
   const notes = [];
   let text = "";
+  let extracted = false;
   if (ext === ".rtf") text = readRtf(file, notes);
   else if (ext === ".docx") text = unzipXml(file, ["word/document.xml"], notes);
   else if (ext === ".pptx") text = unzipXml(file, ["ppt/slides/slide*.xml"], notes);
@@ -24,6 +25,7 @@ export function processDocumentSource(file, options = {}) {
   else if (ext === ".eml" || ext === ".msg" || ext === ".ics") text = readTextLike(file, notes);
   else if (ext === ".doc" || ext === ".ppt" || ext === ".xls") text = convertWithTextutil(file, notes);
   else if (ext === ".zip") text = zipListing(file, notes);
+  extracted = hasMeaningfulText(text) && !/^ZIP archive with \d+ listed item\(s\)\./i.test(text);
   if (!text.trim()) {
     text = `${path.basename(file)} preserved for local review. Text extraction is unavailable without optional local document tools.`;
     notes.push(`Document text extraction fallback used for ${ext}.`);
@@ -33,6 +35,8 @@ export function processDocumentSource(file, options = {}) {
     kind: "document",
     title: path.basename(file, ext),
     text: text.slice(0, maxChars),
+    contentExtracted: extracted,
+    extractionStatus: extracted ? "extracted" : "pending_text_extraction",
     extension: ext,
     metadata: { path: file, bytes: fs.statSync(file).size },
     evidence: [path.basename(file)],
@@ -117,4 +121,8 @@ function xmlToText(xml) {
     .replace(/&#39;/g, "'")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function hasMeaningfulText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().length >= 40;
 }

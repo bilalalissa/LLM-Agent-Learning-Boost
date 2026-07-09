@@ -399,19 +399,23 @@ function preserveLocalFile(vaultPath, file, sourceType, input) {
   const shouldCopy = ["screenshot", "voice_memo"].includes(sourceType);
   if (!shouldCopy) return "";
   const dir = path.join(vaultPath, "raw", "assets", "resource-capture");
-  fs.mkdirSync(dir, { recursive: true });
-  const parsed = path.parse(text);
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  let name = `${stamp}--${slugify(parsed.name)}${parsed.ext.toLowerCase()}`;
-  let target = path.join(dir, name);
-  let index = 2;
-  while (fs.existsSync(target)) {
-    name = `${stamp}--${slugify(parsed.name)}-${index}${parsed.ext.toLowerCase()}`;
-    target = path.join(dir, name);
-    index += 1;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const parsed = path.parse(text);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    let name = `${stamp}--${slugify(parsed.name)}${parsed.ext.toLowerCase()}`;
+    let target = path.join(dir, name);
+    let index = 2;
+    while (fs.existsSync(target)) {
+      name = `${stamp}--${slugify(parsed.name)}-${index}${parsed.ext.toLowerCase()}`;
+      target = path.join(dir, name);
+      index += 1;
+    }
+    fs.copyFileSync(text, target);
+    return path.relative(vaultPath, target).replace(/\\/g, "/");
+  } catch {
+    return "";
   }
-  fs.copyFileSync(text, target);
-  return path.relative(vaultPath, target).replace(/\\/g, "/");
 }
 
 function collectorAllowed(settings, sourceType, options) {

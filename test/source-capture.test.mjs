@@ -186,6 +186,25 @@ test("screenshots collector requires enabled screenshot capture or manual approv
   assert.equal(fs.existsSync(path.join(vault, resourceInbox(vault)[0].file)), true);
 });
 
+test("screenshot copy failure stays as a captured resource instead of crashing", () => {
+  const { root, vault } = makeVault();
+  const file = path.join(root, "blocked-shot.png");
+  fs.writeFileSync(file, "fake image");
+  fs.mkdirSync(path.join(vault, "raw", "assets"), { recursive: true });
+  fs.writeFileSync(path.join(vault, "raw", "assets", "resource-capture"), "not a directory");
+
+  const captured = captureResource(vault, {
+    sourceType: "screenshot",
+    title: "Blocked screenshot copy",
+    file,
+    userApproved: true
+  });
+
+  assert.equal(captured.captured, true);
+  assert.equal(resourceInbox(vault)[0].file, file);
+  assert.match(resourceInbox(vault)[0].recommendedNextAction, /screen/i);
+});
+
 test("resource retention purge, delete, and export are reversible controls", () => {
   const { vault } = makeVault();
   updateSourceCaptureSettings(vault, { retentionDays: 1 });
