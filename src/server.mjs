@@ -422,16 +422,18 @@ const server = http.createServer(async (request, response) => {
       response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result, automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)) }));
     } catch (error) {
       const summary = summarizeStatusError(error);
-      const timeout = /timed out/i.test(summary);
+      const timeout = error.code === "AUTO_INGEST_TIMEOUT" || /timed out|time limit/i.test(summary);
       const detail = timeout
         ? "Learning automation paused after the worker time limit. Pending files were left in place and the next bounded run will continue."
         : summary;
-      if (vaultPath) setAutomationRuntime(vaultPath, { running: false, status: "blocked", detail, lastBlockedAt: new Date().toISOString() });
+      if (vaultPath) setAutomationRuntime(vaultPath, timeout
+        ? { running: false, status: "paused", detail, lastPausedAt: new Date().toISOString() }
+        : { running: false, status: "blocked", detail, lastBlockedAt: new Date().toISOString() });
       lastIngestMessage = reportStatus(timeout ? detail : `Learning automation blocked: ${summary}`);
       console.error(`[learning-automation] ${error.stack || error.message}`);
       response.writeHead(timeout ? 200 : 500, { "content-type": "application/json" });
       response.end(JSON.stringify(timeout && vaultPath
-        ? { vault: vaultName(vaultPath), status: "blocked", detail, processed: 0, automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)) }
+        ? { vault: vaultName(vaultPath), status: "paused", detail, processed: 0, automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)) }
         : { error: error.message }));
     } finally {
       ingestRunning = false;
@@ -3173,7 +3175,7 @@ async function runAutoIngest() {
     });
   } catch (error) {
     const summary = summarizeStatusError(error);
-    const timedOut = /timed out/i.test(summary);
+    const timedOut = error.code === "AUTO_INGEST_TIMEOUT" || /timed out|time limit/i.test(summary);
     autoIngestBackoffUntil = Date.now() + (timedOut ? Math.max(config.watchIntervalMs * 2, 30000) : Math.max(config.watchIntervalMs * 3, 60000));
     const retryAt = formatLocal(new Date(autoIngestBackoffUntil));
     if (timedOut) {
@@ -3250,12 +3252,9 @@ function runAutoIngestWorker(options = {}) {
     };
     const timeout = setTimeout(() => {
       worker.kill("SIGTERM");
-      const message = {
-        ok: false,
-        error: "Auto-ingest worker timed out. Pending files were left in place."
-      };
+      const error = Object.assign(new Error("Learning Autopilot worker time limit reached."), { code: "AUTO_INGEST_TIMEOUT" });
       cleanupWorkerResult(resultFile);
-      finish(() => reject(new Error(message.error)));
+      finish(() => reject(error));
     }, Math.max(15000, Number(options.timeoutMs || 120000)));
     worker.on("error", (error) => {
       cleanupWorkerResult(resultFile);
