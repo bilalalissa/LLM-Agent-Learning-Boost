@@ -30,7 +30,13 @@ import {
   reviseLearningGoal,
   reviseLearningPlan
 } from "./learning-planner.mjs";
-import { recordLearningCardReview, updateVaultProfiles } from "./learning-store.mjs";
+import {
+  recordLearningBitReview,
+  recordLearningCardReview,
+  updateLearningBit,
+  updateLearningCard,
+  updateVaultProfiles
+} from "./learning-store.mjs";
 import { answerLocallyAsync } from "./local-answer.mjs";
 import { createLocalAiRouterSupervisor } from "./local-ai-router-supervisor.mjs";
 import { addHighlight, addNote, deleteNote, listNotes, saveNoteMedia, updateNote } from "./notes.mjs";
@@ -61,7 +67,7 @@ import {
 } from "./source-capture.mjs";
 import { collectScreenshots } from "./source-collectors/screenshots-collector.mjs";
 import { collectWatchFolderResources } from "./source-collectors/watch-folder-collector.mjs";
-import { listVaults, readIfExists, vaultName } from "./vaults.mjs";
+import { listRawCandidates, listVaults, readIfExists, vaultName } from "./vaults.mjs";
 
 let config = getConfig();
 process.env.LEARNING_BOOST_TIME_ZONE = config.timeZone || resolveLocalTimeZone();
@@ -391,8 +397,8 @@ const server = http.createServer(async (request, response) => {
       setAutomationRuntime(vaultPath, { running: true, status: "processing", detail: "Processing pending learning sources..." });
       const workerResult = await runAutoIngestWorker({
         vaultPath,
-        options: { force: payload.force === true, resourceLimit: payload.limit || 12 },
-        timeoutMs: Math.max(config.providerTimeoutMs || 60000, 90000)
+        options: { force: payload.force === true, resourceLimit: payload.limit || 6 },
+        timeoutMs: Math.max((config.providerTimeoutMs || 60000) * 2, 180000)
       });
       const result = workerResult.vaults?.[0]?.automationResult || {
         status: workerResult.status || "idle",
@@ -415,11 +421,18 @@ const server = http.createServer(async (request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result, automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)) }));
     } catch (error) {
-      if (vaultPath) setAutomationRuntime(vaultPath, { running: false, status: "blocked", detail: summarizeStatusError(error), lastBlockedAt: new Date().toISOString() });
-      lastIngestMessage = reportStatus(`Learning automation failed: ${summarizeStatusError(error)}`);
+      const summary = summarizeStatusError(error);
+      const timeout = /timed out/i.test(summary);
+      const detail = timeout
+        ? "Learning automation paused after the worker time limit. Pending files were left in place and the next bounded run will continue."
+        : summary;
+      if (vaultPath) setAutomationRuntime(vaultPath, { running: false, status: "blocked", detail, lastBlockedAt: new Date().toISOString() });
+      lastIngestMessage = reportStatus(timeout ? detail : `Learning automation blocked: ${summary}`);
       console.error(`[learning-automation] ${error.stack || error.message}`);
-      response.writeHead(500, { "content-type": "application/json" });
-      response.end(JSON.stringify({ error: error.message }));
+      response.writeHead(timeout ? 200 : 500, { "content-type": "application/json" });
+      response.end(JSON.stringify(timeout && vaultPath
+        ? { vault: vaultName(vaultPath), status: "blocked", detail, processed: 0, automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)) }
+        : { error: error.message }));
     } finally {
       ingestRunning = false;
     }
@@ -727,6 +740,51 @@ const server = http.createServer(async (request, response) => {
       const body = await readBody(request);
       const payload = JSON.parse(body || "{}");
       const result = recordLearningCardReview(config, payload.vault, payload);
+      refreshTabData("learning", { force: true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: payload.vault, ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/bit-review") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const result = recordLearningBitReview(config, payload.vault, payload);
+      refreshTabData("learning", { force: true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: payload.vault, ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/card-edit") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const result = updateLearningCard(config, payload.vault, payload);
+      refreshTabData("learning", { force: true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: payload.vault, ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/learning/bit-edit") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const result = updateLearningBit(config, payload.vault, payload);
       refreshTabData("learning", { force: true });
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ vault: payload.vault, ...result }));
@@ -1932,10 +1990,10 @@ function fastLearningVault(vaultPath) {
 }
 
 function fastLearningStats({ bits, cards, reviews, plans, sourceLinks }) {
-  const readCardIds = new Set(reviews
-    .filter((event) => event.type === "card_reviewed" || event.action === "read" || event.action === "seen")
-    .map((event) => event.cardId || "")
-    .filter(Boolean));
+  const cardReviews = latestFastReviews(reviews, "card_reviewed", "cardId");
+  const bitReviews = latestFastReviews(reviews, "bit_reviewed", "bitId");
+  const readCardIds = new Set([...cardReviews.keys()]);
+  const readBitIds = new Set([...bitReviews.keys()]);
   const bitsBySource = new Map();
   for (const bit of bits) {
     const key = bit.sourcePage || "";
@@ -1946,11 +2004,15 @@ function fastLearningStats({ bits, cards, reviews, plans, sourceLinks }) {
   }
   const allCards = cards
     .map((card) => enrichLearningCardForDisplay(card, { relatedBits: bitsBySource.get(card.sourcePage || "") || [], sourceLinks }))
-    .map((card) => ({ ...card, displayKey: fastCardKey(card), displayRead: readCardIds.has(fastCardKey(card)) }));
+    .map((card) => fastReviewState({ ...card, displayKey: fastCardKey(card) }, cardReviews.get(fastCardKey(card))));
   const primaryCards = allCards.filter((card) => card.displayDemoted !== true);
-  const visibleCards = primaryCards.length ? primaryCards : allCards;
-  const allBits = bits.map((bit) => enrichLearningBitForDisplay(bit, { sourceLinks }));
+  const visibleCards = prioritizeFastStudyItems(primaryCards.length ? primaryCards : allCards);
+  const allBits = prioritizeFastStudyItems(bits
+    .map((bit) => enrichLearningBitForDisplay(bit, { sourceLinks }))
+    .map((bit) => fastReviewState({ ...bit, displayKey: fastBitKey(bit) }, bitReviews.get(fastBitKey(bit)))));
   const today = new Date().toISOString().slice(0, 10);
+  const bestPlan = selectFastBestLearningPlan(plans);
+  const planSources = fastSourcePagesForPlan(bestPlan, sourceLinks);
   return {
     bits: bits.length,
     cards: cards.length,
@@ -1959,10 +2021,15 @@ function fastLearningStats({ bits, cards, reviews, plans, sourceLinks }) {
     allCards: visibleCards,
     allBits,
     reviewedCards: readCardIds.size,
+    reviewedBits: readBitIds.size,
+    bestPlan,
+    studyQueueCards: prioritizeFastPlanItems(visibleCards.filter((card) => !card.displayRead || card.displayReviewDue), planSources).slice(0, 24),
+    studyQueueBits: prioritizeFastPlanItems(allBits.filter((bit) => !bit.displayRead || bit.displayReviewDue), planSources).slice(0, 24),
     recentSourceLinks: sourceLinks.slice(-10).reverse(),
-    dueCards: visibleCards.filter((card) => !card.due || card.due <= today).slice(0, 10),
-    recentCards: visibleCards.slice(-10).reverse(),
-    recentBits: allBits.slice(-12).reverse()
+    dueCards: visibleCards.filter((card) => fastDueForStudy(card, today)).slice(0, 10),
+    dueBits: allBits.filter((bit) => fastDueForStudy(bit, today)).slice(0, 10),
+    recentCards: visibleCards.slice(0, 10),
+    recentBits: allBits.slice(0, 12)
   };
 }
 
@@ -1980,6 +2047,84 @@ function fastSourceGroups(sourceLinks) {
 
 function fastCardKey(card = {}) {
   return String(card.id || card.displayKey || card.cardId || `${card.sourcePage || ""}|${card.front || card.cloze || card.displayPrompt || ""}`);
+}
+
+function fastBitKey(bit = {}) {
+  return String(bit.id || bit.displayKey || bit.bitId || `${bit.sourcePage || ""}|${bit.title || bit.body || bit.displayTopic || ""}`);
+}
+
+function latestFastReviews(reviews, type, idKey) {
+  const latest = new Map();
+  for (const event of reviews || []) {
+    if (event.type !== type) continue;
+    const key = String(event[idKey] || "").trim();
+    if (!key) continue;
+    const previous = latest.get(key);
+    if (!previous || String(event.created || "") >= String(previous.created || "")) latest.set(key, event);
+  }
+  return latest;
+}
+
+function fastReviewState(item, event) {
+  const today = new Date().toISOString().slice(0, 10);
+  const next = String(event?.nextReviewAt || "").slice(0, 10);
+  const reviewed = Boolean(event);
+  const due = !reviewed || !next || next <= today || (item.due && item.due <= today);
+  return {
+    ...item,
+    displayRead: reviewed && !due,
+    displayReviewed: reviewed,
+    displayReviewDue: due,
+    displayLastReviewAt: event?.created || "",
+    displayNextReviewAt: event?.nextReviewAt || "",
+    displayReviewGrade: event?.grade || ""
+  };
+}
+
+function fastDueForStudy(item, today) {
+  return item.displayReviewDue || !item.displayReviewed || !item.due || item.due <= today;
+}
+
+function prioritizeFastStudyItems(items) {
+  return [...(items || [])].sort((a, b) => {
+    const aUnread = a.displayRead ? 1 : 0;
+    const bUnread = b.displayRead ? 1 : 0;
+    if (aUnread !== bUnread) return aUnread - bUnread;
+    const aDue = a.displayReviewDue ? 0 : 1;
+    const bDue = b.displayReviewDue ? 0 : 1;
+    if (aDue !== bDue) return aDue - bDue;
+    return String(b.updated || b.created || "").localeCompare(String(a.updated || a.created || ""));
+  });
+}
+
+function prioritizeFastPlanItems(items, sourcePages) {
+  if (!sourcePages?.size) return prioritizeFastStudyItems(items);
+  return prioritizeFastStudyItems(items).sort((a, b) => {
+    const aPlan = sourcePages.has(a.sourcePage || "") ? 0 : 1;
+    const bPlan = sourcePages.has(b.sourcePage || "") ? 0 : 1;
+    return aPlan - bPlan;
+  });
+}
+
+function selectFastBestLearningPlan(plans = []) {
+  const rank = { active: 0, scheduled: 1, approved: 2, proposed: 3 };
+  return [...plans]
+    .filter((plan) => plan && plan.id)
+    .sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9) || String(b.updated || b.created || "").localeCompare(String(a.updated || a.created || "")))[0] || null;
+}
+
+function fastSourcePagesForPlan(plan, sourceLinks = []) {
+  const sources = new Set();
+  if (!plan) return sources;
+  for (const stage of plan.stages || []) {
+    for (const value of [stage.sourcePage, stage.source, ...(Array.isArray(stage.sources) ? stage.sources : [])]) {
+      if (value) sources.add(String(value));
+    }
+  }
+  for (const link of sourceLinks || []) {
+    if ((link.linkedPlans || []).some((item) => item.id === plan.id || item.planId === plan.id)) sources.add(link.sourcePage || "");
+  }
+  return sources;
 }
 
 function defaultFastSourceCaptureSettings() {
@@ -2973,17 +3118,30 @@ function runOsascript(lines) {
 async function runAutoIngest() {
   if (Date.now() < autoIngestBackoffUntil) return;
   if (ingestRunning) return;
+  const pendingVault = nextAutoIngestVault();
+  if (!pendingVault) {
+    lastIngestMessage = reportStatus(`Operation progress: 100%. No pending files at ${formatLocal(new Date())}.`);
+    ingestProgress = progressState({
+      completed: 1,
+      total: 1,
+      vault: "",
+      detail: lastIngestMessage
+    });
+    return;
+  }
   ingestRunning = true;
   try {
     ingestProgress = {
       percent: 0,
       completed: 0,
-      total: 1,
-      vault: "",
-      detail: "Learning Autopilot is running in a background worker."
+      total: Math.max(pendingVault.pendingRawCount, 1),
+      vault: vaultName(pendingVault.vaultPath),
+      detail: `Learning Autopilot is processing ${Math.min(pendingVault.pendingRawCount, 3)} of ${pendingVault.pendingRawCount} pending file(s) in ${vaultName(pendingVault.vaultPath)}.`
     };
     const workerResult = await runAutoIngestWorker({
-      timeoutMs: Math.max(config.providerTimeoutMs || 60000, config.watchIntervalMs * 2, 120000)
+      vaultPath: pendingVault.vaultPath,
+      options: { resourceLimit: 3 },
+      timeoutMs: Math.max(config.providerTimeoutMs || 60000, config.watchIntervalMs * 2, 180000)
     });
     let count = 0;
     const completedVaults = workerResult.vaults || [];
@@ -3003,19 +3161,19 @@ async function runAutoIngest() {
       }
     }
     lastIngestMessage = count
-      ? reportStatus(`Operation progress: 100%. Processed ${count} file${count === 1 ? "" : "s"} at ${formatLocal(new Date())}.`)
-      : reportStatus(`Operation progress: 100%. No pending files at ${formatLocal(new Date())}.`);
+      ? reportStatus(`Operation progress: 100%. Processed ${count} file${count === 1 ? "" : "s"} from ${vaultName(pendingVault.vaultPath)} at ${formatLocal(new Date())}.`)
+      : reportStatus(`Operation progress: 100%. ${vaultName(pendingVault.vaultPath)} has no ready files after staging at ${formatLocal(new Date())}.`);
     autoIngestBackoffUntil = 0;
     ingestProgress = progressState({
-      completed: 1,
-      total: 1,
-      vault: "",
+      completed: count,
+      total: Math.max(count, pendingVault.pendingRawCount),
+      vault: vaultName(pendingVault.vaultPath),
       detail: lastIngestMessage
     });
   } catch (error) {
     const summary = summarizeStatusError(error);
-    autoIngestBackoffUntil = Date.now() + Math.max(config.watchIntervalMs, 60000);
-    lastIngestMessage = reportStatus(`Operation progress: ${ingestProgress.percent || 0}%. Auto-ingest blocked at ${formatLocal(new Date())}: ${summary}`);
+    autoIngestBackoffUntil = Date.now() + Math.max(config.watchIntervalMs * 3, 60000);
+    lastIngestMessage = reportStatus(`Operation progress: ${ingestProgress.percent || 0}%. Auto-ingest blocked for ${vaultName(pendingVault.vaultPath)} at ${formatLocal(new Date())}: ${summary}`);
     ingestProgress = {
       ...ingestProgress,
       detail: `Auto-ingest blocked: ${summary}. Pending raw files were left in place. Next retry after ${formatLocal(new Date(autoIngestBackoffUntil))}.`
@@ -3024,6 +3182,28 @@ async function runAutoIngest() {
   } finally {
     ingestRunning = false;
     refreshChangedTabsAfterIngest();
+  }
+}
+
+function nextAutoIngestVault() {
+  const vaults = cachedVaultPaths(config);
+  let fallback = null;
+  for (const vaultPath of vaults) {
+    const pendingRawCount = safeRawCandidateCount(vaultPath);
+    if (!pendingRawCount) continue;
+    const runtime = automationRuntimeFor(vaultPath);
+    if (!fallback) fallback = { vaultPath, pendingRawCount };
+    if (runtime.status !== "blocked") return { vaultPath, pendingRawCount };
+  }
+  return fallback;
+}
+
+function safeRawCandidateCount(vaultPath) {
+  try {
+    return listRawCandidates(vaultPath).length;
+  } catch (error) {
+    console.warn(`[auto-ingest] could not scan ${vaultName(vaultPath)} raw candidates: ${error.message}`);
+    return 0;
   }
 }
 
@@ -4173,6 +4353,21 @@ function renderHtml() {
     .learning-capture-status li { margin-bottom: 4px; }
     .learning-capture-status code { font-size: 12px; }
     .capture-status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 6px; margin: 8px 0; }
+    .learning-practice-overlay { position: fixed; inset: 0; z-index: 72; display: none; align-items: center; justify-content: center; padding: 18px; background: color-mix(in srgb, #000 34%, transparent); }
+    .learning-practice-overlay.active { display: flex; }
+    .learning-practice-window { width: min(820px, 100%); max-height: min(88vh, 860px); overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 18px 60px var(--shadow); padding: 18px; }
+    .learning-practice-window header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+    .learning-practice-window h3 { margin: 0; font-size: 20px; }
+    .learning-practice-card { display: grid; gap: 14px; min-width: 0; border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 34%, var(--line)); border-radius: 10px; background: var(--kind-soft, var(--soft)); padding: 16px; }
+    .learning-practice-prompt { font-size: 20px; font-weight: 800; line-height: 1.35; overflow-wrap: break-word; }
+    .learning-practice-answer { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px; overflow-wrap: break-word; }
+    .learning-practice-answer[hidden], .learning-practice-editor[hidden] { display: none; }
+    .learning-practice-nav, .learning-practice-ratings { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .learning-practice-ratings button { min-width: min(120px, 100%); }
+    .learning-practice-editor { display: grid; gap: 10px; border-top: 1px solid var(--line); padding-top: 12px; }
+    .learning-practice-editor textarea { width: 100%; min-height: 90px; box-sizing: border-box; }
+    .learning-practice-notes { min-height: 64px; }
+    .learning-practice-empty { border: 1px solid var(--line); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--soft); }
     .capture-status-grid span { display: grid; gap: 2px; min-width: 0; border: 1px solid var(--line); border-radius: 6px; padding: 7px; background: var(--panel); overflow-wrap: break-word; }
     .capture-skip-list { display: grid; gap: 6px; margin-top: 8px; }
     .capture-skip-item { border: 1px solid var(--line); border-radius: 6px; padding: 7px; background: var(--panel); }
@@ -4712,6 +4907,19 @@ function renderHtml() {
           </div>
         </section>
 
+        <div id="learning-practice-overlay" class="learning-practice-overlay" hidden>
+          <section class="learning-practice-window" role="dialog" aria-modal="true" aria-labelledby="learning-practice-title">
+            <header>
+              <div>
+                <h3 id="learning-practice-title">Practice Learning Cards And Bits</h3>
+                <p id="learning-practice-summary" class="muted">One item at a time, prioritized by the best plan and spaced review.</p>
+              </div>
+              <button id="close-learning-practice" class="secondary" type="button">Close</button>
+            </header>
+            <div id="learning-practice-body"></div>
+          </section>
+        </div>
+
         <details id="learning-revise-section" class="learning-section learning-scroll-target">
           <summary>Revise Plans And Goals</summary>
           <div class="learning-actions">
@@ -5070,6 +5278,10 @@ function renderHtml() {
     const confirmLearningExport = document.querySelector("#confirm-learning-export");
     const editLearningExportPlan = document.querySelector("#edit-learning-export-plan");
     const cancelLearningExport = document.querySelector("#cancel-learning-export");
+    const learningPracticeOverlay = document.querySelector("#learning-practice-overlay");
+    const learningPracticeBody = document.querySelector("#learning-practice-body");
+    const learningPracticeSummary = document.querySelector("#learning-practice-summary");
+    const closeLearningPractice = document.querySelector("#close-learning-practice");
     const suggestPlanUpdatesButton = document.querySelector("#suggest-plan-updates");
     const learningPlanId = document.querySelector("#learning-plan-id");
     const learningPlanSelect = document.querySelector("#learning-plan-select");
@@ -5207,6 +5419,9 @@ function renderHtml() {
     let sideTopicsLoadPolls = 0;
     let learningCache = null;
     let learningCardsFilter = null;
+    let learningPracticeQueue = [];
+    let learningPracticeIndex = 0;
+    let learningPracticeAnswerVisible = false;
     let pendingLearningExport = null;
     let providerStatusCache = null;
     let providerConfigOptions = {};
@@ -5475,6 +5690,25 @@ function renderHtml() {
     exportPlanReminders.addEventListener("click", exportSelectedPlanReminders);
     confirmLearningExport.addEventListener("click", confirmPendingLearningExport);
     cancelLearningExport.addEventListener("click", closeLearningExportReview);
+    closeLearningPractice.addEventListener("click", closeLearningPracticeWindow);
+    learningPracticeOverlay.addEventListener("click", (event) => {
+      if (event.target === learningPracticeOverlay) {
+        closeLearningPracticeWindow();
+        return;
+      }
+      const targetButton = event.target.closest("[data-learning-target]");
+      if (targetButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        void navigateLearningTarget(targetButton);
+        return;
+      }
+      const actionButton = event.target.closest("[data-learning-action]");
+      if (!actionButton) return;
+      event.preventDefault();
+      event.stopPropagation();
+      handleLearningAction(actionButton);
+    });
     editLearningExportPlan.addEventListener("click", () => {
       const planId = pendingLearningExport?.planId || selectedLearningPlanId();
       closeLearningExportReview();
@@ -5504,11 +5738,16 @@ function renderHtml() {
       }
       const actionButton = event.target.closest("[data-learning-action]");
       if (!actionButton) return;
+      handleLearningAction(actionButton);
+    });
+
+    function handleLearningAction(actionButton) {
       const action = actionButton.dataset.learningAction;
       if (action === "approve-plan") approveLearningPlanButton.click();
       if (action === "schedule-plan") exportPlanCalendar.click();
       if (action === "export-remnote") exportRemnote.click();
       if (action === "process-pending") processPendingLearning.click();
+      if (action === "open-practice") openLearningPracticeWindow(actionButton);
       if (action === "draft-plans") draftLearningPlans.click();
       if (action === "suggest-plan-updates") suggestPlanUpdatesButton.click();
       if (action === "test-native-notification") testNativeNotification.click();
@@ -5517,6 +5756,16 @@ function renderHtml() {
         card?.classList.toggle("flipped");
         if (card?.classList.contains("flipped")) void markLearningCardRead(actionButton);
       }
+      if (action === "mark-bit-read") markLearningBitRead(actionButton);
+      if (action === "practice-prev") moveLearningPractice(-1);
+      if (action === "practice-next") moveLearningPractice(1);
+      if (action === "practice-reveal") {
+        learningPracticeAnswerVisible = true;
+        renderLearningPracticeWindow();
+      }
+      if (action === "practice-grade") submitLearningPracticeGrade(actionButton);
+      if (action === "practice-edit-toggle") toggleLearningPracticeEditor();
+      if (action === "practice-save-edit") saveLearningPracticeEdit();
       if (action === "mark-notification-read") markLearningNotification(actionButton.dataset.vault, actionButton.dataset.notificationId, "read");
       if (action === "dismiss-notification") markLearningNotification(actionButton.dataset.vault, actionButton.dataset.notificationId, "dismiss");
       if (action === "sync-notification-reminder") syncNotificationsToReminders();
@@ -5525,7 +5774,7 @@ function renderHtml() {
         renderLearningProfile();
         revealLearningSection("learning-cards-bits");
       }
-    });
+    }
 
     async function navigateLearningTarget(button) {
       const target = button.dataset.learningTarget || "learning-section";
@@ -5611,6 +5860,175 @@ function renderHtml() {
         setTimeout(() => { if (learningFeedback.textContent === "Card marked read") learningFeedback.textContent = ""; }, 1500);
       } catch (error) {
         delete card.dataset.readRecorded;
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function markLearningBitRead(button) {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      const details = button.closest("[data-learning-bit]");
+      if (!vault || !details || details.dataset.readRecorded === "1") return;
+      details.dataset.readRecorded = "1";
+      try {
+        const data = await postLearningAction("/api/learning/bit-review", {
+          vault,
+          bitId: button.dataset.bitId || details.dataset.learningBit || "",
+          title: button.dataset.bitTitle || "",
+          topic: button.dataset.bitTopic || "",
+          sourcePage: button.dataset.sourcePage || "",
+          action: "read",
+          grade: "read"
+        });
+        if (!details.querySelector(".learning-study-card-read")) {
+          details.querySelector(".learning-chip-row")?.insertAdjacentHTML("beforeend", '<span class="learning-chip learning-study-card-read">Read</span>');
+        }
+        learningFeedback.textContent = data.recorded ? "Bit marked read" : "Bit read state unchanged";
+        setTimeout(() => { if (learningFeedback.textContent === "Bit marked read") learningFeedback.textContent = ""; }, 1500);
+      } catch (error) {
+        delete details.dataset.readRecorded;
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    function openLearningPracticeWindow(button) {
+      const state = selectedLearningVault();
+      const stats = state?.learningStats || {};
+      const cards = (stats.studyQueueCards?.length ? stats.studyQueueCards : stats.allCards || [])
+        .filter((card) => card.displayDemoted !== true)
+        .map((card) => ({ kind: "card", key: card.displayKey || card.id || "", item: card }));
+      const bits = (stats.studyQueueBits?.length ? stats.studyQueueBits : stats.allBits || [])
+        .map((bit) => ({ kind: "bit", key: bit.displayKey || bit.id || "", item: bit }));
+      learningPracticeQueue = [...cards, ...bits].filter((entry, index, list) =>
+        entry.key && list.findIndex((candidate) => candidate.kind === entry.kind && candidate.key === entry.key) === index
+      );
+      const requestedType = button?.dataset?.practiceType || "";
+      const requestedId = button?.dataset?.practiceId || "";
+      const requestedIndex = requestedId ? learningPracticeQueue.findIndex((entry) => entry.kind === requestedType && entry.key === requestedId) : -1;
+      learningPracticeIndex = requestedIndex >= 0 ? requestedIndex : 0;
+      learningPracticeAnswerVisible = false;
+      learningPracticeOverlay.hidden = false;
+      learningPracticeOverlay.classList.add("active");
+      renderLearningPracticeWindow();
+    }
+
+    function closeLearningPracticeWindow() {
+      learningPracticeOverlay.classList.remove("active");
+      learningPracticeOverlay.hidden = true;
+      learningPracticeBody.innerHTML = "";
+      if (learningCache) renderLearningProfile();
+    }
+
+    function moveLearningPractice(delta) {
+      if (!learningPracticeQueue.length) return;
+      learningPracticeIndex = Math.max(0, Math.min(learningPracticeQueue.length - 1, learningPracticeIndex + delta));
+      learningPracticeAnswerVisible = false;
+      renderLearningPracticeWindow();
+    }
+
+    function renderLearningPracticeWindow() {
+      const state = selectedLearningVault();
+      const entry = learningPracticeQueue[learningPracticeIndex];
+      const plan = state?.learningStats?.bestPlan || {};
+      learningPracticeSummary.textContent = (plan.title ? "Plan: " + plan.title + ". " : "") + "Item " + (learningPracticeQueue.length ? learningPracticeIndex + 1 : 0) + " of " + learningPracticeQueue.length + ". Due and unread items appear first.";
+      if (!entry) {
+        learningPracticeBody.innerHTML = '<div class="learning-practice-empty">No unread or due cards/bits are ready. Process another source or clear a filter, then try again.</div>';
+        return;
+      }
+      const item = entry.item || {};
+      const isCard = entry.kind === "card";
+      const prompt = isCard ? (item.displayPrompt || item.front || item.cloze || "Recall this card") : (item.title || item.displayTopic || "Read this bit");
+      const answer = isCard ? (item.back || item.explanation || "No answer saved yet.") : (item.body || "No bit detail saved yet.");
+      const topic = item.displayTopic || item.learningFocus || item.topic || "Key concept";
+      learningPracticeBody.innerHTML =
+        '<article class="learning-practice-card ' + escapeHtml(isCard ? "practice" : "bit") + '" data-practice-kind="' + escapeHtml(entry.kind) + '" data-practice-key="' + escapeHtml(entry.key) + '">' +
+          '<div class="learning-chip-row"><span class="learning-chip ' + escapeHtml(isCard ? "practice" : "bit") + '">' + escapeHtml(isCard ? (item.displayType || "card") : "bit") + '</span><span class="learning-chip bit">' + escapeHtml(topic) + '</span>' + (item.displayRead ? '<span class="learning-chip learning-study-card-read">Read</span>' : '') + '</div>' +
+          '<div class="learning-practice-prompt">' + escapeHtml(prompt) + '</div>' +
+          (!isCard ? '<div class="learning-practice-answer">' + escapeHtml(answer) + '</div>' : '<div class="learning-practice-answer" ' + (learningPracticeAnswerVisible ? "" : "hidden") + '>' + escapeHtml(answer) + '</div>') +
+          '<label class="learning-field"><span>Practice note</span><textarea class="learning-practice-notes" placeholder="What helped, what was hard, or what to revisit?"></textarea></label>' +
+          '<div class="learning-practice-ratings">' +
+            (isCard && !learningPracticeAnswerVisible ? '<button class="primary" type="button" data-learning-action="practice-reveal">Show answer</button>' : '') +
+            '<button class="secondary" type="button" data-learning-action="practice-grade" data-grade="again">Again</button>' +
+            '<button class="secondary" type="button" data-learning-action="practice-grade" data-grade="hard">Hard</button>' +
+            '<button class="secondary" type="button" data-learning-action="practice-grade" data-grade="good">Good</button>' +
+            '<button class="secondary" type="button" data-learning-action="practice-grade" data-grade="easy">Easy</button>' +
+          '</div>' +
+          '<div class="learning-practice-nav">' +
+            '<button class="secondary" type="button" data-learning-action="practice-prev"' + (learningPracticeIndex <= 0 ? " disabled" : "") + '>Previous</button>' +
+            '<button class="secondary" type="button" data-learning-action="practice-next"' + (learningPracticeIndex >= learningPracticeQueue.length - 1 ? " disabled" : "") + '>Next</button>' +
+            '<button class="secondary" type="button" data-learning-action="practice-edit-toggle">Edit item</button>' +
+            '<button class="secondary" type="button" data-learning-target="source-page" data-vault="' + escapeHtml(state?.vault || "") + '" data-source-page="' + escapeHtml(item.sourcePage || "") + '">Open source</button>' +
+          '</div>' +
+          renderLearningPracticeEditor(entry, item, prompt, answer, topic) +
+        '</article>';
+    }
+
+    function renderLearningPracticeEditor(entry, item, prompt, answer, topic) {
+      if (entry.kind === "card") {
+        return '<div class="learning-practice-editor" hidden>' +
+          '<label class="learning-field"><span>Topic</span><input data-practice-edit="topic" value="' + escapeHtml(topic) + '"></label>' +
+          '<label class="learning-field"><span>Prompt</span><textarea data-practice-edit="front">' + escapeHtml(prompt) + '</textarea></label>' +
+          '<label class="learning-field"><span>Answer</span><textarea data-practice-edit="back">' + escapeHtml(answer) + '</textarea></label>' +
+          '<label class="learning-field"><span>Hint</span><input data-practice-edit="hint" value="' + escapeHtml(item.hint || "") + '"></label>' +
+          '<button class="primary" type="button" data-learning-action="practice-save-edit">Save card edit</button>' +
+        '</div>';
+      }
+      return '<div class="learning-practice-editor" hidden>' +
+        '<label class="learning-field"><span>Topic</span><input data-practice-edit="topic" value="' + escapeHtml(topic) + '"></label>' +
+        '<label class="learning-field"><span>Title</span><input data-practice-edit="title" value="' + escapeHtml(item.title || topic) + '"></label>' +
+        '<label class="learning-field"><span>Bit detail</span><textarea data-practice-edit="body">' + escapeHtml(answer) + '</textarea></label>' +
+        '<label class="learning-field"><span>Level</span><input data-practice-edit="level" value="' + escapeHtml(item.level || "core") + '"></label>' +
+        '<button class="primary" type="button" data-learning-action="practice-save-edit">Save bit edit</button>' +
+      '</div>';
+    }
+
+    function toggleLearningPracticeEditor() {
+      const editor = learningPracticeBody.querySelector(".learning-practice-editor");
+      if (!editor) return;
+      editor.hidden = !editor.hidden;
+      if (!editor.hidden) editor.querySelector("input, textarea")?.focus();
+    }
+
+    async function submitLearningPracticeGrade(button) {
+      const entry = learningPracticeQueue[learningPracticeIndex];
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!entry || !vault) return;
+      const item = entry.item || {};
+      const notes = learningPracticeBody.querySelector(".learning-practice-notes")?.value || "";
+      const grade = button.dataset.grade || "read";
+      try {
+        const endpoint = entry.kind === "card" ? "/api/learning/card-review" : "/api/learning/bit-review";
+        const payload = entry.kind === "card"
+          ? { vault, cardId: entry.key, prompt: item.displayPrompt || item.front || item.cloze || "", topic: item.displayTopic || item.learningFocus || "", sourcePage: item.sourcePage || "", action: "read", grade, notes }
+          : { vault, bitId: entry.key, title: item.title || "", topic: item.displayTopic || item.learningFocus || "", sourcePage: item.sourcePage || "", action: "read", grade, notes };
+        await postLearningAction(endpoint, payload);
+        learningPracticeQueue.splice(learningPracticeIndex, 1);
+        if (learningPracticeIndex >= learningPracticeQueue.length) learningPracticeIndex = Math.max(0, learningPracticeQueue.length - 1);
+        learningPracticeAnswerVisible = false;
+        learningFeedback.textContent = entry.kind === "card" ? "Card reviewed; next due item loaded" : "Bit reviewed; next due item loaded";
+        renderLearningPracticeWindow();
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    async function saveLearningPracticeEdit() {
+      const entry = learningPracticeQueue[learningPracticeIndex];
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!entry || !vault) return;
+      const values = {};
+      learningPracticeBody.querySelectorAll("[data-practice-edit]").forEach((field) => {
+        values[field.dataset.practiceEdit] = field.value;
+      });
+      try {
+        const endpoint = entry.kind === "card" ? "/api/learning/card-edit" : "/api/learning/bit-edit";
+        const payload = entry.kind === "card" ? { vault, cardId: entry.key, ...values } : { vault, bitId: entry.key, ...values };
+        const data = await postLearningAction(endpoint, payload);
+        entry.item = entry.kind === "card"
+          ? { ...entry.item, ...(data.card || values), displayPrompt: values.front || entry.item.displayPrompt, displayTopic: values.topic || entry.item.displayTopic }
+          : { ...entry.item, ...(data.bit || values), displayTopic: values.topic || entry.item.displayTopic };
+        learningFeedback.textContent = entry.kind === "card" ? "Card edit saved" : "Bit edit saved";
+        renderLearningPracticeWindow();
+      } catch (error) {
         learningFeedback.textContent = error.message;
       }
     }
@@ -7255,13 +7673,18 @@ function renderHtml() {
       const allCards = (context.stats.allCards || [...(context.stats.dueCards || []), ...(context.stats.recentCards || [])])
         .filter((card, index, list) => list.findIndex((item) => (item.displayKey || item.id || item.front || item.cloze) === (card.displayKey || card.id || card.front || card.cloze)) === index);
       const filteredCards = filterLearningItems(allCards, learningCardsFilter);
-      const cards = learningCardsFilter ? filteredCards : filteredCards.slice(0, 24);
+      const studyCards = context.stats.studyQueueCards?.length ? context.stats.studyQueueCards : filteredCards;
+      const cards = learningCardsFilter ? filteredCards : studyCards.slice(0, 24);
       const allBits = context.stats.allBits || context.stats.recentBits || [];
       const filteredBits = filterLearningItems(allBits, learningCardsFilter);
-      const bits = learningCardsFilter ? filteredBits : filteredBits.slice(0, 24);
+      const studyBits = context.stats.studyQueueBits?.length ? context.stats.studyQueueBits : filteredBits;
+      const bits = learningCardsFilter ? filteredBits : studyBits.slice(0, 24);
       const groups = groupLearningCardsAndBits(cards, bits);
+      const plan = context.stats.bestPlan || {};
       return '<section id="learning-cards-bits" class="learning-study-surface learning-scroll-target" data-learning-anchor="cards-bits">' +
-        '<div class="learning-study-header"><h3>Cards And Bits</h3><p>Practice concept-specific recall first, then inspect the related source-grounded bits when you need context.</p>' + renderLearningLegend() + '</div>' +
+        '<div class="learning-study-header"><h3>Cards And Bits</h3><p>Practice concept-specific recall first, then inspect the related source-grounded bits when you need context.</p>' +
+          '<div class="learning-action-row"><button class="primary" type="button" data-learning-action="open-practice">Open practice window</button><span class="learning-chip plan">' + escapeHtml(plan.title ? "Plan: " + plan.title : "Plan: best available queue") + '</span><span class="learning-chip review">' + escapeHtml((context.stats.dueCards || []).length + " card(s) due") + '</span><span class="learning-chip bit">' + escapeHtml((context.stats.dueBits || []).length + " bit(s) due") + '</span></div>' +
+          renderLearningLegend() + '</div>' +
         renderLearningCardsFilterBanner(filteredCards.length, allCards.length, filteredBits.length) +
         '<div class="learning-card-topic-groups">' + (groups.length ? groups.map((group, groupIndex) =>
           '<section class="learning-card-topic-group learning-scroll-target" data-learning-topic="' + escapeHtml(group.topic) + '">' +
@@ -7271,7 +7694,7 @@ function renderHtml() {
           '</section>'
         ).join("") : '<div class="learning-empty-state">No cards yet. Autopilot will create concept-specific cards after a provider successfully processes sources.</div>') + '</div>' +
         '<div class="learning-bit-explorer"><h4>Recent learning bits</h4>' + (bits.length ? bits.map((bit) =>
-          '<details class="learning-scroll-target" data-learning-bit="' + escapeHtml(bit.id || bit.title || "") + '"><summary>' + escapeHtml(bit.title || bit.displayTopic || bit.type || "Learning bit") + '</summary><p>' + escapeHtml(bit.body || "") + '</p><div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(bit.level || "core") + '</span><button class="learning-chip capture" type="button" data-learning-target="source-page" data-vault="' + escapeHtml(state.vault || "") + '" data-source-page="' + escapeHtml(bit.sourcePage || "") + '">' + escapeHtml(bit.displayEvidence || bit.sourcePage || "source pending") + '</button></div></details>'
+          '<details class="learning-scroll-target" data-learning-bit="' + escapeHtml(bit.displayKey || bit.id || bit.title || "") + '"><summary>' + escapeHtml(bit.title || bit.displayTopic || bit.type || "Learning bit") + (bit.displayRead ? " · read" : "") + '</summary><p>' + escapeHtml(bit.body || "") + '</p><div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(bit.level || "core") + '</span>' + (bit.displayRead ? '<span class="learning-chip learning-study-card-read">Read</span>' : '') + '<button class="learning-chip capture" type="button" data-learning-target="source-page" data-vault="' + escapeHtml(state.vault || "") + '" data-source-page="' + escapeHtml(bit.sourcePage || "") + '">' + escapeHtml(bit.displayEvidence || bit.sourcePage || "source pending") + '</button></div><div class="learning-action-row"><button class="secondary" type="button" data-learning-action="mark-bit-read" data-bit-id="' + escapeHtml(bit.displayKey || bit.id || "") + '" data-bit-title="' + escapeHtml(bit.title || "") + '" data-bit-topic="' + escapeHtml(bit.displayTopic || bit.learningFocus || "") + '" data-source-page="' + escapeHtml(bit.sourcePage || "") + '">Mark bit read</button><button class="secondary" type="button" data-learning-action="open-practice" data-practice-type="bit" data-practice-id="' + escapeHtml(bit.displayKey || bit.id || "") + '">Study bit</button></div></details>'
         ).join("") : '<p class="muted">No recent bits yet. Processed sources will appear here automatically.</p>') + '</div>' +
       '</section>';
     }
@@ -7313,7 +7736,7 @@ function renderHtml() {
           '<div class="learning-chip-row"><span class="learning-chip ' + escapeHtml(kind) + '">' + escapeHtml(card.displayType || card.type || "card") + '</span><span class="learning-chip bit">' + escapeHtml(card.displayTopic || card.learningFocus || "Key concept") + '</span>' + (card.displayRead ? '<span class="learning-chip learning-study-card-read">Read</span>' : '') + '</div>' +
           '<h4>' + escapeHtml(card.displayPrompt || card.front || card.cloze || "Recall prompt") + '</h4>' +
           (card.hint ? '<p class="muted">' + escapeHtml(card.hint) + '</p>' : '') +
-          '<button class="secondary" type="button" data-learning-action="flip-card" data-card-id="' + escapeHtml(card.displayKey || card.id || "") + '" data-card-prompt="' + escapeHtml(card.displayPrompt || card.front || card.cloze || "") + '" data-card-topic="' + escapeHtml(card.displayTopic || card.learningFocus || "") + '" data-source-page="' + escapeHtml(card.sourcePage || "") + '">Show answer</button></div>' +
+          '<div class="learning-action-row"><button class="secondary" type="button" data-learning-action="flip-card" data-card-id="' + escapeHtml(card.displayKey || card.id || "") + '" data-card-prompt="' + escapeHtml(card.displayPrompt || card.front || card.cloze || "") + '" data-card-topic="' + escapeHtml(card.displayTopic || card.learningFocus || "") + '" data-source-page="' + escapeHtml(card.sourcePage || "") + '">Show answer</button><button class="secondary" type="button" data-learning-action="open-practice" data-practice-type="card" data-practice-id="' + escapeHtml(card.displayKey || card.id || "") + '">Practice</button></div></div>' +
         '<div class="learning-study-card-face back"><h4>Answer</h4><p>' + escapeHtml(card.back || card.explanation || "No answer text saved yet.") + '</p>' +
           '<div class="learning-chip-row"><span class="learning-chip bit">' + escapeHtml(card.learningFocus || card.displayTopic || "concept") + '</span><button class="learning-chip capture learning-evidence-label" type="button" title="' + escapeHtml(card.sourcePage || card.displayEvidence || "") + '" data-learning-target="source-page" data-vault="' + escapeHtml(card.sourceVault || "") + '" data-source-page="' + escapeHtml(card.sourcePage || "") + '">' + escapeHtml(shortLearningSourceLabel(card.displayEvidence || card.sourcePage || "No source link")) + '</button></div>' +
           (card.displayQuality === "repaired" ? '<small>Prompt clarified for display; stored card was not rewritten.</small>' : '') +
@@ -7922,7 +8345,7 @@ function renderHtml() {
       processPendingLearning.disabled = true;
       learningFeedback.textContent = "Processing pending learning sources...";
       try {
-        const data = await postLearningAction("/api/learning/process-pending", { vault, force: true, limit: 12 });
+        const data = await postLearningAction("/api/learning/process-pending", { vault, force: true, limit: 6 });
         learningFeedback.textContent = data.detail || "Learning automation finished";
         await loadLearning();
       } catch (error) {

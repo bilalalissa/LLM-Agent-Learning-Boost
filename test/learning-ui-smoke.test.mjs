@@ -167,6 +167,9 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /runAutoIngestWorker/);
   assert.match(serverSource, /auto-ingest-worker\.mjs/);
   assert.match(serverSource, /Auto-ingest blocked/);
+  assert.match(serverSource, /nextAutoIngestVault/);
+  assert.match(serverSource, /resourceLimit: 3/);
+  assert.match(serverSource, /Learning Autopilot is processing/);
   assert.match(serverSource, /\.provider-grid \.inline-toggle/);
   assert.match(serverSource, /Revise Plans And Goals/);
   assert.match(serverSource, /Save plan revision/);
@@ -183,6 +186,17 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /source_linked_to_learning/);
   assert.match(serverSource, /Learning Boost source processed/);
   assert.match(serverSource, /recentEvents/);
+  assert.match(serverSource, /Practice Learning Cards And Bits/);
+  assert.match(serverSource, /Open practice window/);
+  assert.match(serverSource, /api\/learning\/bit-review/);
+  assert.match(serverSource, /api\/learning\/card-edit/);
+  assert.match(serverSource, /api\/learning\/bit-edit/);
+  assert.match(serverSource, /studyQueueCards/);
+  assert.match(serverSource, /studyQueueBits/);
+  assert.match(serverSource, /Practice note/);
+  assert.match(serverSource, /data-learning-action="practice-grade"/);
+  assert.match(serverSource, /Again/);
+  assert.match(serverSource, /Good/);
   assert.match(serverSource, /sourceLinks/);
   assert.match(serverSource, /sourceGroups/);
   assert.match(serverSource, /Processed links/);

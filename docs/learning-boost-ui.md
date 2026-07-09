@@ -100,11 +100,28 @@ Verified outputs are:
 
 `Show answer` is also a review action. The first time a card answer is shown, Learning Boost appends a `card_reviewed` event to `.llm-wiki/learning/review-log.jsonl`, marks the visible card as read, and refreshes review summaries. It does not rewrite the stored card JSONL.
 
+Bits can also be marked read. A `bit_reviewed` event moves the bit behind unread or due bits in the study queue without deleting it.
+
+## Focused Practice Window
+
+`Open practice window` starts a one-item-at-a-time study session for cards and bits. It is intended for working-memory-friendly practice: read one prompt or bit, reveal or inspect the answer, add a note if useful, then grade it.
+
+The queue is based on the best available learning plan first, then spaced-repetition priority:
+
+- Active, scheduled, approved, and proposed plans are ranked in that order.
+- Items linked to the selected plan's sources are shown before unrelated items.
+- Unread and due cards/bits replace items you already marked read.
+- Items marked `Again`, `Hard`, `Good`, or `Easy` get a next review date and return when due.
+
+Use `Edit item` in the practice window when a generated card or bit needs a better topic, prompt, answer, or explanation. Edits update the local card/bit record; review history remains append-only.
+
 ## Tab Loading
 
 Files, Archive, and Topics show explicit index states instead of ambiguous empty tables. During a first scan they show loading. If stale rows exist, those rows stay visible while the refresh runs. If the scan finishes with no rows, the tab shows an empty state. If the scan stalls or fails, the tab shows the latest bounded status and refreshes automatically the next time the tab or sidebar is read; it does not leave the table in an infinite polling loop.
 
 The file-list endpoints return `ready`, `ready_empty`, `stale_refreshing`, `loading`, or `error`. The UI uses fetch timeouts so slow capture scans or background ingest work do not leave a table stuck on `Loading...`.
+
+Scheduled Learning Autopilot runs are intentionally small. The scheduler picks one vault with pending raw files and processes a small batch, then returns control to the app. This prevents a large raw folder or slow provider call from turning the global status into a long-running timeout. Use `Process pending now` when you want to push a larger selected-vault batch immediately.
 
 ## Capture Scan Status
 

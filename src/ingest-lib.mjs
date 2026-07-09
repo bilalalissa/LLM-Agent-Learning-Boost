@@ -23,8 +23,12 @@ import {
   vaultName
 } from "./vaults.mjs";
 
-export async function ingestVault(vaultPath, config, provider = createProvider(config)) {
-  const candidates = listRawCandidates(vaultPath);
+export async function ingestVault(vaultPath, config, provider = createProvider(config), options = {}) {
+  const requestedLimit = Number(options.limit || options.resourceLimit || 0);
+  const limit = Number.isFinite(requestedLimit) && requestedLimit > 0 ? Math.floor(requestedLimit) : 0;
+  const candidates = limit > 0
+    ? listRawCandidates(vaultPath).slice(0, limit)
+    : listRawCandidates(vaultPath);
   const results = [];
   for (const sourcePath of candidates) {
     await yieldToEventLoop();

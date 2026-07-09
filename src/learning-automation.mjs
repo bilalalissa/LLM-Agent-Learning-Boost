@@ -135,7 +135,9 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
     };
   }
 
-  const results = await ingestVault(vaultPath, options.config, options.provider);
+  const results = await ingestVault(vaultPath, options.config, options.provider, {
+    limit: options.resourceLimit || options.limit || 12
+  });
   const marked = markResourceIngestResults(vaultPath, results);
   for (const result of results) {
     recordLearningNotification(vaultPath, {

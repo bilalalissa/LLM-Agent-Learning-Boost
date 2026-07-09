@@ -175,10 +175,73 @@ export function recordLearningCardReview(config, vault, input = {}) {
     sourceVault: vaultName(vaultPath),
     topic: card?.learningFocus || card?.topic || input.topic || "",
     prompt: card?.front || card?.cloze || prompt || "",
-    grade: input.grade || "read"
+    grade: input.grade || "read",
+    notes: String(input.notes || "").trim(),
+    nextReviewAt: nextReviewAt(input.grade || input.action || "read", input.intervalDays)
   };
   appendJsonl(path.join(paths.dir, "review-log.jsonl"), event);
   return { recorded: true, event };
+}
+
+export function recordLearningBitReview(config, vault, input = {}) {
+  const vaultPath = listVaults(config.vaultsRoot).find((item) => vaultName(item) === vault);
+  if (!vaultPath) throw new Error(`Unknown vault: ${vault}`);
+  ensureLearningScaffold(vaultPath, config);
+  const paths = learningPaths(vaultPath);
+  const bits = readJsonl(path.join(paths.dir, "bits.jsonl"));
+  const requestedKey = String(input.bitId || "").trim();
+  const title = String(input.title || "").trim();
+  const bit = bits.find((item) => bitKey(item) === requestedKey || item.id === requestedKey) ||
+    bits.find((item) => title && String(item.title || "") === title);
+  const event = {
+    id: stableId("review", `${requestedKey || title}-${input.action || "read"}-${new Date().toISOString()}`),
+    type: "bit_reviewed",
+    action: String(input.action || "read"),
+    created: new Date().toISOString(),
+    bitId: bitKey(bit || input),
+    sourcePage: bit?.sourcePage || input.sourcePage || "",
+    sourceVault: vaultName(vaultPath),
+    topic: bit?.learningFocus || bit?.topic || input.topic || "",
+    title: bit?.title || title || "",
+    grade: input.grade || "read",
+    notes: String(input.notes || "").trim(),
+    nextReviewAt: nextReviewAt(input.grade || input.action || "read", input.intervalDays)
+  };
+  appendJsonl(path.join(paths.dir, "review-log.jsonl"), event);
+  return { recorded: true, event };
+}
+
+export function updateLearningCard(config, vault, input = {}) {
+  const vaultPath = listVaults(config.vaultsRoot).find((item) => vaultName(item) === vault);
+  if (!vaultPath) throw new Error(`Unknown vault: ${vault}`);
+  ensureLearningScaffold(vaultPath, config);
+  const paths = learningPaths(vaultPath);
+  const result = updateJsonlItem(path.join(paths.dir, "cards.jsonl"), input.cardId, cardKey, (card) => ({
+    ...card,
+    ...(hasOwn(input, "front") ? { front: String(input.front || "").trim() } : {}),
+    ...(hasOwn(input, "back") ? { back: String(input.back || "").trim() } : {}),
+    ...(hasOwn(input, "hint") ? { hint: String(input.hint || "").trim() } : {}),
+    ...(hasOwn(input, "topic") ? { topic: String(input.topic || "").trim(), learningFocus: String(input.topic || card.learningFocus || "").trim() } : {}),
+    ...(hasOwn(input, "type") ? { type: String(input.type || card.type || "qa").trim() } : {}),
+    updated: new Date().toISOString()
+  }));
+  return { updated: result.updated, card: result.item };
+}
+
+export function updateLearningBit(config, vault, input = {}) {
+  const vaultPath = listVaults(config.vaultsRoot).find((item) => vaultName(item) === vault);
+  if (!vaultPath) throw new Error(`Unknown vault: ${vault}`);
+  ensureLearningScaffold(vaultPath, config);
+  const paths = learningPaths(vaultPath);
+  const result = updateJsonlItem(path.join(paths.dir, "bits.jsonl"), input.bitId, bitKey, (bit) => ({
+    ...bit,
+    ...(hasOwn(input, "title") ? { title: String(input.title || "").trim() } : {}),
+    ...(hasOwn(input, "body") ? { body: String(input.body || "").trim() } : {}),
+    ...(hasOwn(input, "topic") ? { topic: String(input.topic || "").trim(), learningFocus: String(input.topic || bit.learningFocus || "").trim() } : {}),
+    ...(hasOwn(input, "level") ? { level: String(input.level || bit.level || "core").trim() } : {}),
+    updated: new Date().toISOString()
+  }));
+  return { updated: result.updated, bit: result.item };
 }
 
 function profileFromUser(userProfile) {
@@ -320,10 +383,10 @@ function learningStats(paths) {
   const plans = readJsonl(path.join(paths.dir, "plans.jsonl"));
   const sourceLinks = readJsonl(path.join(paths.dir, "source-links.jsonl"));
   const reviews = readJsonl(path.join(paths.dir, "review-log.jsonl"));
-  const readCardIds = new Set(reviews
-    .filter((event) => event.type === "card_reviewed" || event.action === "read" || event.action === "seen")
-    .map((event) => event.cardId || "")
-    .filter(Boolean));
+  const cardReviews = latestReviews(reviews, "card_reviewed", "cardId");
+  const bitReviews = latestReviews(reviews, "bit_reviewed", "bitId");
+  const readCardIds = new Set([...cardReviews.keys()]);
+  const readBitIds = new Set([...bitReviews.keys()]);
   const bitsBySource = new Map();
   for (const bit of bits) {
     const key = bit.sourcePage || "";
@@ -334,14 +397,21 @@ function learningStats(paths) {
   }
   const displayCards = cards
     .map((card) => enrichLearningCardForDisplay(card, { relatedBits: bitsBySource.get(card.sourcePage || "") || [], sourceLinks }))
-    .map((card) => ({ ...card, displayKey: cardKey(card), displayRead: readCardIds.has(cardKey(card)) }));
+    .map((card) => withReviewState({ ...card, displayKey: cardKey(card) }, cardReviews.get(cardKey(card))));
   const primaryCards = displayCards.filter((card) => card.displayDemoted !== true);
-  const fallbackCards = primaryCards.length ? primaryCards : displayCards;
-  const displayBits = bits.map((bit) => enrichLearningBitForDisplay(bit, { sourceLinks }));
+  const fallbackCards = prioritizeStudyItems(primaryCards.length ? primaryCards : displayCards);
+  const displayBits = prioritizeStudyItems(bits
+    .map((bit) => enrichLearningBitForDisplay(bit, { sourceLinks }))
+    .map((bit) => withReviewState({ ...bit, displayKey: bitKey(bit) }, bitReviews.get(bitKey(bit)))));
   const today = new Date().toISOString().slice(0, 10);
-  const dueCards = fallbackCards.filter((card) => !card.due || card.due <= today).slice(0, 10);
-  const recentCards = fallbackCards.slice(-10).reverse();
-  const recentBits = displayBits.slice(-12).reverse();
+  const bestPlan = selectBestLearningPlan(plans);
+  const planSources = sourcePagesForPlan(bestPlan, sourceLinks);
+  const dueCards = fallbackCards.filter((card) => isDueForStudy(card, today)).slice(0, 10);
+  const dueBits = displayBits.filter((bit) => isDueForStudy(bit, today)).slice(0, 10);
+  const studyQueueCards = prioritizePlanItems(fallbackCards.filter((card) => !card.displayRead || card.displayReviewDue), planSources).slice(0, 24);
+  const studyQueueBits = prioritizePlanItems(displayBits.filter((bit) => !bit.displayRead || bit.displayReviewDue), planSources).slice(0, 24);
+  const recentCards = fallbackCards.slice(0, 10);
+  const recentBits = displayBits.slice(0, 12);
   return {
     bits: bits.length,
     cards: cards.length,
@@ -350,8 +420,13 @@ function learningStats(paths) {
     allCards: fallbackCards,
     allBits: displayBits,
     reviewedCards: readCardIds.size,
+    reviewedBits: readBitIds.size,
+    bestPlan,
+    studyQueueCards,
+    studyQueueBits,
     recentSourceLinks: sourceLinks.slice(-10).reverse(),
     dueCards,
+    dueBits,
     recentCards,
     recentBits
   };
@@ -359,6 +434,114 @@ function learningStats(paths) {
 
 function cardKey(card = {}) {
   return String(card.id || card.displayKey || card.cardId || `${card.sourcePage || ""}|${card.front || card.cloze || card.displayPrompt || ""}`);
+}
+
+function bitKey(bit = {}) {
+  return String(bit.id || bit.displayKey || bit.bitId || `${bit.sourcePage || ""}|${bit.title || bit.body || bit.displayTopic || ""}`);
+}
+
+function latestReviews(reviews, type, idKey) {
+  const latest = new Map();
+  for (const event of reviews) {
+    if (event.type !== type) continue;
+    const key = String(event[idKey] || "").trim();
+    if (!key) continue;
+    const previous = latest.get(key);
+    if (!previous || String(event.created || "") >= String(previous.created || "")) latest.set(key, event);
+  }
+  return latest;
+}
+
+function withReviewState(item, event) {
+  const today = new Date().toISOString().slice(0, 10);
+  const next = String(event?.nextReviewAt || "").slice(0, 10);
+  const reviewed = Boolean(event);
+  const due = !reviewed || !next || next <= today || (item.due && item.due <= today);
+  return {
+    ...item,
+    displayRead: reviewed && !due,
+    displayReviewed: reviewed,
+    displayReviewDue: due,
+    displayLastReviewAt: event?.created || "",
+    displayNextReviewAt: event?.nextReviewAt || "",
+    displayReviewGrade: event?.grade || ""
+  };
+}
+
+function isDueForStudy(item, today) {
+  return item.displayReviewDue || !item.displayReviewed || !item.due || item.due <= today;
+}
+
+function prioritizeStudyItems(items) {
+  return [...(items || [])].sort((a, b) => {
+    const aUnread = a.displayRead ? 1 : 0;
+    const bUnread = b.displayRead ? 1 : 0;
+    if (aUnread !== bUnread) return aUnread - bUnread;
+    const aDue = a.displayReviewDue ? 0 : 1;
+    const bDue = b.displayReviewDue ? 0 : 1;
+    if (aDue !== bDue) return aDue - bDue;
+    return String(b.updated || b.created || "").localeCompare(String(a.updated || a.created || ""));
+  });
+}
+
+function prioritizePlanItems(items, sourcePages) {
+  if (!sourcePages?.size) return prioritizeStudyItems(items);
+  return prioritizeStudyItems(items).sort((a, b) => {
+    const aPlan = sourcePages.has(a.sourcePage || "") ? 0 : 1;
+    const bPlan = sourcePages.has(b.sourcePage || "") ? 0 : 1;
+    return aPlan - bPlan;
+  });
+}
+
+function selectBestLearningPlan(plans = []) {
+  const rank = { active: 0, scheduled: 1, approved: 2, proposed: 3 };
+  return [...plans]
+    .filter((plan) => plan && plan.id)
+    .sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9) || String(b.updated || b.created || "").localeCompare(String(a.updated || a.created || "")))[0] || null;
+}
+
+function sourcePagesForPlan(plan, sourceLinks = []) {
+  const sources = new Set();
+  if (!plan) return sources;
+  for (const stage of plan.stages || []) {
+    for (const value of [stage.sourcePage, stage.source, ...(Array.isArray(stage.sources) ? stage.sources : [])]) {
+      if (value) sources.add(String(value));
+    }
+  }
+  for (const link of sourceLinks || []) {
+    if ((link.linkedPlans || []).some((item) => item.id === plan.id || item.planId === plan.id)) sources.add(link.sourcePage || "");
+  }
+  return sources;
+}
+
+function nextReviewAt(grade, intervalDays) {
+  const explicit = Number(intervalDays);
+  const days = Number.isFinite(explicit) && explicit > 0
+    ? explicit
+    : ({ again: 0, hard: 1, read: 1, good: 3, easy: 7, known: 14 }[String(grade || "").toLowerCase()] ?? 1);
+  const next = new Date();
+  next.setDate(next.getDate() + days);
+  return next.toISOString();
+}
+
+function updateJsonlItem(file, requestedKey, keyFn, mapper) {
+  const rows = readJsonl(file);
+  const key = String(requestedKey || "").trim();
+  const index = rows.findIndex((item) => keyFn(item) === key || item.id === key);
+  if (index < 0) throw new Error("Learning item not found.");
+  const next = mapper(rows[index]);
+  rows[index] = next;
+  writeJsonl(file, rows);
+  return { updated: true, item: next };
+}
+
+function writeJsonl(file, rows) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length ? "\n" : ""));
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
 }
 
 function stableId(prefix, value) {

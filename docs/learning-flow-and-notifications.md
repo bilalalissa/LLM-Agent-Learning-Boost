@@ -119,6 +119,27 @@ The original card remains unchanged in `.llm-wiki/learning/cards.jsonl`. Read st
 
 This preserves history while still letting the UI track which cards you have already inspected.
 
+Bits use the same review log. When you mark a bit read, Learning Boost appends a `bit_reviewed` event and moves that bit behind unread or due bits in the study queue. Read cards and bits are not deleted; they return when their next review date arrives.
+
+## Practice Window And Spaced Review
+
+Use `Open practice window` from Cards And Bits when you want a focused study session. The window shows one card or bit at a time, so you do not have to scan the whole Learning tab while practicing.
+
+The practice queue is selected from the current best learning plan first. Plans are ranked active, scheduled, approved, then proposed. Cards and bits linked to that plan's sources are prioritized, followed by due items, unread items, and then recent items.
+
+After revealing an answer, choose:
+
+- `Again`: keep it due now.
+- `Hard`: review again soon.
+- `Good`: schedule a later review.
+- `Easy`: schedule farther out.
+
+You can add a practice note with the review. The note is stored in the review log with the grade and next review date.
+
+The practice window also lets you edit a card or bit before saving review feedback. Edits update the relevant `cards.jsonl` or `bits.jsonl` record, while review events remain append-only in `review-log.jsonl`.
+
+Routine background auto-ingest is bounded so it does not monopolize the app. Each scheduled run processes one pending vault and a small batch of files. Manual `Process pending now` can still run a larger explicit batch for the selected vault.
+
 ## Files, Archive, And Topics Loading
 
 Files, Archive, Topics, and the side Topics list report explicit loading states:
