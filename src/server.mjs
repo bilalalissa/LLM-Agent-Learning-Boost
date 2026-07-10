@@ -397,8 +397,8 @@ const server = http.createServer(async (request, response) => {
       setAutomationRuntime(vaultPath, { running: true, status: "processing", detail: "Processing pending learning sources..." });
       const workerResult = await runAutoIngestWorker({
         vaultPath,
-        options: { force: payload.force === true, resourceLimit: payload.limit || 6 },
-        timeoutMs: Math.max((config.providerTimeoutMs || 60000) * 2, 180000)
+        options: { force: payload.force === true, resourceLimit: payload.limit || 1 },
+        timeoutMs: Math.max((config.providerTimeoutMs || 60000) * 5, 600000)
       });
       const result = workerResult.vaults?.[0]?.automationResult || {
         status: workerResult.status || "idle",
@@ -423,8 +423,9 @@ const server = http.createServer(async (request, response) => {
     } catch (error) {
       const summary = summarizeStatusError(error);
       const timeout = error.code === "AUTO_INGEST_TIMEOUT" || /timed out|time limit/i.test(summary);
+      const partialDetail = error.partialResult?.detail ? ` Last worker state: ${error.partialResult.detail}` : "";
       const detail = timeout
-        ? "Learning automation paused after the worker time limit. Pending files were left in place and the next bounded run will continue."
+        ? `Learning automation paused after the worker time limit. Pending files were left in place and the next bounded run will continue.${partialDetail}`
         : summary;
       if (vaultPath) setAutomationRuntime(vaultPath, timeout
         ? { running: false, status: "paused", detail, lastPausedAt: new Date().toISOString() }
@@ -3179,7 +3180,8 @@ async function runAutoIngest() {
     autoIngestBackoffUntil = Date.now() + (timedOut ? Math.max(config.watchIntervalMs * 2, 30000) : Math.max(config.watchIntervalMs * 3, 60000));
     const retryAt = formatLocal(new Date(autoIngestBackoffUntil));
     if (timedOut) {
-      const detail = `Learning Autopilot paused for ${vaultName(pendingVault.vaultPath)} after one slow file exceeded the background limit. Pending files were left in place; the next bounded run will retry after ${retryAt}.`;
+      const partialDetail = error.partialResult?.detail ? ` Last worker state: ${error.partialResult.detail}` : "";
+      const detail = `Learning Autopilot paused for ${vaultName(pendingVault.vaultPath)} after one slow file exceeded the background limit. Pending files were left in place; the next bounded run will retry after ${retryAt}.${partialDetail}`;
       setAutomationRuntime(pendingVault.vaultPath, {
         running: false,
         status: "paused",
@@ -3252,7 +3254,12 @@ function runAutoIngestWorker(options = {}) {
     };
     const timeout = setTimeout(() => {
       worker.kill("SIGTERM");
-      const error = Object.assign(new Error("Learning Autopilot worker time limit reached."), { code: "AUTO_INGEST_TIMEOUT" });
+      const partialResult = readWorkerResult(resultFile);
+      const partialDetail = partialResult?.detail ? ` Last worker state: ${partialResult.detail}` : "";
+      const error = Object.assign(new Error(`Learning Autopilot worker time limit reached.${partialDetail}`), {
+        code: "AUTO_INGEST_TIMEOUT",
+        partialResult
+      });
       cleanupWorkerResult(resultFile);
       finish(() => reject(error));
     }, Math.max(15000, Number(options.timeoutMs || 120000)));
@@ -8372,7 +8379,7 @@ function renderHtml() {
       processPendingLearning.disabled = true;
       learningFeedback.textContent = "Processing pending learning sources...";
       try {
-        const data = await postLearningAction("/api/learning/process-pending", { vault, force: true, limit: 6 });
+        const data = await postLearningAction("/api/learning/process-pending", { vault, force: true, limit: 1 });
         learningFeedback.textContent = data.detail || "Learning automation finished";
         await loadLearning();
       } catch (error) {

@@ -363,6 +363,13 @@ ${(input.processedSource?.processingNotes || []).join("\n")}
 Learning card quality rules:
 ${learningBoostCardQualityRules()}
 
+Technical reference rule:
+- Treat the source as a reusable reference, not only a summary.
+- Extract every included step, instruction, command, code block, solution, quality, property, formula, equation, parameter, endpoint, configuration value, constraint, and caveat that is grounded in the supplied text.
+- Put those details in learning_boost.technical_reference and details_to_keep.
+- Create learning_bits and general_cards that help the learner recall or apply those exact technical details.
+- Preserve exact code, commands, formulas, equations, variable names, settings, and values. Do not invent missing technical details.
+
 Return strict JSON with this shape:
 {
   "language": "detected primary language or multilingual",
@@ -615,6 +622,7 @@ Language rule:
 - If the source is meaningfully multilingual, preserve the source languages where they carry meaning.
 - Keep JSON keys exactly as requested.
 - Learning card quality rules: ${learningBoostCardQualityRules()}
+- Technical reference rule: extract every included step, instruction, command, code block, solution, quality, property, formula, equation, parameter, endpoint, configuration value, constraint, and caveat into learning_boost.technical_reference and details_to_keep. Create learning_bits and general_cards that help recall or apply those exact details. Preserve exact code, commands, formulas, equations, variable names, settings, and values. Do not invent missing technical details.
 
 Return strict JSON with this shape:
 {
@@ -895,6 +903,7 @@ function analysisContext(input = {}, extra = {}) {
     sourceTitle: extra.sourceTitle || input.sourceTitle || "",
     processedRel: extra.processedRel || input.sourcePath || "",
     sourceLocation: input.sourcePath || extra.processedRel || "",
+    sourceText: extra.sourceText || input.sourceText || input.processedSource?.text || "",
     summary: extra.summary || "",
     language: extra.language || "",
     targetLanguages: ["AUTO"],

@@ -43,6 +43,7 @@ If the selected provider itself is unavailable, fix the Provider tab status firs
 Every processed source asks the provider for a `learning_boost` object. The app normalizes that object into:
 
 - source-page Learning Boost sections
+- a `Technical Reference` section for source-grounded steps, instructions, code, commands, solutions, qualities, properties, formulas, equations, configuration values, parameters, endpoints, constraints, and caveats
 - `.llm-wiki/learning/bits.jsonl`
 - `.llm-wiki/learning/cards.jsonl`
 - `.llm-wiki/learning/behavior-log.jsonl`
@@ -50,6 +51,14 @@ Every processed source asks the provider for a `learning_boost` object. The app 
 - RemNote-ready `exports/remnote-import.md`, `exports/remnote-import.txt`, `exports/remnote-media-index.md`, and `exports/remnote-media/`
 
 Each processed source produces multiple bits and cards when provider output is sparse. Source-level plan suggestions are retained as learning signals, but real goals and plans are drafted from gathered ResourceInbox items plus processed bits, cards, and source links.
+
+Technical details are preserved as reference material and also converted into practice material. For example, a source that contains a procedure, a command, or a formula should create:
+
+- a readable reference entry on the source page;
+- one or more learning bits that preserve the exact steps, code, or formula;
+- recall cards that ask how to reproduce or apply that specific detail.
+
+If provider output is sparse but the extracted local text contains obvious fenced code blocks, numbered steps, or equation-like lines, Learning Boost keeps those details locally and adds them to the technical reference instead of losing them.
 
 Cards should be topic- or concept-specific. The source title and path remain evidence, but prompts should not ask the learner to remember “this source” or raw browser clip metadata. Existing weak cards are repaired for display in the Learning tab without rewriting the vault files by default.
 

@@ -50,6 +50,10 @@ function fakeProvider() {
           target_languages: ["AUTO"],
           gist: "Practice remembering, not just rereading.",
           core_summary: "Small recall prompts make study easier to review and schedule.",
+          technical_reference: {
+            steps: [{ title: "Recall session", items: ["Read the gist.", "Answer one card.", "Review the evidence."], evidence: ["source"] }],
+            technical_details: [{ kind: "method", title: "Session size", detail: "Keep recall sessions short enough to finish.", evidence: ["source"] }]
+          },
           detail_layers: [{ level: "core", title: "Recall", body: "Answering prompts improves memory.", evidence: ["source"] }],
           learning_bits: [{ type: "concept", level: "core", title: "Retrieval practice", body: "Recall from memory.", cognitiveLoad: 1, evidence: ["source"] }],
           general_cards: [{ type: "qa", front: "What is retrieval practice?", back: "Recall from memory.", evidence: ["source"] }],
@@ -136,6 +140,59 @@ test("learning_boost normalization preserves cards, evidence, media, and staging
   assert.match(renderLearningBoostSection(boost), /## Learning Boost/);
 });
 
+test("learning_boost extracts technical reference details into bits, cards, and source page markdown", () => {
+  const boost = normalizeLearningBoost({
+    source_language: "English",
+    target_languages: ["AUTO"],
+    gist: "Configure the local endpoint before running the client.",
+    core_summary: "The setup uses a URL, a timeout, and a command.",
+    technical_reference: {
+      steps: [{ title: "Local router setup", items: ["Start the router.", "Set OPENAI_COMPAT_BASE_URL=http://127.0.0.1:17640/v1."], evidence: ["setup.md"] }],
+      code_blocks: [{ language: "sh", title: "Health check", code: "curl http://127.0.0.1:17640/api/health", explanation: "Confirms the router API is reachable.", evidence: ["setup.md"] }],
+      formulas: [{ name: "Retry budget", formula: "retry_budget = timeout_ms / attempt_ms", variables: ["timeout_ms = total timeout", "attempt_ms = one attempt"], use: "Estimate how many retries fit.", evidence: ["setup.md"] }]
+    },
+    learning_bits: [],
+    general_cards: []
+  }, {
+    sourceRel: "wiki/sources/setup.md",
+    sourceTitle: "Router setup"
+  });
+  const markdown = renderLearningBoostSection(boost);
+
+  assert.match(markdown, /### Technical Reference/);
+  assert.match(markdown, /Local router setup/);
+  assert.match(markdown, /```sh\ncurl http:\/\/127\.0\.0\.1:17640\/api\/health/);
+  assert.match(markdown, /retry_budget = timeout_ms \/ attempt_ms/);
+  assert.equal(boost.learning_bits.some((bit) => /Start the router/.test(bit.body)), true);
+  assert.equal(boost.cards.some((card) => /What are the key steps for Local router setup/.test(card.front)), true);
+  assert.equal(boost.cards.some((card) => /What code or command implements Health check/.test(card.front)), true);
+});
+
+test("learning_boost infers code, ordered steps, and formulas from sparse source text", () => {
+  const boost = normalizeLearningBoost({
+    gist: "Sparse provider output.",
+    learning_bits: [],
+    general_cards: []
+  }, {
+    sourceRel: "wiki/sources/local.md",
+    sourceTitle: "Local setup",
+    sourceText: `1. Install the runtime.
+2. Run the health check.
+
+\`\`\`js
+const baseUrl = "http://127.0.0.1:17640/v1";
+\`\`\`
+
+latency_score = tokens_per_second / prompt_tokens`
+  });
+
+  assert.equal(boost.technical_reference.steps.length, 1);
+  assert.equal(boost.technical_reference.code_blocks.length, 1);
+  assert.equal(boost.technical_reference.formulas.length, 1);
+  assert.equal(boost.learning_bits.some((bit) => /Install the runtime/.test(bit.body)), true);
+  assert.equal(boost.cards.some((card) => /What formula should you remember/.test(card.front)), true);
+});
+
 test("ingestFile renders Learning Boost sections and writes learning JSONL outputs", async () => {
   const { root, vault } = makeVault();
   const source = path.join(vault, "raw", "input", "retrieval.md");
@@ -154,6 +211,8 @@ test("ingestFile renders Learning Boost sections and writes learning JSONL outpu
 
   assert.match(page, /## Learning Boost/);
   assert.match(page, /### Working-Memory Friendly Gist/);
+  assert.match(page, /### Technical Reference/);
+  assert.match(page, /Recall session/);
   assert.match(page, /### Evidence Map/);
   assert.match(cards, /What is retrieval practice/);
   assert.match(bits, /Retrieval practice/);

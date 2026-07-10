@@ -11,6 +11,7 @@ import { slugify, vaultName } from "./vaults.mjs";
 export const LEARNING_BOOST_SECTIONS = [
   "Working-Memory Friendly Gist",
   "Core Understanding",
+  "Technical Reference",
   "Detail Layers",
   "Learning Bits",
   "Active Recall Cards",
@@ -31,6 +32,17 @@ export function learningBoostJsonShape() {
     "target_languages": ["AUTO or selected languages"],
     "gist": "one-screen explanation",
     "core_summary": "deeper but still concise explanation",
+    "technical_reference": {
+      "steps": [{"title": "step or procedure name", "items": ["ordered action"], "evidence": ["source page/location"]}],
+      "instructions": [{"title": "instruction set name", "items": ["instruction"], "evidence": ["source page/location"]}],
+      "code_blocks": [{"language": "language or shell", "title": "what this code does", "code": "exact useful code", "explanation": "how/when to use it", "evidence": ["source page/location"]}],
+      "solutions": [{"problem": "problem", "solution": "solution", "why_it_works": "reason", "evidence": ["source page/location"]}],
+      "qualities": [{"item": "object/system/concept", "quality": "quality", "meaning": "what the quality means", "evidence": ["source page/location"]}],
+      "properties": [{"item": "object/system/concept", "property": "property", "value": "value or description", "evidence": ["source page/location"]}],
+      "formulas": [{"name": "formula name", "formula": "formula", "variables": ["symbol = meaning"], "use": "when/how to use it", "evidence": ["source page/location"]}],
+      "equations": [{"name": "equation name", "equation": "equation", "variables": ["symbol = meaning"], "use": "when/how to use it", "evidence": ["source page/location"]}],
+      "technical_details": [{"kind": "configuration / parameter / command / constraint / caveat / API / data shape", "title": "detail title", "detail": "exact detail to preserve", "evidence": ["source page/location"]}]
+    },
     "detail_layers": [
       {"level": "core", "title": "...", "body": "...", "evidence": ["..."]},
       {"level": "detail", "title": "...", "body": "...", "evidence": ["..."]},
@@ -47,7 +59,7 @@ export function learningBoostJsonShape() {
       {"target_language": "AUTO", "type": "vocabulary", "topic": "topic or concept name", "concept": "specific term", "learningFocus": "word or phrase", "front": "word or phrase", "back": "meaning and example", "hint": "pronunciation or grammar note"}
     ],
     "details_to_keep": [
-      {"kind": "definition", "text": "...", "why_it_matters": "...", "evidence": ["..."]}
+      {"kind": "definition / step / instruction / code / solution / quality / property / formula / equation / technical_detail", "topic": "topic or concept name", "concept": "specific concept", "text": "...", "why_it_matters": "...", "evidence": ["..."]}
     ],
     "relationships": [
       {"from": "concept A", "to": "concept B", "relationship": "causes / contrasts / example-of / prerequisite-for", "evidence": ["..."]}
@@ -69,6 +81,8 @@ export function learningBoostJsonShape() {
 export function learningBoostCardQualityRules() {
   return [
     "Every learning bit and card must include topic, concept, or learningFocus.",
+    "Preserve exact source-grounded steps, instructions, code, solutions, qualities, properties, formulas, equations, API details, configuration values, parameters, caveats, and technical constraints in learning_boost.technical_reference or details_to_keep.",
+    "For technical material, create learning bits and recall cards that ask the learner to reproduce or apply the specific step, command, formula, equation, property, or solution.",
     "Card prompts must ask about the topic/concept itself, not the source, source title, browser clip, download status, media count, or template artifacts.",
     "Do not write prompts such as 'What is important in this source?' or 'What did the source detect?'.",
     "Use source titles and paths only as evidence, never as the recall target.",
@@ -81,6 +95,14 @@ export function normalizeLearningBoost(input = {}, context = {}) {
   const evidence = defaultEvidence(context);
   const targetLanguages = arrayOr(raw.target_languages || raw.targetLanguages, context.targetLanguages || ["AUTO"]);
   const learningProfile = normalizeLearningProfile(context.learningProfile || {});
+  const technicalReference = mergeTechnicalReference(
+    normalizeTechnicalReference(raw.technical_reference || raw.technicalReference, evidence),
+    inferTechnicalReference(context.sourceText || context.source_text || raw.source_text || "", evidence)
+  );
+  const normalizedDetails = mergeDetails(
+    normalizeDetails(raw.details_to_keep || raw.detailsToKeep, evidence),
+    technicalReferenceToDetails(technicalReference, evidence)
+  );
   let learningBits = arrayOr(raw.learning_bits || raw.learningBits, []).map((bit, index) => normalizeLearningBit({
     ...bit,
     id: bit.id || stableId("bit", context.sourceRel, bit.title || bit.body || index),
@@ -95,6 +117,7 @@ export function normalizeLearningBoost(input = {}, context = {}) {
     mediaRefs: arrayOr(bit.mediaRefs || bit.media_refs, context.mediaRefs || []),
     evidence: arrayOr(bit.evidence, evidence)
   }));
+  learningBits = addTechnicalBits(learningBits, technicalReference, context, raw, evidence);
   learningBits = ensureLearningBitsDensity(learningBits, raw, context, evidence);
   let generalCards = arrayOr(raw.general_cards || raw.generalCards, []).map((card, index) => normalizeLearningCard({
     ...card,
@@ -110,6 +133,7 @@ export function normalizeLearningBoost(input = {}, context = {}) {
     mediaRefs: arrayOr(card.mediaRefs || card.media_refs, context.mediaRefs || []),
     evidence: arrayOr(card.evidence, evidence)
   }));
+  generalCards = addTechnicalCards(generalCards, technicalReference, context, raw, evidence);
   let targetLanguageCards = arrayOr(raw.target_language_cards || raw.targetLanguageCards, []).map((card, index) => normalizeLearningCard({
     ...card,
     id: card.id || stableId("lang-card", context.sourceRel, card.front || index),
@@ -131,6 +155,7 @@ export function normalizeLearningBoost(input = {}, context = {}) {
     target_languages: targetLanguages,
     gist: stringOr(raw.gist, context.summary || ""),
     core_summary: stringOr(raw.core_summary || raw.coreSummary, context.summary || ""),
+    technical_reference: technicalReference,
     detail_layers: arrayOr(raw.detail_layers || raw.detailLayers, []).map((item) => ({
       level: stringOr(item.level, "core"),
       title: stringOr(item.title, ""),
@@ -141,7 +166,7 @@ export function normalizeLearningBoost(input = {}, context = {}) {
     general_cards: generalCards,
     target_language_cards: targetLanguageCards,
     cards,
-    details_to_keep: normalizeDetails(raw.details_to_keep || raw.detailsToKeep, evidence),
+    details_to_keep: normalizedDetails,
     relationships: normalizeRelationships(raw.relationships, evidence),
     misconceptions_and_confusions: normalizeMisconceptions(raw.misconceptions_and_confusions || raw.misconceptionsAndConfusions),
     learning_plan_suggestions: normalizePlans(raw.learning_plan_suggestions || raw.learningPlanSuggestions, learningProfile),
@@ -232,6 +257,10 @@ ${data.gist || "_No gist generated yet._"}
 ### Core Understanding
 
 ${data.core_summary || "_No core summary generated yet._"}
+
+### Technical Reference
+
+${technicalReferenceMarkdown(data.technical_reference)}
 
 ### Detail Layers
 
@@ -605,10 +634,436 @@ function normalizeDetails(value, evidence) {
     ? { kind: "detail", text: item, why_it_matters: "", evidence }
     : {
       kind: stringOr(item.kind, "detail"),
+      topic: stringOr(item.topic, ""),
+      concept: stringOr(item.concept, ""),
+      learningFocus: stringOr(item.learningFocus || item.learning_focus, ""),
       text: stringOr(item.text, ""),
       why_it_matters: stringOr(item.why_it_matters || item.whyItMatters, ""),
       evidence: arrayOr(item.evidence, evidence)
     });
+}
+
+function normalizeTechnicalReference(value = {}, evidence = []) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    steps: normalizeProcedureItems(source.steps, "Procedure", evidence),
+    instructions: normalizeProcedureItems(source.instructions, "Instructions", evidence),
+    code_blocks: normalizeCodeBlocks(source.code_blocks || source.codeBlocks, evidence),
+    solutions: normalizeSolutions(source.solutions, evidence),
+    qualities: normalizeQualities(source.qualities, evidence),
+    properties: normalizeProperties(source.properties, evidence),
+    formulas: normalizeFormulas(source.formulas, "formula", evidence),
+    equations: normalizeFormulas(source.equations, "equation", evidence),
+    technical_details: normalizeTechnicalDetails(source.technical_details || source.technicalDetails, evidence)
+  };
+}
+
+function normalizeProcedureItems(value, fallbackTitle, evidence) {
+  return arrayOr(value, []).map((item, index) => {
+    if (typeof item === "string") {
+      return {
+        title: `${fallbackTitle} ${index + 1}`,
+        items: [item.trim()],
+        evidence
+      };
+    }
+    return {
+      title: stringOr(item.title || item.name, `${fallbackTitle} ${index + 1}`),
+      items: arrayOr(item.items || item.steps || item.instructions, item.text ? [String(item.text)] : []).map((entry) => String(entry).trim()).filter(Boolean),
+      evidence: arrayOr(item.evidence, evidence)
+    };
+  }).filter((item) => item.title || item.items.length);
+}
+
+function normalizeCodeBlocks(value, evidence) {
+  return arrayOr(value, []).map((item, index) => typeof item === "string"
+    ? {
+      language: "",
+      title: `Code example ${index + 1}`,
+      code: item.trim(),
+      explanation: "",
+      evidence
+    }
+    : {
+      language: stringOr(item.language || item.lang, ""),
+      title: stringOr(item.title || item.name, `Code example ${index + 1}`),
+      code: stringOr(item.code || item.text || item.snippet, ""),
+      explanation: stringOr(item.explanation || item.use || item.notes, ""),
+      evidence: arrayOr(item.evidence, evidence)
+    }).filter((item) => item.code);
+}
+
+function normalizeSolutions(value, evidence) {
+  return arrayOr(value, []).map((item) => typeof item === "string"
+    ? { problem: "Problem", solution: item.trim(), why_it_works: "", evidence }
+    : {
+      problem: stringOr(item.problem || item.issue || item.title, "Problem"),
+      solution: stringOr(item.solution || item.fix || item.text, ""),
+      why_it_works: stringOr(item.why_it_works || item.whyItWorks || item.reason, ""),
+      evidence: arrayOr(item.evidence, evidence)
+    }).filter((item) => item.solution);
+}
+
+function normalizeQualities(value, evidence) {
+  return arrayOr(value, []).map((item) => typeof item === "string"
+    ? { item: "Item", quality: item.trim(), meaning: "", evidence }
+    : {
+      item: stringOr(item.item || item.subject || item.system || item.concept, "Item"),
+      quality: stringOr(item.quality || item.name || item.text, ""),
+      meaning: stringOr(item.meaning || item.description || item.explanation, ""),
+      evidence: arrayOr(item.evidence, evidence)
+    }).filter((item) => item.quality);
+}
+
+function normalizeProperties(value, evidence) {
+  return arrayOr(value, []).map((item) => typeof item === "string"
+    ? { item: "Item", property: item.trim(), value: "", evidence }
+    : {
+      item: stringOr(item.item || item.subject || item.system || item.concept, "Item"),
+      property: stringOr(item.property || item.name || item.key, ""),
+      value: stringOr(item.value || item.description || item.text, ""),
+      evidence: arrayOr(item.evidence, evidence)
+    }).filter((item) => item.property || item.value);
+}
+
+function normalizeFormulas(value, kind, evidence) {
+  return arrayOr(value, []).map((item, index) => typeof item === "string"
+    ? { name: `${kind} ${index + 1}`, [kind]: item.trim(), variables: [], use: "", evidence }
+    : {
+      name: stringOr(item.name || item.title, `${kind} ${index + 1}`),
+      [kind]: stringOr(item[kind] || item.text || item.expression, ""),
+      variables: arrayOr(item.variables, []).map((entry) => String(entry).trim()).filter(Boolean),
+      use: stringOr(item.use || item.when || item.explanation, ""),
+      evidence: arrayOr(item.evidence, evidence)
+    }).filter((item) => item[kind]);
+}
+
+function normalizeTechnicalDetails(value, evidence) {
+  return arrayOr(value, []).map((item, index) => typeof item === "string"
+    ? { kind: "technical_detail", title: `Technical detail ${index + 1}`, detail: item.trim(), evidence }
+    : {
+      kind: stringOr(item.kind || item.type, "technical_detail"),
+      title: stringOr(item.title || item.name, `Technical detail ${index + 1}`),
+      detail: stringOr(item.detail || item.text || item.value, ""),
+      evidence: arrayOr(item.evidence, evidence)
+    }).filter((item) => item.detail);
+}
+
+function inferTechnicalReference(sourceText, evidence) {
+  const text = String(sourceText || "");
+  if (!text.trim()) return emptyTechnicalReference();
+  const inferred = emptyTechnicalReference();
+  const codeRegex = /```([^\n`]*)\n([\s\S]*?)```/g;
+  let match;
+  let codeIndex = 0;
+  while ((match = codeRegex.exec(text)) !== null) {
+    const code = String(match[2] || "").trim();
+    if (!code) continue;
+    inferred.code_blocks.push({
+      language: String(match[1] || "").trim(),
+      title: `Code block ${++codeIndex}`,
+      code,
+      explanation: "Exact code preserved from the source for technical reference.",
+      evidence
+    });
+  }
+
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const stepItems = [];
+  for (const line of lines) {
+    const step = line.match(/^\d+[.)]\s+(.{6,})$/);
+    if (step) stepItems.push(step[1].trim());
+  }
+  if (stepItems.length) {
+    inferred.steps.push({
+      title: "Extracted procedure",
+      items: stepItems.slice(0, 40),
+      evidence
+    });
+  }
+
+  for (const line of lines) {
+    if (looksLikeFormula(line)) {
+      inferred.formulas.push({
+        name: "Extracted formula",
+        formula: line,
+        variables: [],
+        use: "Formula or equation-like detail preserved from the source.",
+        evidence
+      });
+      continue;
+    }
+    if (looksLikeTechnicalDetail(line)) {
+      inferred.technical_details.push({
+        kind: "technical_detail",
+        title: technicalTitle(line),
+        detail: line,
+        evidence
+      });
+    }
+  }
+  inferred.formulas = uniqueObjects(inferred.formulas).slice(0, 30);
+  inferred.technical_details = uniqueObjects(inferred.technical_details).slice(0, 80);
+  return inferred;
+}
+
+function emptyTechnicalReference() {
+  return {
+    steps: [],
+    instructions: [],
+    code_blocks: [],
+    solutions: [],
+    qualities: [],
+    properties: [],
+    formulas: [],
+    equations: [],
+    technical_details: []
+  };
+}
+
+function mergeTechnicalReference(...references) {
+  const merged = emptyTechnicalReference();
+  for (const reference of references) {
+    const normalized = normalizeTechnicalReference(reference);
+    for (const key of Object.keys(merged)) {
+      merged[key].push(...normalized[key]);
+      merged[key] = uniqueObjects(merged[key]);
+    }
+  }
+  return merged;
+}
+
+function mergeDetails(...groups) {
+  return uniqueObjects(groups.flat().filter(Boolean));
+}
+
+function technicalReferenceToDetails(reference, evidence) {
+  return technicalReferenceEntries(reference, evidence).map((entry) => ({
+    kind: entry.kind,
+    topic: entry.topic,
+    concept: entry.topic,
+    learningFocus: entry.title,
+    text: entry.body,
+    why_it_matters: entry.why,
+    evidence: entry.evidence
+  }));
+}
+
+function addTechnicalBits(bits, technicalReference, context, raw, evidence) {
+  const result = [...bits];
+  for (const entry of technicalReferenceEntries(technicalReference, evidence)) {
+    if (!entry.title && !entry.body) continue;
+    if (result.some((bit) => sameText(bit.title, entry.title) || sameText(bit.body, entry.body))) continue;
+    result.push(normalizeLearningBit({
+      id: stableId("bit", context.sourceRel, `${entry.kind}-${entry.title}-${result.length}`),
+      type: `technical_${entry.kind}`,
+      level: "detail",
+      topic: entry.topic,
+      concept: entry.topic,
+      learningFocus: entry.title,
+      title: entry.title,
+      body: entry.body,
+      cognitiveLoad: entry.kind === "code" ? 3 : 2,
+      sourceVault: context.vault || "",
+      sourcePage: context.sourceRel || "",
+      sourceLocation: entry.evidence[0] || evidence[0] || "",
+      sourceLanguage: raw.source_language || raw.sourceLanguage || context.language || "unknown",
+      targetLanguage: "general",
+      mediaRefs: arrayOr(context.mediaRefs, []),
+      evidence: entry.evidence
+    }));
+  }
+  return result;
+}
+
+function addTechnicalCards(cards, technicalReference, context, raw, evidence) {
+  const result = [...cards];
+  for (const entry of technicalReferenceEntries(technicalReference, evidence)) {
+    const front = technicalQuestion(entry);
+    if (!front || result.some((card) => sameText(card.front || card.cloze, front))) continue;
+    result.push(normalizeLearningCard({
+      id: stableId("card", context.sourceRel, `${entry.kind}-${front}-${result.length}`),
+      type: "qa",
+      topic: entry.topic,
+      concept: entry.topic,
+      learningFocus: entry.title,
+      front,
+      back: entry.body,
+      hint: entry.kind,
+      sourceVault: context.vault || "",
+      sourcePage: context.sourceRel || "",
+      sourceLocation: entry.evidence[0] || evidence[0] || "",
+      sourceLanguage: raw.source_language || raw.sourceLanguage || context.language || "unknown",
+      targetLanguage: "general",
+      mediaRefs: arrayOr(context.mediaRefs, []),
+      evidence: entry.evidence,
+      cognitiveLoad: entry.kind === "code" ? 3 : 2
+    }));
+  }
+  return result;
+}
+
+function technicalReferenceEntries(reference, evidence) {
+  const normalized = normalizeTechnicalReference(reference, evidence);
+  const entries = [];
+  for (const item of normalized.steps) {
+    entries.push({
+      kind: "step",
+      topic: item.title || "Procedure",
+      title: item.title || "Procedure",
+      body: item.items.map((step, index) => `${index + 1}. ${step}`).join("\n"),
+      why: "Steps are preserved so the learner can reproduce the procedure.",
+      evidence: arrayOr(item.evidence, evidence)
+    });
+  }
+  for (const item of normalized.instructions) {
+    entries.push({
+      kind: "instruction",
+      topic: item.title || "Instruction",
+      title: item.title || "Instruction",
+      body: item.items.map((step, index) => `${index + 1}. ${step}`).join("\n"),
+      why: "Instructions are preserved so the learner can follow or adapt them.",
+      evidence: arrayOr(item.evidence, evidence)
+    });
+  }
+  for (const item of normalized.code_blocks) {
+    entries.push({
+      kind: "code",
+      topic: item.title || "Code",
+      title: item.title || "Code",
+      body: `${item.explanation ? `${item.explanation}\n\n` : ""}\`\`\`${item.language || ""}\n${item.code}\n\`\`\``,
+      why: "Code is preserved exactly as source-grounded implementation detail.",
+      evidence: arrayOr(item.evidence, evidence)
+    });
+  }
+  for (const item of normalized.solutions) {
+    entries.push({
+      kind: "solution",
+      topic: item.problem || "Solution",
+      title: item.problem || "Solution",
+      body: `${item.solution}${item.why_it_works ? `\nWhy it works: ${item.why_it_works}` : ""}`,
+      why: "Solutions connect a problem to a reproducible answer.",
+      evidence: arrayOr(item.evidence, evidence)
+    });
+  }
+  for (const item of normalized.qualities) {
+    entries.push({
+      kind: "quality",
+      topic: item.item || "Quality",
+      title: `${item.item}: ${item.quality}`,
+      body: item.meaning || item.quality,
+      why: "Qualities help compare or evaluate the item correctly.",
+      evidence: arrayOr(item.evidence, evidence)
+    });
+  }
+  for (const item of normalized.properties) {
+    entries.push({
+      kind: "property",
+      topic: item.item || "Property",
+      title: `${item.item}: ${item.property}`,
+      body: item.value || item.property,
+      why: "Properties preserve exact attributes or configuration facts.",
+      evidence: arrayOr(item.evidence, evidence)
+    });
+  }
+  for (const item of normalized.formulas) {
+    entries.push({
+      kind: "formula",
+      topic: item.name || "Formula",
+      title: item.name || "Formula",
+      body: `${item.formula}${item.variables.length ? `\nVariables: ${item.variables.join("; ")}` : ""}${item.use ? `\nUse: ${item.use}` : ""}`,
+      why: "Formulas should be recalled with their variables and use.",
+      evidence: arrayOr(item.evidence, evidence)
+    });
+  }
+  for (const item of normalized.equations) {
+    entries.push({
+      kind: "equation",
+      topic: item.name || "Equation",
+      title: item.name || "Equation",
+      body: `${item.equation}${item.variables.length ? `\nVariables: ${item.variables.join("; ")}` : ""}${item.use ? `\nUse: ${item.use}` : ""}`,
+      why: "Equations should be recalled with their variables and use.",
+      evidence: arrayOr(item.evidence, evidence)
+    });
+  }
+  for (const item of normalized.technical_details) {
+    entries.push({
+      kind: item.kind || "technical_detail",
+      topic: item.title || item.kind || "Technical detail",
+      title: item.title || item.kind || "Technical detail",
+      body: item.detail,
+      why: "Technical details preserve exact implementation constraints or settings.",
+      evidence: arrayOr(item.evidence, evidence)
+    });
+  }
+  return uniqueObjects(entries.filter((entry) => entry.body));
+}
+
+function technicalQuestion(entry) {
+  if (entry.kind === "step") return `What are the key steps for ${entry.topic}?`;
+  if (entry.kind === "instruction") return `What instructions should you follow for ${entry.topic}?`;
+  if (entry.kind === "code") return `What code or command implements ${entry.topic}?`;
+  if (entry.kind === "solution") return `What solution addresses ${entry.topic}?`;
+  if (entry.kind === "formula") return `What formula should you remember for ${entry.topic}?`;
+  if (entry.kind === "equation") return `What equation should you remember for ${entry.topic}?`;
+  if (entry.kind === "quality") return `What quality matters for ${entry.topic}?`;
+  if (entry.kind === "property") return `What property should you remember about ${entry.topic}?`;
+  return `What technical detail should you remember about ${entry.topic}?`;
+}
+
+function technicalReferenceMarkdown(reference) {
+  const normalized = normalizeTechnicalReference(reference);
+  const parts = [];
+  if (normalized.steps.length) parts.push(`#### Steps\n\n${normalized.steps.map((item) => `- **${item.title}**\n${item.items.map((step, index) => `  ${index + 1}. ${step}`).join("\n")}${evidenceSuffix(item.evidence)}`).join("\n")}`);
+  if (normalized.instructions.length) parts.push(`#### Instructions\n\n${normalized.instructions.map((item) => `- **${item.title}**\n${item.items.map((step, index) => `  ${index + 1}. ${step}`).join("\n")}${evidenceSuffix(item.evidence)}`).join("\n")}`);
+  if (normalized.code_blocks.length) parts.push(`#### Code\n\n${normalized.code_blocks.map((item) => `- **${item.title}**${item.explanation ? ` — ${item.explanation}` : ""}${evidenceSuffix(item.evidence)}\n\n\`\`\`${item.language || ""}\n${safeFenceCode(item.code)}\n\`\`\``).join("\n\n")}`);
+  if (normalized.solutions.length) parts.push(`#### Solutions\n\n${normalized.solutions.map((item) => `- **${item.problem}** — ${item.solution}${item.why_it_works ? ` _Why: ${item.why_it_works}_` : ""}${evidenceSuffix(item.evidence)}`).join("\n")}`);
+  if (normalized.qualities.length) parts.push(`#### Qualities\n\n${normalized.qualities.map((item) => `- **${item.item}: ${item.quality}** — ${item.meaning || item.quality}${evidenceSuffix(item.evidence)}`).join("\n")}`);
+  if (normalized.properties.length) parts.push(`#### Properties\n\n${normalized.properties.map((item) => `- **${item.item}: ${item.property}** — ${item.value || item.property}${evidenceSuffix(item.evidence)}`).join("\n")}`);
+  if (normalized.formulas.length) parts.push(`#### Formulas\n\n${normalized.formulas.map((item) => `- **${item.name}**: \`${item.formula}\`${item.variables.length ? `; variables: ${item.variables.join("; ")}` : ""}${item.use ? `; use: ${item.use}` : ""}${evidenceSuffix(item.evidence)}`).join("\n")}`);
+  if (normalized.equations.length) parts.push(`#### Equations\n\n${normalized.equations.map((item) => `- **${item.name}**: \`${item.equation}\`${item.variables.length ? `; variables: ${item.variables.join("; ")}` : ""}${item.use ? `; use: ${item.use}` : ""}${evidenceSuffix(item.evidence)}`).join("\n")}`);
+  if (normalized.technical_details.length) parts.push(`#### Technical Details\n\n${normalized.technical_details.map((item) => `- **${item.title}** (${item.kind}): ${item.detail}${evidenceSuffix(item.evidence)}`).join("\n")}`);
+  return parts.length ? parts.join("\n\n") : "- ";
+}
+
+function evidenceSuffix(evidence) {
+  return evidence?.length ? ` _Evidence: ${evidence.join(", ")}_` : "";
+}
+
+function safeFenceCode(value) {
+  return String(value || "").replace(/```/g, "``\\`");
+}
+
+function looksLikeFormula(line) {
+  const text = String(line || "").trim();
+  if (text.length < 5 || text.length > 220) return false;
+  if (/https?:\/\//i.test(text)) return false;
+  return /(?:^|[A-Za-z0-9)\]])\s*(?:=|≈|≤|≥|->|→)\s*[\p{L}\p{N}({\[]/u.test(text)
+    && /[+\-*/^=≈≤≥→()]/.test(text);
+}
+
+function looksLikeTechnicalDetail(line) {
+  const text = String(line || "").trim();
+  if (text.length < 10 || text.length > 260) return false;
+  return /`[^`]+`/.test(text)
+    || /\b(API|endpoint|parameter|config|configuration|command|timeout|port|model|function|class|method|schema|JSON|HTTP|CLI|URL|token|auth|database|query|formula|equation)\b/i.test(text);
+}
+
+function technicalTitle(line) {
+  const cleaned = String(line || "").replace(/[`*_#>-]/g, " ").replace(/\s+/g, " ").trim();
+  return cleaned.slice(0, 80) || "Technical detail";
+}
+
+function uniqueObjects(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const key = JSON.stringify(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
 }
 
 function normalizeRelationships(value, evidence) {

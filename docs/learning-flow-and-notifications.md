@@ -138,7 +138,9 @@ You can add a practice note with the review. The note is stored in the review lo
 
 The practice window also lets you edit a card or bit before saving review feedback. Edits update the relevant `cards.jsonl` or `bits.jsonl` record, while review events remain append-only in `review-log.jsonl`.
 
-Routine background auto-ingest is bounded so it does not monopolize the app. Each scheduled run processes one pending vault and a small batch of files. Manual `Process pending now` can still run a larger explicit batch for the selected vault.
+Routine background auto-ingest is bounded so it does not monopolize the app. Each scheduled run processes one pending vault and one pending file. Manual `Process pending now` uses the same one-file batch by default, which keeps the app responsive when one source or provider call is slow.
+
+If a worker exceeds the background time limit, Learning Boost pauses that vault, leaves pending files in place, and records the last worker state instead of marking the source as successfully processed. The next bounded run retries after a short backoff. Use the Provider tab first if the pause repeats because the selected provider is not answering.
 
 ## Files, Archive, And Topics Loading
 

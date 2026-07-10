@@ -42,6 +42,16 @@ async function main() {
     try {
       vaultResult.candidateCount = listRawCandidates(vaultPath).length;
       rawTotal += vaultResult.candidateCount;
+      writeResult({
+        ok: true,
+        startedAt,
+        finishedAt: "",
+        status: "running",
+        detail: `Processing ${name}: ${vaultResult.candidateCount} pending file(s).`,
+        vaults: [...vaultResults, vaultResult],
+        processed,
+        rawTotal
+      });
       vaultResult.bootstrapped = bootstrapVault(vaultPath, config);
       const automationResult = await runLearningAutomationForVault(vaultPath, {
         config,
@@ -62,6 +72,16 @@ async function main() {
       };
     }
     vaultResults.push(vaultResult);
+    writeResult({
+      ok: true,
+      startedAt,
+      finishedAt: "",
+      status: "running",
+      detail: `Finished ${name}; ${processed} file(s) processed so far.`,
+      vaults: vaultResults,
+      processed,
+      rawTotal
+    });
   }
 
   writeResult({
