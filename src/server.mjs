@@ -3258,14 +3258,16 @@ async function cachedProviderStatus(options = {}) {
     updatedAt: providerStatusCache.updatedAt
   };
   if (payload.stale && payload.loading && payload.statusColor === "green") {
+    const when = payload.updatedAt ? formatLocal(new Date(payload.updatedAt)) : "an earlier check";
     return {
       ...payload,
+      refreshing: true,
       lastKnownStatus: payload.status,
       lastKnownStatusColor: payload.statusColor,
-      status: "Refreshing provider readiness",
-      statusColor: "orange",
-      statusDetail: `Last known provider status was ready at ${formatLocal(new Date(payload.updatedAt))}. Refreshing now before treating the provider as available.`,
-      detail: `Last known provider status was ready at ${formatLocal(new Date(payload.updatedAt))}. Refreshing now before treating the provider as available.`
+      status: payload.status || "Connected and ready",
+      statusColor: "green",
+      statusDetail: `Last known provider status was ready at ${when}. Refreshing in the background; Learning Autopilot keeps this recent ready state until the refresh finishes.`,
+      detail: `Last known provider status was ready at ${when}. Refreshing in the background; Learning Autopilot keeps this recent ready state until the refresh finishes.`
     };
   }
   if (payload.error && payload.statusColor === "green") {
@@ -4457,10 +4459,11 @@ function withTimeout(promise, timeoutMs, message) {
 
 function topicContentFromCachedVault(currentConfig, input = {}) {
   const vaultPath = resolveCachedVaultPath(currentConfig, input.vault);
-  const topicRel = normalizeSafeWikiRel(input.path);
+  const requestedRel = normalizeSafeWikiRel(input.path);
+  const topicRel = resolveExistingCachedTopicRel(vaultPath, requestedRel);
   const topicTitle = String(input.title || titleFromFastPath(topicRel));
   const topicText = readTopicPageWithTimeout(path.join(vaultPath, topicRel));
-  if (!topicText) throw new Error(`Topic page unavailable from app process: ${topicRel}`);
+  if (!topicText) throw new Error(`Topic page unavailable from app process: ${requestedRel}`);
   const linked = parseTopicWikiLinks(topicText);
   const ordered = topicRel.startsWith("wiki/sources/")
     ? uniqueTopicPaths([topicRel, ...linked])
@@ -4477,10 +4480,11 @@ function topicContentFromCachedVault(currentConfig, input = {}) {
     ""
   ];
   for (const rel of bounded) {
-    const text = readTopicPageWithTimeout(path.join(vaultPath, rel));
+    const resolvedRel = resolveExistingCachedTopicRel(vaultPath, rel);
+    const text = readTopicPageWithTimeout(path.join(vaultPath, resolvedRel));
     if (!text) continue;
-    lines.push(`## ${rel.startsWith("wiki/sources/") ? "Source" : "Related"}: ${titleFromTopicMarkdown(text, rel)}`);
-    lines.push(`${vaultName(vaultPath)} / ${rel}`);
+    lines.push(`## ${resolvedRel.startsWith("wiki/sources/") ? "Source" : "Related"}: ${titleFromTopicMarkdown(text, resolvedRel)}`);
+    lines.push(`${vaultName(vaultPath)} / ${resolvedRel}`);
     lines.push("");
     lines.push(cleanTopicMarkdownForDisplay(text));
     lines.push("");
@@ -4490,6 +4494,36 @@ function topicContentFromCachedVault(currentConfig, input = {}) {
   }
   if (ordered.length === 0) lines.push("No related wiki pages were found.");
   return lines.join("\n");
+}
+
+function resolveExistingCachedTopicRel(vaultPath, rel) {
+  const normalized = normalizeSafeWikiRel(rel);
+  if (fs.existsSync(path.join(vaultPath, normalized))) return normalized;
+  if (!normalized.startsWith("wiki/sources/")) return normalized;
+  const sourceDir = path.join(vaultPath, "wiki", "sources");
+  if (!fs.existsSync(sourceDir)) return normalized;
+  const wantedBase = path.basename(normalized, ".md");
+  const suffix = sourceLookupSuffix(wantedBase);
+  const hash = wantedBase.match(/[a-f0-9]{10,}$/i)?.[0] || "";
+  const matches = [];
+  try {
+    for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+      const base = path.basename(entry.name, ".md");
+      if (base === wantedBase || (suffix && base.endsWith(`--${suffix}`)) || (suffix && base.endsWith(suffix)) || (hash && base.includes(hash))) {
+        matches.push(`wiki/sources/${entry.name}`);
+      }
+    }
+  } catch {
+    return normalized;
+  }
+  return matches.sort((a, b) => b.localeCompare(a, undefined, { numeric: true })).at(0) || normalized;
+}
+
+function sourceLookupSuffix(base) {
+  const stripped = String(base || "").replace(/^\d{4}-\d{2}-\d{2}--/, "");
+  const secondDate = stripped.match(/^\d{4}-\d{2}-\d{2}--(.+)$/);
+  return secondDate ? secondDate[1] : stripped;
 }
 
 function readTopicPageWithTimeout(file) {
@@ -7249,7 +7283,10 @@ function renderHtml() {
             filesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Vault files are still being indexed."));
           }
           if (filesLoadPolls <= 4) setTimeout(() => loadFiles(), filesLoadPolls <= 2 ? 1400 : 5000);
-          else if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Vault files are still indexing in the background. The table will update when rows are available.", "files");
+          else {
+            if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Vault files are still indexing in the background. Retrying automatically; use Retry to force a refresh.", "files");
+            setTimeout(() => loadFiles(), 15000);
+          }
           return;
         }
         filesLoadPolls = 0;
@@ -7570,7 +7607,10 @@ function renderHtml() {
             archivesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Archive history is still being indexed."));
           }
           if (archivesLoadPolls <= 4) setTimeout(() => loadArchives(), archivesLoadPolls <= 2 ? 1400 : 5000);
-          else if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Archive history is still indexing in the background. The table will update when rows are available.", "archives");
+          else {
+            if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Archive history is still indexing in the background. Retrying automatically; use Retry to force a refresh.", "archives");
+            setTimeout(() => loadArchives(), 15000);
+          }
           return;
         }
         archivesLoadPolls = 0;
@@ -7849,7 +7889,10 @@ function renderHtml() {
             topicsBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Topics are still being indexed."));
           }
           if (topicsLoadPolls <= 4) setTimeout(() => loadTopics(), topicsLoadPolls <= 2 ? 1400 : 5000);
-          else if (!topicsCache.length) topicsBody.innerHTML = tabStatusRow(7, "Topics are still indexing in the background. The table will update when rows are available.", "topics");
+          else {
+            if (!topicsCache.length) topicsBody.innerHTML = tabStatusRow(7, "Topics are still indexing in the background. Retrying automatically; use Retry to force a refresh.", "topics");
+            setTimeout(() => loadTopics(), 15000);
+          }
           return;
         }
         topicsLoadPolls = 0;

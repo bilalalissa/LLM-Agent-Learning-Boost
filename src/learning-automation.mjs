@@ -524,7 +524,7 @@ async function providerReadiness(provider, config = {}) {
 export function providerReadinessTimeoutMs(config = {}) {
   const provider = String(config.provider || "");
   if (["openai_subscription", "openai_oauth", "chatgpt"].includes(provider)) {
-    return Math.max(30000, Math.min(Number(config.openai?.codexTimeoutMs || config.providerTimeoutMs || 180000), 180000));
+    return Math.max(30000, Math.min(Number(config.openai?.codexTimeoutMs || config.providerTimeoutMs || 45000), 45000));
   }
   if (provider === "mlx_lm_cli") {
     return Math.max(15000, Math.min(Number(config.mlxLmCli?.timeoutMs || config.providerTimeoutMs || 60000), 120000));

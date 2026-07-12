@@ -217,7 +217,7 @@ function openedDocumentAppleScript() {
     "  return valueText",
     "end jsonEscape",
     "tell application \"System Events\" to set frontApp to name of first application process whose frontmost is true",
-    "if frontApp is \"LLM Agent Learning Boost\" or frontApp is \"LLMWikiAgent\" then",
+    "if frontApp is \"LLM Agent Learning Boost\" or frontApp is \"LLMWikiAgent\" or frontApp is \"LLMAgentLearningBoost\" then",
     "  return \"[]\"",
     "end if",
     "set docPath to \"\"",

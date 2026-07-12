@@ -4,10 +4,11 @@ import { listVaults, readIfExists, vaultName } from "./vaults.mjs";
 
 export function topicContent(config, input) {
   const vaultPath = resolveVault(config, input.vault);
-  const topicRel = normalizeWikiRel(input.path);
+  const requestedRel = normalizeWikiRel(input.path);
+  const topicRel = resolveExistingWikiRel(vaultPath, requestedRel);
   const topicTitle = String(input.title || titleFromRel(topicRel));
   const topicText = readPage(vaultPath, topicRel);
-  if (!topicText) throw new Error(`Topic page not found: ${topicRel}`);
+  if (!topicText) throw new Error(`Topic page not found: ${requestedRel}`);
 
   const linked = parseWikiLinks(topicText);
   const linkedSources = linked.filter((rel) => rel.startsWith("wiki/sources/"));
@@ -29,10 +30,11 @@ export function topicContent(config, input) {
   ];
 
   for (const rel of ordered) {
-    const text = readPage(vaultPath, rel);
+    const resolvedRel = resolveExistingWikiRel(vaultPath, rel);
+    const text = readPage(vaultPath, resolvedRel);
     if (!text) continue;
-    lines.push(`## ${rel.startsWith("wiki/sources/") ? "Source" : "Related"}: ${titleFromMarkdown(text, rel)}`);
-    lines.push(`${vaultName(vaultPath)} / ${rel}`);
+    lines.push(`## ${resolvedRel.startsWith("wiki/sources/") ? "Source" : "Related"}: ${titleFromMarkdown(text, resolvedRel)}`);
+    lines.push(`${vaultName(vaultPath)} / ${resolvedRel}`);
     lines.push("");
     lines.push(cleanForDisplay(text));
     lines.push("");
@@ -47,10 +49,11 @@ export function topicContent(config, input) {
 
 export async function topicContentAsync(config, input) {
   const vaultPath = resolveVault(config, input.vault);
-  const topicRel = normalizeWikiRel(input.path);
+  const requestedRel = normalizeWikiRel(input.path);
+  const topicRel = resolveExistingWikiRel(vaultPath, requestedRel);
   const topicTitle = String(input.title || titleFromRel(topicRel));
   const topicText = await readPageAsync(vaultPath, topicRel);
-  if (!topicText) throw new Error(`Topic page not found: ${topicRel}`);
+  if (!topicText) throw new Error(`Topic page not found: ${requestedRel}`);
 
   const linked = parseWikiLinks(topicText);
   const linkedSources = linked.filter((rel) => rel.startsWith("wiki/sources/"));
@@ -72,10 +75,11 @@ export async function topicContentAsync(config, input) {
   ];
 
   for (const rel of ordered) {
-    const text = await readPageAsync(vaultPath, rel);
+    const resolvedRel = resolveExistingWikiRel(vaultPath, rel);
+    const text = await readPageAsync(vaultPath, resolvedRel);
     if (!text) continue;
-    lines.push(`## ${rel.startsWith("wiki/sources/") ? "Source" : "Related"}: ${titleFromMarkdown(text, rel)}`);
-    lines.push(`${vaultName(vaultPath)} / ${rel}`);
+    lines.push(`## ${resolvedRel.startsWith("wiki/sources/") ? "Source" : "Related"}: ${titleFromMarkdown(text, resolvedRel)}`);
+    lines.push(`${vaultName(vaultPath)} / ${resolvedRel}`);
     lines.push("");
     lines.push(cleanForDisplay(text));
     lines.push("");
@@ -99,6 +103,36 @@ function normalizeWikiRel(value) {
   if (!rel || rel.includes("..")) throw new Error(`Unsafe topic path: ${value}`);
   if (!rel.startsWith("wiki/")) throw new Error(`Topic path must be under wiki/: ${value}`);
   return rel.endsWith(".md") ? rel : `${rel}.md`;
+}
+
+export function resolveExistingWikiRel(vaultPath, rel) {
+  const normalized = normalizeWikiRel(rel);
+  if (fs.existsSync(path.join(vaultPath, normalized))) return normalized;
+  if (!normalized.startsWith("wiki/sources/")) return normalized;
+  const sourceDir = path.join(vaultPath, "wiki", "sources");
+  if (!fs.existsSync(sourceDir)) return normalized;
+  const wantedBase = path.basename(normalized, ".md");
+  const suffix = sourceLookupSuffix(wantedBase);
+  const hash = wantedBase.match(/[a-f0-9]{10,}$/i)?.[0] || "";
+  const matches = [];
+  try {
+    for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+      const base = path.basename(entry.name, ".md");
+      if (base === wantedBase || (suffix && base.endsWith(`--${suffix}`)) || (suffix && base.endsWith(suffix)) || (hash && base.includes(hash))) {
+        matches.push(`wiki/sources/${entry.name}`);
+      }
+    }
+  } catch {
+    return normalized;
+  }
+  return matches.sort((a, b) => b.localeCompare(a, undefined, { numeric: true })).at(0) || normalized;
+}
+
+function sourceLookupSuffix(base) {
+  const stripped = String(base || "").replace(/^\d{4}-\d{2}-\d{2}--/, "");
+  const secondDate = stripped.match(/^\d{4}-\d{2}-\d{2}--(.+)$/);
+  return secondDate ? secondDate[1] : stripped;
 }
 
 function readPage(vaultPath, rel) {

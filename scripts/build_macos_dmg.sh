@@ -30,5 +30,5 @@ hdiutil create \
   "$DMG" >/dev/null
 
 echo "Built DMG: $DMG"
-file "$STAGING/$APP_NAME/Contents/MacOS/LLMWikiAgent"
-lipo -archs "$STAGING/$APP_NAME/Contents/MacOS/LLMWikiAgent"
+file "$STAGING/$APP_NAME/Contents/MacOS/LLMAgentLearningBoost"
+lipo -archs "$STAGING/$APP_NAME/Contents/MacOS/LLMAgentLearningBoost"

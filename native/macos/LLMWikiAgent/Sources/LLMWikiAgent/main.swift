@@ -783,6 +783,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func startServer() {
+        if serverIsReachableSync(timeout: 1.5) {
+            appendServerLog(Data("[native] using existing healthy server on 127.0.0.1:\(port)\n".utf8))
+            serverRestartAttempts = 0
+            serverHealthFailures = 0
+            return
+        }
         stopServerOnConfiguredPort()
         let process = Process()
         process.currentDirectoryURL = agentURL
@@ -1261,8 +1267,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             if !pid.isEmpty && pid != String(ProcessInfo.processInfo.processIdentifier) {
                 terminateChildren(of: pid)
                 _ = runQuick(["kill", pid])
+                usleep(300_000)
+                let remaining = runQuick(["lsof", "-nP", "-tiTCP:\(port)", "-sTCP:LISTEN"])
+                if remaining.split(separator: "\n").contains(where: { String($0).trimmingCharacters(in: .whitespacesAndNewlines) == pid }) {
+                    _ = runQuick(["kill", "-9", pid])
+                    usleep(200_000)
+                }
             }
         }
+    }
+
+    private func serverIsReachableSync(timeout: TimeInterval) -> Bool {
+        guard let statusURL = URL(string: "http://127.0.0.1:\(port)/api/status") else { return false }
+        var request = URLRequest(url: statusURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+        request.timeoutInterval = timeout
+        let semaphore = DispatchSemaphore(value: 0)
+        var ok = false
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            ok = (response as? HTTPURLResponse)?.statusCode == 200 && !(data?.isEmpty ?? true)
+            semaphore.signal()
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + timeout + 0.5)
+        return ok
     }
 
     private func terminateServerProcess() {

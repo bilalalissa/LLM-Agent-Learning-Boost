@@ -11,6 +11,7 @@ CONTENTS="$STAGING_APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 AGENT="$RESOURCES/agent"
+APP_EXECUTABLE="LLMAgentLearningBoost"
 APP_ICON="$ROOT/native/macos/LLMWikiAgent/Resources/AppIcon.icns"
 SWIFT_SOURCE="$ROOT/native/macos/LLMWikiAgent/Sources/LLMWikiAgent/main.swift"
 STAGING_SWIFT="$STAGING_ROOT/main.swift"
@@ -85,7 +86,7 @@ copy_file "$SWIFT_SOURCE" "$STAGING_SWIFT"
 
 SWIFTC_ARGS=(
   "$STAGING_SWIFT"
-  -o "$MACOS/LLMWikiAgent"
+  -o "$MACOS/$APP_EXECUTABLE"
   -framework AppKit
   -framework WebKit
   -framework ServiceManagement
@@ -101,7 +102,7 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key><string>LLMWikiAgent</string>
+  <key>CFBundleExecutable</key><string>LLMAgentLearningBoost</string>
   <key>CFBundleIdentifier</key><string>local.llmagent.learningboost</string>
   <key>CFBundleName</key><string>LLM Agent Learning Boost</string>
   <key>CFBundleDisplayName</key><string>LLM Agent Learning Boost</string>

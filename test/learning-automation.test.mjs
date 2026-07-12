@@ -181,7 +181,7 @@ test("provider readiness timeout follows selected provider policy", () => {
     provider: "openai_subscription",
     providerTimeoutMs: 12000,
     openai: { codexTimeoutMs: 180000 }
-  }), 180000);
+  }), 45000);
   assert.equal(providerReadinessTimeoutMs({
     provider: "openai_compat",
     providerTimeoutMs: 12000

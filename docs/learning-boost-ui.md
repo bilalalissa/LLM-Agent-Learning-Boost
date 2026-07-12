@@ -137,7 +137,7 @@ Use `Edit item` in the practice window when a generated card or bit needs a bett
 
 ## Tab Loading
 
-Files, Archive, and Topics show explicit index states instead of ambiguous empty tables. The app loads persisted cached rows first so opening a tab does not start a slow iCloud scan. If stale rows exist, those rows stay visible. If no cache exists, the tab shows a bounded empty/error state with a refresh option. Manual refresh runs a bounded worker; the table does not stay in an infinite `Loading...` loop.
+Files, Archive, and Topics show explicit index states instead of ambiguous empty tables. The app loads persisted cached rows first so opening a tab does not start a slow iCloud scan. If stale rows exist, those rows stay visible. If no cache exists, the tab keeps retrying on a slow cadence and shows a `Retry` control instead of freezing on the first `Loading...` message. Manual refresh runs a bounded worker; the table does not stay in an infinite `Loading...` loop.
 
 The file-list endpoints return `ready`, `ready_empty`, `stale_refreshing`, `loading`, or `error`. The UI uses fetch timeouts so slow capture scans or background ingest work do not leave a table stuck on `Loading...`.
 

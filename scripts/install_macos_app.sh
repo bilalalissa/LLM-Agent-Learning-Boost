@@ -10,6 +10,7 @@ TARGET="$TARGET_DIR/LLM Agent Learning Boost.app"
 APPLICATIONS_ALIAS="/Applications/LLM Agent Learning Boost.app"
 
 pkill -x LLMWikiAgent >/dev/null 2>&1 || true
+pkill -x LLMAgentLearningBoost >/dev/null 2>&1 || true
 pkill -f "$TARGET/Contents/Resources/agent/src/server.mjs" >/dev/null 2>&1 || true
 pkill -f "$APPLICATIONS_ALIAS/Contents/Resources/agent/src/server.mjs" >/dev/null 2>&1 || true
 pkill -f "$ROOT/build/macos/LLM Agent Learning Boost.app/Contents/Resources/agent/src/server.mjs" >/dev/null 2>&1 || true

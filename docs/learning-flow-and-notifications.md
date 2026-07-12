@@ -257,6 +257,8 @@ Plans begin as `proposed`. Approval and activation require explicit confirmation
 - `Send test notification`: queues a test alert and asks macOS to deliver it.
 - `Sync alerts to Reminders`: retries Apple Reminders mirroring for pending alerts.
 
+Learning improvement is part of Autopilot. When Autopilot is running, Learning Boost continues to process new sources, update due/review state, draft plan and goal suggestions, and refresh the best-plan study queue automatically. Use `Pause` for a temporary manual hold, `Snooze 1 hour` when you want automatic work to resume later, and `Stop` when the vault should stay quiet until you explicitly resume it.
+
 If a bounded background worker times out, Learning Boost shows `retrying` rather than changing your control state to paused. Pending work remains in place and the next bounded run continues after the retry time. This is different from `Pause`, `Snooze`, or `Stop`, which are user-controlled states.
 
 Snooze and scheduled dates are displayed in the app's configured local time zone. On this Mac the default is Regina, Saskatchewan (`America/Regina`, CST). Change `LEARNING_BOOST_TIME_ZONE` in `config.env` only if you want another display zone.

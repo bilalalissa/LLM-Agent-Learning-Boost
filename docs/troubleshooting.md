@@ -99,13 +99,13 @@ Safe capture scans do not start live screen recording or attach to private brows
 
 If an image, audio, or video file is captured but not fully analyzed, check the generated source note for the limitation. Learning Boost tries local OCR with `tesseract`, transcript sidecars, local ASR with `whisper`, and video keyframe OCR with `ffmpeg` when available. Missing command-line tools, missing OCR language packs, long files, large files, unreadable iCloud placeholders, and provider failures are reported in processor notes instead of silently creating useful-looking learning cards from metadata only. Metadata-only media is preserved as `pending_content` and does not produce cards, bits, concepts, or plans until real text/transcript/OCR/manual description is available. It is also not counted as AI-provider retry work, so a `pending_content` source should lead you to Source Capture or extraction setup, not Provider settings.
 
-If the status says `Learning automation failed: Auto-ingest worker timed out`, first update/relaunch the app so the bounded scheduler is active. Current builds only start the worker when a vault has pending raw files, queueable captured resources, or provider-ready media retries. Capture permission problems are shown as Source Capture attention. Provider failures are shown only after the selected provider fails a readiness probe or a real processing call.
+If the status says `Learning automation failed: Auto-ingest worker timed out`, first update/relaunch the app so the bounded scheduler is active. Current builds only start the worker when a vault has pending raw files, queueable captured resources, or provider-ready media retries. Capture permission problems are shown as Source Capture attention. Provider failures are shown only after the selected provider fails a short readiness probe or a real processing call. Subscription-provider readiness probes are intentionally short so Autopilot does not spend the whole worker budget checking login before useful ingest work starts.
 
 For audio/video transcription, install or expose a working `whisper` command on the app PATH, or set `LEARNING_BOOST_WHISPER_COMMAND` to the executable path before launch. The macOS app also checks common local paths such as `/Users/ba/Library/Python/3.11/bin/whisper`, `/usr/local/bin/ffmpeg`, `/usr/local/bin/ffprobe`, and `/usr/local/bin/tesseract` because app bundles often have a smaller PATH than Terminal. For Arabic image OCR, install the Arabic `tesseract` language data; otherwise Learning Boost falls back to smaller available language sets and records the limitation.
 
 ## Unexpected "Choose Application" Window
 
-Older installer builds used an AppleScript app-name lookup before replacing the app bundle. macOS could show a `Choose Application` dialog asking where `LLMWikiAgent` or `LLM Agent Learning Boost` is. The installer now stops the running helper process directly, avoids the AppleScript chooser path, and refreshes Launch Services registration for the installed bundle.
+Older installer builds used an AppleScript app-name lookup before replacing the app bundle. macOS could show a `Choose Application` dialog asking where `LLMWikiAgent` or `LLM Agent Learning Boost` is. The current bundle uses `LLMAgentLearningBoost` as its internal executable name, stops old `LLMWikiAgent` and new helper processes directly, avoids the AppleScript chooser path, and refreshes Launch Services registration for the installed bundle.
 
 If the dialog is already open, cancel it once, reinstall the current app, and relaunch from `/Applications/LLM Agent Learning Boost.app`.
 
@@ -118,6 +118,22 @@ The native wrapper also writes server stdout/stderr to `~/Library/Application Su
 macOS notifications do not always relay to iPhone or iPad. To pass Learning Boost alerts through the Apple ecosystem, enable `Sync alerts to Apple devices via Reminders` in Learning Autopilot. The app mirrors privacy-safe alert titles into an Apple Reminders list named `Learning Boost`; iCloud Reminders can then notify other Apple devices if Reminders sync, notification permission, and Focus settings allow it.
 
 Use `/mobile` for active study on iPhone or iPad. Use Reminders mirroring for cross-device alerts.
+
+## Old Or Duplicate App Copies
+
+Keep:
+
+- `~/Applications/LLM Agent Learning Boost.app`
+- `/Applications/LLM Agent Learning Boost.app` when it is a symlink to the same installed app
+- the source repo folder `LLM-Agent-Learning-Boost`
+
+Removable generated copies:
+
+- `build/macos/LLM Agent Learning Boost 2.app`, `3.app`, and other numbered build bundles
+- old DMG staging folders under `build/macos/dmg-*`
+- old downloaded or renamed app bundles that are not the symlinked installed app
+
+After deleting old copies, reinstall with `./scripts/install_macos_app.sh` and launch from `/Applications/LLM Agent Learning Boost.app`.
 
 ## RemNote Export Requires Confirmation
 
