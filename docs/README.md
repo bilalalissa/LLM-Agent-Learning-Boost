@@ -3,7 +3,7 @@
 This index splits the macOS/local-first Learning Boost workflow by topic.
 
 - [Provider and Learning Tabs Manual](provider-and-learning-tabs-manual.md): User-centered walkthrough for the Provider and Learning tabs, with annotated tab maps, examples, safe defaults, and troubleshooting.
-- [Learning Flow and Notifications](learning-flow-and-notifications.md): Detailed user guide for Learning Autopilot, Today's Study Plan, dated timeline, tab loading states, source processing, cards/bits, read state, aggregate plans/goals, controls, safety gates, macOS notification delivery, and Reminders-based Apple-device alert handoff.
+- [Learning Flow and Notifications](learning-flow-and-notifications.md): Detailed user guide for Learning Autopilot, Today's Study Plan, mobile study, dated timeline, tab loading states, source processing, cards/bits, read state, aggregate plans/goals, controls, safety gates, macOS notification delivery, and Apple-device alert handoff.
 - [Local AI Providers](local-ai-providers.md): Configure `local_auto`, Ollama, MLX-LM Server, MLX-LM CLI, LAN model endpoints, provider health checks, and confirmation-gated cloud fallback.
 - [Connect Local AI Router](connect-local-ai-router.md): Use the same-Mac Local AI Router localhost API, understand ready versus waiting Provider states, and configure direct local provider fallbacks.
 - [User Profile and Onboarding](user-profile-and-onboarding.md): Understand the local profile/account files, onboarding interview fields, first and target language settings, demographic privacy, and personalization controls.

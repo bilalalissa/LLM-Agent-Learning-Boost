@@ -93,6 +93,34 @@ The plan is split into short sessions such as `Spaced review`, `Concept practice
 
 The schedule is guidance, not an external calendar write. It does not create Calendar events unless you use an export flow and confirm the preview.
 
+## Mobile Study On iPhone Or iPad
+
+Learning Boost also serves a lightweight mobile study page at:
+
+```text
+http://127.0.0.1:8789/mobile
+```
+
+On the Mac, that page works immediately. It shows the same best-plan study queue used by the Learning tab: due cards, due bits, unread items, short quiz/test sessions, and recent privacy-safe alerts. Marking a card or bit reviewed from the mobile page writes the same local review event as the desktop Learning tab.
+
+To reach it from an iPhone or iPad without a Mac simulator, intentionally expose only this local server on a trusted LAN:
+
+```env
+MAC_BRIDGE_HOST=0.0.0.0
+LEARNING_BOOST_MOBILE_TOKEN=choose-a-long-local-token
+LEARNING_BOOST_MOBILE_STUDY=true
+```
+
+Restart the Mac app, then open this from the iPhone or iPad browser:
+
+```text
+http://<your-mac-lan-ip>:8789/mobile?token=choose-a-long-local-token
+```
+
+Keep this on a trusted private network. Non-local mobile requests require the token. The mobile page is intentionally narrow: it can load study queues and record card/bit review state, but it does not expose Provider settings, vault file operations, or export writes.
+
+This is separate from notifications. Use the mobile page for studying cards/bits/quizzes. Use Apple Reminders mirroring for alerts you want to sync through iCloud.
+
 ## Dated Learning Timeline
 
 The Learning Timeline is the first dated planning surface in the Learning tab. It groups learning work into:
@@ -267,7 +295,7 @@ Apple ecosystem delivery to other devices depends on your macOS, iCloud, Focus, 
 
 For alerts you also want on iPhone, iPad, or another Mac, enable `Sync alerts to Apple devices via Reminders` in Learning Autopilot. When enabled, Learning Boost creates privacy-safe reminder items in an Apple Reminders list named `Learning Boost`. Apple Reminders can sync those items through iCloud to your other Apple devices if your Apple ID, Reminders sync, Focus, and notification settings allow it.
 
-This is the current iPhone/iPad notification bridge. It does not require a Mac simulator. It uses the Apple Reminders app already present on macOS/iOS/iPadOS. For it to reach other devices, the same Apple ID must have Reminders iCloud sync enabled and Focus/notification settings must allow Reminders alerts.
+This is the current iPhone/iPad notification bridge. It does not require a Mac simulator. It uses the Apple Reminders app already present on macOS/iOS/iPadOS. For it to reach other devices, the same Apple ID must have Reminders iCloud sync enabled and Focus/notification settings must allow Reminders alerts. It complements the `/mobile` study page; Reminders carries alerts, while `/mobile` carries the active study queue.
 
 The Notification Center shows Reminders mirror state separately from macOS delivery:
 

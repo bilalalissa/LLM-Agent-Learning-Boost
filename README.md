@@ -27,7 +27,7 @@ npm run learning:export-remnote
 
 - [Docs Index](docs/README.md): map of all topic docs.
 - [Provider and Learning Tabs Manual](docs/provider-and-learning-tabs-manual.md): user-centered walkthrough with annotated tab maps, safe defaults, and examples.
-- [Learning Flow and Notifications](docs/learning-flow-and-notifications.md): detailed guide to Autopilot, Today's Study Plan, dated timeline, tab loading states, source processing, bits/cards, read state, aggregate plans/goals, safety gates, macOS notifications, and Reminders-based Apple-device alert handoff.
+- [Learning Flow and Notifications](docs/learning-flow-and-notifications.md): detailed guide to Autopilot, Today's Study Plan, mobile study, dated timeline, tab loading states, source processing, bits/cards, read state, aggregate plans/goals, safety gates, macOS notifications, and Apple-device alert handoff.
 - [Local AI Providers](docs/local-ai-providers.md): Ollama, MLX-LM, LAN endpoints, and cloud fallback confirmation.
 - [Connect Local AI Router](docs/connect-local-ai-router.md): Automatic same-Mac Local AI Router setup through the localhost integration API, plus direct local provider fallback settings.
 - [User Profile and Onboarding](docs/user-profile-and-onboarding.md): local profile/account, interview questions, demographics, and privacy.
@@ -46,4 +46,4 @@ npm run learning:export-remnote
 
 ## Scope
 
-This copy is macOS/local-first. A native iPhone/iPad/Watch companion app is not included. Privacy-safe alert handoff to iPhone, iPad, and other Macs is handled through Apple Reminders sync when `Sync alerts to Apple devices via Reminders` is enabled.
+This copy is macOS/local-first. A native iPhone/iPad/Watch app is not included, but the Mac app now serves a lightweight `/mobile` study page for iPhone/iPad review when you intentionally expose the local server on a trusted LAN with a mobile token. Privacy-safe alert handoff to iPhone, iPad, and other Macs is handled through Apple Reminders sync when `Sync alerts to Apple devices via Reminders` is enabled.

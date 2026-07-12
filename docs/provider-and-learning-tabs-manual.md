@@ -223,6 +223,7 @@ Controls:
 - Process pending now: run the same safe loop immediately.
 - Send test notification: queue one alert and ask macOS to deliver it.
 - Sync alerts to Reminders: retry Apple Reminders mirroring for pending alerts.
+- Mobile Study: open `/mobile` on this Mac, or set `MAC_BRIDGE_HOST=0.0.0.0` and `LEARNING_BOOST_MOBILE_TOKEN` to review Today's Study Plan, cards, bits, and short quiz/test sessions from an iPhone or iPad browser on a trusted LAN.
 
 The in-app Notification Center remains the durable alert log. It shows native delivery state such as pending, delivered, blocked by permission, or failed after retry attempts.
 

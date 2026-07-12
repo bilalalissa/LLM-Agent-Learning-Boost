@@ -151,6 +151,14 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
     pendingMediaLimit: options.pendingMediaLimit || 2
   });
   const marked = markResourceIngestResults(vaultPath, results);
+  const completedResults = results.filter((result) =>
+    !(result.pendingContent || result.pendingProviderAnalysis || result.learning?.pendingContent || result.learning?.pendingProviderAnalysis)
+  );
+  if (completedResults.length) {
+    resolveProviderBlockedNotifications(vaultPath, {
+      detail: "The selected provider answered again and Learning Autopilot processed source material."
+    });
+  }
   for (const result of results) {
     if (result.pendingContent || result.pendingProviderAnalysis || result.learning?.pendingContent || result.learning?.pendingProviderAnalysis) continue;
     recordLearningNotification(vaultPath, {
@@ -317,6 +325,30 @@ export function updateLearningNotificationAction(vaultPath, id, action = "read",
   return { updated: true, id, action };
 }
 
+export function resolveProviderBlockedNotifications(vaultPath, details = {}) {
+  const now = new Date().toISOString();
+  const notifications = readJsonl(learningNotificationsPath(vaultPath));
+  let resolved = 0;
+  const next = notifications.map((item) => {
+    const normalized = normalizeLearningNotification(item);
+    if (normalized.type !== "provider_blocked") return item;
+    if (normalized.status === "dismissed" || normalized.resolvedAt) return item;
+    resolved += 1;
+    return normalizeLearningNotification({
+      ...normalized,
+      status: "read",
+      readAt: normalized.readAt || now,
+      resolvedAt: now,
+      severity: "info",
+      body: "The selected AI provider answered again, so Learning Autopilot can continue.",
+      detail: String(details.detail || normalized.detail || "Provider recovered."),
+      updated: now
+    });
+  });
+  if (resolved) writeJsonl(learningNotificationsPath(vaultPath), next);
+  return { resolved };
+}
+
 function normalizeAutomationSettings(input = {}) {
   const existingSchema = Number(input.schemaVersion || 0);
   const hasReminderMirror = Object.prototype.hasOwnProperty.call(input, "mirrorNotificationsToReminders");
@@ -404,6 +436,7 @@ function normalizeLearningNotification(input = {}) {
     nativeError: String(input.nativeError || ""),
     deliveredAt: input.deliveredAt || "",
     readAt: input.readAt || "",
+    resolvedAt: input.resolvedAt || "",
     reminderMirrorStatus,
     reminderMirrorAttempts: Math.max(0, Number(input.reminderMirrorAttempts || 0)),
     reminderMirrorAttemptAt: input.reminderMirrorAttemptAt || "",

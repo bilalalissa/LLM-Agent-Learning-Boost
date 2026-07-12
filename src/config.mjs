@@ -10,6 +10,9 @@ export const PROVIDER_CONFIG_KEYS = [
   "AUTO_INGEST_ON_START",
   "WATCH_INTERVAL_MS",
   "LEARNING_BOOST_TIME_ZONE",
+  "LEARNING_BOOST_MOBILE_STUDY",
+  "LEARNING_BOOST_MOBILE_TOKEN",
+  "LEARNING_BOOST_MOBILE_BASE_URL",
   "AI_PROVIDER_TIMEOUT_MS",
   "AI_ACCESS_METHOD",
   "DEFAULT_AI_PROVIDER",
@@ -69,6 +72,9 @@ const PROVIDER_DEFAULTS = {
   AUTO_INGEST_ON_START: "true",
   WATCH_INTERVAL_MS: "5000",
   LEARNING_BOOST_TIME_ZONE: DEFAULT_LOCAL_TIME_ZONE,
+  LEARNING_BOOST_MOBILE_STUDY: "true",
+  LEARNING_BOOST_MOBILE_TOKEN: "",
+  LEARNING_BOOST_MOBILE_BASE_URL: "",
   AI_PROVIDER_TIMEOUT_MS: "60000",
   AI_ACCESS_METHOD: "local_first",
   DEFAULT_AI_PROVIDER: "local_auto",
@@ -196,6 +202,11 @@ export function getConfig() {
     chatPort: Number(env.CHAT_PORT || 8789),
     bridgeHost: env.MAC_BRIDGE_HOST || env.CHAT_HOST || "127.0.0.1",
     bridgeToken: env.MAC_BRIDGE_TOKEN || "",
+    mobileStudy: {
+      enabled: env.LEARNING_BOOST_MOBILE_STUDY !== "false",
+      token: env.LEARNING_BOOST_MOBILE_TOKEN || env.MAC_BRIDGE_TOKEN || "",
+      publicBaseUrl: env.LEARNING_BOOST_MOBILE_BASE_URL || ""
+    },
     localAI: {
       priority: parseProviderPriority(env.LOCAL_AI_PROVIDER_PRIORITY),
       allowLan: env.LOCAL_AI_ALLOW_LAN !== "false",

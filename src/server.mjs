@@ -20,6 +20,7 @@ import {
   readAutomationSettings,
   readLearningNotifications,
   recordLearningNotification,
+  resolveProviderBlockedNotifications,
   updateAutomationSettings,
   updateLearningNotificationAction
 } from "./learning-automation.mjs";
@@ -139,6 +140,13 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && url.pathname === "/") {
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     response.end(renderHtml());
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/mobile") {
+    if (!authorizedMobileStudyRequest(request, response, url, { html: true })) return;
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(renderMobileStudyHtml(url));
     return;
   }
 
@@ -326,6 +334,7 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && url.pathname === "/api/provider-status") {
     const status = await cachedProviderStatus({ force: url.searchParams.get("refresh") === "1" });
     recordProviderFallbackIfNeeded(status);
+    resolveProviderBlockedNotificationsIfReady(status);
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(status));
     return;
@@ -347,6 +356,48 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && url.pathname === "/api/learning") {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(cachedLearningPayload()));
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/mobile/study") {
+    if (!authorizedMobileStudyRequest(request, response, url)) return;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(mobileStudyPayload(url)));
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/mobile/review") {
+    if (!authorizedMobileStudyRequest(request, response, url)) return;
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const kind = String(payload.kind || "card");
+      const result = kind === "bit"
+        ? recordLearningBitReview(config, payload.vault, {
+          bitId: payload.id,
+          title: payload.title,
+          topic: payload.topic,
+          sourcePage: payload.sourcePage,
+          action: payload.action || "read",
+          grade: payload.grade || "read",
+          notes: payload.notes || "Reviewed from mobile study."
+        })
+        : recordLearningCardReview(config, payload.vault, {
+          cardId: payload.id,
+          prompt: payload.prompt,
+          topic: payload.topic,
+          sourcePage: payload.sourcePage,
+          action: payload.action || "read",
+          grade: payload.grade || "read",
+          notes: payload.notes || "Reviewed from mobile study."
+        });
+      refreshTabData("learning", { force: true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ vault: payload.vault, kind, ...result }));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
     return;
   }
 
@@ -1753,6 +1804,277 @@ function cachedLearningPayload() {
   };
 }
 
+function mobileStudyPayload(url = new URL("http://127.0.0.1/mobile")) {
+  const payload = cachedLearningPayload();
+  const vaults = payload.vaults || [];
+  const requestedVault = String(url.searchParams.get("vault") || "").trim();
+  const vault = vaults.find((item) => item.vault === requestedVault) || vaults[0] || {};
+  const stats = vault.learningStats || {};
+  const plan = stats.dailyStudyPlan || buildFastDailyStudyPlan({ stats, learningProfile: vault.learningProfile || {} });
+  const cardSource = uniqueMobileStudyItems([
+    ...(stats.dueCards || []),
+    ...(stats.studyQueueCards || []),
+    ...(stats.recentCards || []),
+    ...(stats.allCards || [])
+  ], (item) => fastCardKey(item)).slice(0, 18);
+  const bitSource = uniqueMobileStudyItems([
+    ...(stats.dueBits || []),
+    ...(stats.studyQueueBits || []),
+    ...(stats.recentBits || []),
+    ...(stats.allBits || [])
+  ], (item) => fastBitKey(item)).slice(0, 18);
+  return {
+    app: "LLM Agent Learning Boost Mobile Study",
+    generatedAt: new Date().toISOString(),
+    generatedAtLocal: formatLocal(new Date()),
+    timeZone: config.timeZone || resolveLocalTimeZone(),
+    vaults: vaults.map((item) => item.vault),
+    vault: vault.vault || "",
+    mobileAccess: mobileStudyAccessSummary(),
+    plan: {
+      id: plan.planId || "",
+      title: plan.planTitle || "",
+      scheduler: plan.scheduler || "spaced",
+      sessionMinutes: plan.sessionMinutes || 25,
+      dueCount: plan.dueCount || 0,
+      readyCount: plan.readyCount || 0,
+      sessions: (plan.sessions || []).map((session) => ({
+        id: session.id || "",
+        label: session.label || "",
+        title: session.title || "",
+        time: session.time || "",
+        localTime: session.time ? formatLocal(session.time) : "",
+        durationMinutes: session.durationMinutes || 10,
+        detail: session.detail || "",
+        priority: session.priority || "normal"
+      }))
+    },
+    counts: {
+      cards: stats.cards || 0,
+      bits: stats.bits || 0,
+      dueCards: (stats.dueCards || []).length,
+      dueBits: (stats.dueBits || []).length,
+      reviewedCards: stats.reviewedCards || 0,
+      reviewedBits: stats.reviewedBits || 0
+    },
+    cards: cardSource.map(mobileStudyCard),
+    bits: bitSource.map(mobileStudyBit),
+    notifications: (vault.notifications || []).slice(0, 6).map((item) => ({
+      id: item.id || "",
+      title: item.title || item.type || "Learning alert",
+      body: item.body || item.detail || "",
+      status: item.status || "pending",
+      severity: item.severity || "info",
+      createdLocal: item.created ? formatLocal(item.created) : ""
+    }))
+  };
+}
+
+function uniqueMobileStudyItems(items, keyFn) {
+  const seen = new Set();
+  const result = [];
+  for (const item of items || []) {
+    const key = String(keyFn(item) || "").trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+}
+
+function mobileStudyCard(card = {}) {
+  return {
+    kind: "card",
+    id: fastCardKey(card),
+    type: card.type || card.cardType || "card",
+    topic: card.displayTopic || card.learningFocus || card.topic || "Learning concept",
+    prompt: card.displayPrompt || card.front || card.cloze || "What should you remember?",
+    answer: card.displayAnswer || card.back || card.answer || card.body || "",
+    hint: card.hint || card.displayHint || "",
+    sourcePage: card.sourcePage || "",
+    sourceLabel: compactSourceLabel(card.sourcePage || card.displaySourceTitle || ""),
+    read: Boolean(card.displayRead || card.displayReviewed),
+    due: Boolean(card.displayReviewDue)
+  };
+}
+
+function mobileStudyBit(bit = {}) {
+  return {
+    kind: "bit",
+    id: fastBitKey(bit),
+    topic: bit.displayTopic || bit.learningFocus || bit.topic || bit.title || "Learning bit",
+    title: bit.title || bit.displayTopic || "Learning bit",
+    detail: bit.displayBody || bit.body || bit.summary || bit.detail || "",
+    sourcePage: bit.sourcePage || "",
+    sourceLabel: compactSourceLabel(bit.sourcePage || bit.displaySourceTitle || ""),
+    read: Boolean(bit.displayRead || bit.displayReviewed),
+    due: Boolean(bit.displayReviewDue)
+  };
+}
+
+function compactSourceLabel(value) {
+  const raw = String(value || "").split("/").pop()?.replace(/\.md$/i, "") || "";
+  return raw.length > 72 ? `${raw.slice(0, 69)}...` : raw;
+}
+
+function mobileStudyAccessSummary() {
+  const host = String(config.bridgeHost || "127.0.0.1");
+  const localUrl = `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${config.chatPort}/mobile`;
+  return {
+    enabled: config.mobileStudy?.enabled !== false,
+    host,
+    port: config.chatPort,
+    localUrl,
+    publicBaseUrl: config.mobileStudy?.publicBaseUrl || "",
+    tokenRequiredForLan: true,
+    tokenConfigured: Boolean(config.mobileStudy?.token)
+  };
+}
+
+function renderMobileStudyHtml(url) {
+  const initialVault = url.searchParams.get("vault") || "";
+  const token = url.searchParams.get("token") || "";
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Learning Boost Mobile Study</title>
+  <style>
+    :root { color-scheme: light; --bg: #f4ead8; --panel: #fffaf0; --ink: #302820; --muted: #766852; --line: #d9c49b; --accent: #98620f; --practice: #7c3aed; --bit: #2563eb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); line-height: 1.45; }
+    header { position: sticky; top: 0; z-index: 2; background: color-mix(in srgb, var(--bg) 94%, white); border-bottom: 1px solid var(--line); padding: 14px 16px; }
+    h1 { margin: 0 0 4px; font-size: clamp(24px, 8vw, 34px); }
+    h2 { margin: 20px 0 8px; font-size: 21px; }
+    button, select { font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel); color: var(--ink); min-height: 42px; }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 750; }
+    main { padding: 14px; display: grid; gap: 14px; max-width: 980px; margin: 0 auto; }
+    .toolbar, .summary, .session, .study-card, .bit-card, .alert { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .toolbar select { flex: 1 1 180px; min-width: 0; }
+    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; }
+    .metric { display: grid; gap: 2px; padding: 8px; border-radius: 8px; background: #efe2ca; }
+    .metric strong { font-size: 22px; color: var(--accent); }
+    .sessions, .cards, .bits, .alerts { display: grid; gap: 10px; }
+    .session { display: grid; gap: 4px; }
+    .session strong { font-size: 17px; }
+    .study-card, .bit-card { display: grid; gap: 10px; overflow-wrap: anywhere; }
+    .study-card { border-color: color-mix(in srgb, var(--practice) 35%, var(--line)); background: color-mix(in srgb, var(--practice) 8%, var(--panel)); }
+    .bit-card { border-color: color-mix(in srgb, var(--bit) 30%, var(--line)); background: color-mix(in srgb, var(--bit) 7%, var(--panel)); }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; color: var(--muted); background: #f8f0df; font-size: 13px; }
+    .answer[hidden] { display: none; }
+    .answer { border-top: 1px solid var(--line); padding-top: 10px; }
+    .muted { color: var(--muted); }
+    .error { color: #9f1239; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Learning Boost</h1>
+    <div id="generated" class="muted">Loading mobile study...</div>
+  </header>
+  <main>
+    <section class="toolbar">
+      <select id="vault"></select>
+      <button id="refresh" type="button">Refresh</button>
+    </section>
+    <section id="notice" class="alert" hidden></section>
+    <section id="summary" class="summary"></section>
+    <section><h2>Today</h2><div id="sessions" class="sessions"></div></section>
+    <section><h2>Cards</h2><div id="cards" class="cards"></div></section>
+    <section><h2>Bits</h2><div id="bits" class="bits"></div></section>
+    <section><h2>Alerts</h2><div id="alerts" class="alerts"></div></section>
+  </main>
+  <script>
+    const MOBILE_TOKEN = ${JSON.stringify(token)};
+    const INITIAL_VAULT = ${JSON.stringify(initialVault)};
+    const vaultSelect = document.querySelector("#vault");
+    const generated = document.querySelector("#generated");
+    const notice = document.querySelector("#notice");
+    const summary = document.querySelector("#summary");
+    const sessions = document.querySelector("#sessions");
+    const cards = document.querySelector("#cards");
+    const bits = document.querySelector("#bits");
+    const alerts = document.querySelector("#alerts");
+    document.querySelector("#refresh").addEventListener("click", () => loadStudy(vaultSelect.value));
+    vaultSelect.addEventListener("change", () => loadStudy(vaultSelect.value));
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-action]");
+      if (!button) return;
+      const card = button.closest("[data-study-kind]");
+      if (button.dataset.action === "toggle-answer") {
+        card.querySelector(".answer").hidden = !card.querySelector(".answer").hidden;
+        return;
+      }
+      if (button.dataset.action === "review") {
+        button.disabled = true;
+        await fetch(withToken("/api/mobile/review"), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            vault: vaultSelect.value,
+            kind: card.dataset.studyKind,
+            id: card.dataset.studyId,
+            prompt: card.dataset.prompt || "",
+            title: card.dataset.title || "",
+            topic: card.dataset.topic || "",
+            sourcePage: card.dataset.sourcePage || "",
+            grade: button.dataset.grade || "good"
+          })
+        });
+        card.classList.add("reviewed");
+        button.textContent = "Reviewed";
+        await loadStudy(vaultSelect.value);
+      }
+    });
+    loadStudy(INITIAL_VAULT);
+    async function loadStudy(vault) {
+      const query = vault ? "?vault=" + encodeURIComponent(vault) : "";
+      const response = await fetch(withToken("/api/mobile/study" + query));
+      if (!response.ok) {
+        notice.hidden = false;
+        notice.innerHTML = '<span class="error">Mobile study unavailable: ' + escapeHtml(await response.text()) + '</span>';
+        return;
+      }
+      const data = await response.json();
+      generated.textContent = data.generatedAtLocal + " · " + data.timeZone;
+      vaultSelect.innerHTML = (data.vaults || []).map((name) => '<option value="' + escapeHtml(name) + '"' + (name === data.vault ? " selected" : "") + '>' + escapeHtml(name) + '</option>').join("");
+      notice.hidden = data.mobileAccess.tokenConfigured || data.mobileAccess.host === "127.0.0.1";
+      notice.textContent = "For iPhone/iPad LAN access, set MAC_BRIDGE_HOST=0.0.0.0 and LEARNING_BOOST_MOBILE_TOKEN in config.env, then open /mobile?token=... from the device.";
+      summary.innerHTML = metric("Due", data.counts.dueCards + data.counts.dueBits) + metric("Ready", data.plan.readyCount) + metric("Cards", data.counts.cards) + metric("Bits", data.counts.bits);
+      sessions.innerHTML = (data.plan.sessions || []).map(renderSession).join("") || '<p class="muted">No study sessions yet.</p>';
+      cards.innerHTML = (data.cards || []).map(renderCard).join("") || '<p class="muted">No cards yet. Process one source first.</p>';
+      bits.innerHTML = (data.bits || []).map(renderBit).join("") || '<p class="muted">No bits yet. Process one source first.</p>';
+      alerts.innerHTML = (data.notifications || []).map(renderAlert).join("") || '<p class="muted">No active learning alerts.</p>';
+    }
+    function withToken(path) {
+      if (!MOBILE_TOKEN) return path;
+      const glue = path.includes("?") ? "&" : "?";
+      return path + glue + "token=" + encodeURIComponent(MOBILE_TOKEN);
+    }
+    function metric(label, value) { return '<div class="metric"><strong>' + escapeHtml(String(value || 0)) + '</strong><span>' + escapeHtml(label) + '</span></div>'; }
+    function renderSession(item) {
+      return '<article class="session"><strong>' + escapeHtml(item.label + " · " + item.title) + '</strong><span class="muted">' + escapeHtml(item.localTime || "") + " · " + escapeHtml(String(item.durationMinutes || 10)) + ' min</span><p>' + escapeHtml(item.detail || "") + '</p></article>';
+    }
+    function renderCard(item) {
+      return '<article class="study-card" data-study-kind="card" data-study-id="' + escapeHtml(item.id) + '" data-prompt="' + escapeHtml(item.prompt) + '" data-topic="' + escapeHtml(item.topic) + '" data-source-page="' + escapeHtml(item.sourcePage) + '"><div class="chips"><span class="chip">' + escapeHtml(item.type) + '</span><span class="chip">' + escapeHtml(item.topic) + '</span>' + (item.due ? '<span class="chip">due</span>' : '') + (item.read ? '<span class="chip">read</span>' : '') + '</div><strong>' + escapeHtml(item.prompt) + '</strong>' + (item.hint ? '<p class="muted">' + escapeHtml(item.hint) + '</p>' : '') + '<div class="answer" hidden><strong>Answer</strong><p>' + escapeHtml(item.answer || "No answer text recorded.") + '</p><p class="muted">' + escapeHtml(item.sourceLabel || "") + '</p></div><button type="button" data-action="toggle-answer">Show answer</button><button class="primary" type="button" data-action="review" data-grade="good">Mark reviewed</button></article>';
+    }
+    function renderBit(item) {
+      return '<article class="bit-card" data-study-kind="bit" data-study-id="' + escapeHtml(item.id) + '" data-title="' + escapeHtml(item.title) + '" data-topic="' + escapeHtml(item.topic) + '" data-source-page="' + escapeHtml(item.sourcePage) + '"><div class="chips"><span class="chip">bit</span><span class="chip">' + escapeHtml(item.topic) + '</span>' + (item.due ? '<span class="chip">due</span>' : '') + (item.read ? '<span class="chip">read</span>' : '') + '</div><strong>' + escapeHtml(item.title) + '</strong><p>' + escapeHtml(item.detail || "") + '</p><p class="muted">' + escapeHtml(item.sourceLabel || "") + '</p><button class="primary" type="button" data-action="review" data-grade="read">Mark read</button></article>';
+    }
+    function renderAlert(item) {
+      return '<article class="alert"><strong>' + escapeHtml(item.title) + '</strong><p>' + escapeHtml(item.body || "") + '</p><span class="muted">' + escapeHtml(item.status || "") + " · " + escapeHtml(item.createdLocal || "") + '</span></article>';
+    }
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+    }
+  </script>
+</body>
+</html>`;
+}
+
 function cachedLearningAutomationStatus(vaultParam = "") {
   const payload = cachedLearningPayload();
   const requested = String(vaultParam || "").trim();
@@ -2154,7 +2476,7 @@ function latestFastReviews(reviews, type, idKey) {
 }
 
 function fastReviewState(item, event) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = formatLocalDateKey(new Date(), { timeZone: config.timeZone });
   const next = String(event?.nextReviewAt || "").slice(0, 10);
   const reviewed = Boolean(event);
   const due = !reviewed || !next || next <= today || (item.due && item.due <= today);
@@ -4132,6 +4454,19 @@ function recordProviderFallbackIfNeeded(status) {
   }
 }
 
+function resolveProviderBlockedNotificationsIfReady(status = {}) {
+  if (status.statusColor !== "green") return;
+  for (const vaultPath of cachedVaultPaths(config)) {
+    try {
+      resolveProviderBlockedNotifications(vaultPath, {
+        detail: `Provider health is ready: ${status.status || "Connected and ready"}.`
+      });
+    } catch (error) {
+      console.warn(`[learning] could not resolve provider-blocked notifications for ${vaultName(vaultPath)}: ${error.message}`);
+    }
+  }
+}
+
 function yieldToServer() {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -4143,6 +4478,39 @@ function corsHeaders(extra = {}) {
     "access-control-allow-headers": "content-type, x-llm-wiki-bridge-token, authorization",
     ...extra
   };
+}
+
+function authorizedMobileStudyRequest(request, response, url, options = {}) {
+  const html = Boolean(options.html);
+  if (config.mobileStudy?.enabled === false) {
+    response.writeHead(403, { "content-type": html ? "text/html; charset=utf-8" : "application/json" });
+    response.end(html
+      ? renderNotFound("Mobile Study is disabled. Set LEARNING_BOOST_MOBILE_STUDY=true in config.env to enable it.")
+      : JSON.stringify({ error: "Mobile Study is disabled." }));
+    return false;
+  }
+  if (requestIsLoopback(request)) return true;
+  const configuredToken = String(config.mobileStudy?.token || "").trim();
+  const suppliedToken = mobileStudyRequestToken(request, url);
+  if (configuredToken && suppliedToken === configuredToken) return true;
+  response.writeHead(403, { "content-type": html ? "text/html; charset=utf-8" : "application/json" });
+  response.end(html
+    ? renderNotFound("Mobile Study requires LEARNING_BOOST_MOBILE_TOKEN for iPhone/iPad or LAN access.")
+    : JSON.stringify({ error: "Mobile Study requires a valid token for non-local access." }));
+  return false;
+}
+
+function requestIsLoopback(request) {
+  const address = String(request.socket?.remoteAddress || "");
+  return address === "::1" || address === "127.0.0.1" || address.startsWith("127.") || address.startsWith("::ffff:127.");
+}
+
+function mobileStudyRequestToken(request, url) {
+  const queryToken = String(url.searchParams.get("token") || "").trim();
+  if (queryToken) return queryToken;
+  const header = request.headers["x-learning-boost-mobile-token"] || request.headers.authorization || "";
+  const value = Array.isArray(header) ? header[0] : header;
+  return String(value || "").replace(/^Bearer\s+/i, "").trim();
 }
 
 function authorizedBridgeRequest(request, response) {

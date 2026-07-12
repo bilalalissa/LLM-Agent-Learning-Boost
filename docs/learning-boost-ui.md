@@ -80,6 +80,20 @@ Clicking a timeline item routes to the relevant place: Cards And Bits, Source-To
 
 The session cards include `Spaced review`, `Concept practice`, `Short quiz/test`, and `Plan and goal check`. Each card has a local suggested time, duration, explanation, and one direct action. These cards are guidance only; they do not write Calendar or Reminders entries unless you open an export preview and confirm it.
 
+## Mobile Study
+
+Open `/mobile` on the Mac to use the same study queue in a phone-sized interface. It shows Today's Study Plan, due cards, due bits, unread items, and recent alerts. `Mark reviewed` and `Mark read` write the same review events used by the desktop Learning tab, so spaced repetition stays in sync.
+
+For iPhone or iPad access, configure the Mac app on a trusted LAN:
+
+```env
+MAC_BRIDGE_HOST=0.0.0.0
+LEARNING_BOOST_MOBILE_TOKEN=choose-a-long-local-token
+LEARNING_BOOST_MOBILE_STUDY=true
+```
+
+Then open `http://<your-mac-lan-ip>:8789/mobile?token=choose-a-long-local-token` from Safari, Arc, or another browser on the device. The mobile page is for study/review only; it does not expose Provider settings or file/export controls.
+
 ## Flexible Layout
 
 Learning panels use wrapping grids and natural-height cards. Stepper items and numbered flow lanes use full-width buttons so labels do not collapse into vertical text. Controls, chips, notification rows, plan timelines, source evidence paths, Arabic/English mixed titles, and card backs wrap or clamp inside their containers instead of overlapping or hiding content.

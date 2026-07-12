@@ -258,13 +258,22 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
     "Export failed verification",
     "Checked file path(s)",
     "Card marked read",
-    "Learning Profile Summary"
+    "Learning Profile Summary",
+    "Mobile Study",
+    "Learning Boost Mobile Study",
+    "Reviewed from mobile study."
   ]) {
     assert.match(serverSource, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
   assert.match(serverSource, /renderLearningTimeline/);
   assert.match(serverSource, /renderLearningDailyStudyPlan/);
   assert.match(serverSource, /buildFastDailyStudyPlan/);
+  assert.match(serverSource, /renderMobileStudyHtml/);
+  assert.match(serverSource, /mobileStudyPayload/);
+  assert.match(serverSource, /authorizedMobileStudyRequest/);
+  assert.match(serverSource, /api\/mobile\/study/);
+  assert.match(serverSource, /api\/mobile\/review/);
+  assert.match(serverSource, /LEARNING_BOOST_MOBILE_TOKEN/);
   assert.match(serverSource, /learning-daily-plan/);
   assert.match(serverSource, /learning-daily-sessions/);
   assert.match(serverSource, /automationControlText/);

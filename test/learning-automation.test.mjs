@@ -9,6 +9,7 @@ import {
   readAutomationSettings,
   readLearningNotifications,
   recordLearningNotification,
+  resolveProviderBlockedNotifications,
   runLearningAutomationForVault,
   updateAutomationSettings,
   updateLearningNotificationAction
@@ -120,6 +121,28 @@ test("provider blocked notifications are throttled into one updated alert", () =
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].repeated, 2);
   assert.match(notifications[0].detail, /30s/);
+});
+
+test("provider blocked notifications resolve after provider recovers", () => {
+  const { vault } = makeVault();
+  const blocked = recordLearningNotification(vault, {
+    type: "provider_blocked",
+    severity: "warning",
+    title: "Learning processing paused",
+    body: "Provider did not answer.",
+    detail: "Provider timeout after 30s."
+  });
+  const result = resolveProviderBlockedNotifications(vault, {
+    detail: "Provider answered and processed source material."
+  });
+  const notifications = readLearningNotifications(vault, { limit: 10 });
+
+  assert.equal(result.resolved, 1);
+  assert.equal(notifications[0].id, blocked.id);
+  assert.equal(notifications[0].status, "read");
+  assert.equal(notifications[0].severity, "info");
+  assert.equal(Boolean(notifications[0].resolvedAt), true);
+  assert.match(notifications[0].body, /answered again/i);
 });
 
 test("provider readiness timeout follows selected provider policy", () => {
