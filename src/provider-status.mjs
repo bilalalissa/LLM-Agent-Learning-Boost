@@ -326,7 +326,7 @@ async function codexLoginStatus(config) {
   try {
     const result = await runCodexLoginStatus(config.openai.codexCommand || "codex", 8000);
     if (result.code === 0 && /logged in/i.test(result.output)) {
-      const readiness = await runCodexCompletionProbe(config, Math.min(config.openai.codexTimeoutMs || 12000, 12000));
+      const readiness = await runCodexCompletionProbe(config, codexReadinessTimeoutMs(config));
       if (readiness.code === 0 && cleanOutput(readiness.output)) {
         return status("Connected and ready", "green", `${codexLoginDetail(result)}\nAnswer readiness: short completion succeeded.`);
       }
@@ -340,6 +340,10 @@ async function codexLoginStatus(config) {
   } catch (error) {
     return status("Login not active", "red", friendlyCodexError(error));
   }
+}
+
+export function codexReadinessTimeoutMs(config = {}) {
+  return Math.max(30000, Math.min(Number(config.openai?.codexTimeoutMs || config.providerTimeoutMs || 45000), 55000));
 }
 
 function status(label, color, detail) {

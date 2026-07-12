@@ -156,6 +156,8 @@ Routine background auto-ingest is bounded so it does not monopolize the app. Eac
 
 If a worker exceeds the background time limit, Learning Boost pauses that vault, leaves pending files in place, and records the last worker state instead of marking the source as successfully processed. The next bounded run retries after a short backoff. Use the Provider tab first if the pause repeats because the selected provider is not answering.
 
+Autopilot also retries older media source pages marked `pending_provider_analysis` once the selected provider is ready. The retry is bounded to a small number of pages per run, so the app stays responsive while old image, audio, or video captures gradually become real learning bits and cards. Pages marked `pending_content` still need readable OCR text, transcript text, local ASR, keyframe OCR, or a manual description before provider analysis can run.
+
 ## Files, Archive, And Topics Loading
 
 Files, Archive, Topics, and the side Topics list report explicit loading states:

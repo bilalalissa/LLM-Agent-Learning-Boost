@@ -14,7 +14,7 @@ import {
   resolveLocalProvider
 } from "../src/local-ai.mjs";
 import { createProvider, ProviderError } from "../src/provider.mjs";
-import { codexCommandCandidates, providerStatus, setProviderStatusDepsForTest } from "../src/provider-status.mjs";
+import { codexCommandCandidates, codexReadinessTimeoutMs, providerStatus, setProviderStatusDepsForTest } from "../src/provider-status.mjs";
 
 function baseConfig(overrides = {}) {
   return {
@@ -476,6 +476,18 @@ test("codex command candidates keep configured command and include bundled exten
   assert.equal(candidates[0].command, "codex");
   assert.ok(candidates.every((item) => Array.isArray(item.args)));
   assert.equal(new Set(candidates.map((item) => [item.command, ...item.args].join("\0"))).size, candidates.length);
+});
+
+test("openai_subscription status probe uses a realistic bounded Codex timeout", () => {
+  assert.equal(codexReadinessTimeoutMs(baseConfig({
+    openai: { ...baseConfig().openai, codexTimeoutMs: 1000 }
+  })), 30000);
+  assert.equal(codexReadinessTimeoutMs(baseConfig({
+    openai: { ...baseConfig().openai, codexTimeoutMs: 180000 }
+  })), 55000);
+  assert.equal(codexReadinessTimeoutMs(baseConfig({
+    openai: { ...baseConfig().openai, codexTimeoutMs: 45000 }
+  })), 45000);
 });
 
 test("openai_subscription status is not green when login exists but completion fails", async (t) => {

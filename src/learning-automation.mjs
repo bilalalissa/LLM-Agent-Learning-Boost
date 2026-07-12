@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { trackBehaviorEvent } from "./behavior-tracker.mjs";
-import { ingestVault } from "./ingest-lib.mjs";
+import { countPendingMediaPages, ingestVault } from "./ingest-lib.mjs";
 import { draftLearningPlans, readLearningPlans } from "./learning-planner.mjs";
 import { learningPaths } from "./learning-store.mjs";
 import { queueResourceInboxForIngestAsync } from "./source-capture-ingest.mjs";
@@ -56,6 +56,7 @@ export function learningAutomationStatus(vaultPath, runtime = {}) {
   const resources = resourceInbox(vaultPath);
   const sourceSettings = readSourceCaptureSettings(vaultPath);
   const rawCandidates = listRawCandidates(vaultPath);
+  const pendingMediaCount = countPendingMediaPages(vaultPath, { limit: 50 });
   const notifications = readLearningNotifications(vaultPath, { limit: 40 });
   const pendingResources = resources.filter((item) => !["ingested", "deferred", "deleted"].includes(item.processingStatus));
   return {
@@ -69,6 +70,7 @@ export function learningAutomationStatus(vaultPath, runtime = {}) {
     lastSuccessAt: runtime.lastSuccessAt || "",
     lastBlockedAt: runtime.lastBlockedAt || "",
     pendingRawCount: rawCandidates.length,
+    pendingMediaCount,
     pendingRaw: rawCandidates.slice(0, 12).map((file) => path.relative(vaultPath, file).replace(/\\/g, "/")),
     pendingResourceCount: pendingResources.length,
     resourceInboxCount: resources.length,
@@ -96,8 +98,9 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
     ? await queueResourceInboxForIngestAsync(vaultPath, { limit: options.resourceLimit || 12 })
     : { staged: [] };
   const rawBefore = listRawCandidates(vaultPath);
+  const pendingMediaBefore = countPendingMediaPages(vaultPath, { limit: options.pendingMediaLimit || 3 });
 
-  if (!rawBefore.length) {
+  if (!rawBefore.length && !pendingMediaBefore) {
     return {
       skipped: false,
       status: "idle",
@@ -137,15 +140,19 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
       processed: 0,
       results: [],
       pendingRawCount: rawBefore.length,
+      pendingMediaCount: pendingMediaBefore,
       settings
     };
   }
 
   const results = await ingestVault(vaultPath, options.config, options.provider, {
-    limit: options.resourceLimit || options.limit || 12
+    limit: options.resourceLimit || options.limit || 12,
+    reprocessPendingMedia: true,
+    pendingMediaLimit: options.pendingMediaLimit || 2
   });
   const marked = markResourceIngestResults(vaultPath, results);
   for (const result of results) {
+    if (result.pendingContent || result.pendingProviderAnalysis || result.learning?.pendingContent || result.learning?.pendingProviderAnalysis) continue;
     recordLearningNotification(vaultPath, {
       type: "source_processed",
       severity: "info",

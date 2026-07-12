@@ -383,6 +383,64 @@ test("media ingest with extracted text but provider failure creates no metadata 
   }
 });
 
+test("media ingest accepts provider JSON without processing_notes", async () => {
+  const { root, vault } = makeVault();
+  const fakeTesseract = path.join(root, "fake-tesseract.sh");
+  fs.writeFileSync(fakeTesseract, "#!/bin/sh\necho 'Readable OCR text about model routing, local provider readiness, and source evidence for a learning diagram.'\n");
+  fs.chmodSync(fakeTesseract, 0o755);
+  const previous = process.env.LEARNING_BOOST_TESSERACT_COMMAND;
+  process.env.LEARNING_BOOST_TESSERACT_COMMAND = fakeTesseract;
+  const source = path.join(vault, "raw", "input", "provider-diagram.png");
+  fs.writeFileSync(source, "fake image bytes");
+
+  try {
+    const result = await ingestFile(vault, source, config(root), {
+      async complete() {
+        return JSON.stringify({
+          language: "English",
+          summary: "A diagram about local AI provider readiness.",
+          key_points: ["Provider readiness must mean the selected provider can answer."],
+          concepts: [{ name: "Provider readiness", summary: "A check that confirms an AI provider can answer before processing." }],
+          entities: [],
+          open_questions: [],
+          contradictions: [],
+          source_learning_questions: [{ question: "What should provider readiness confirm?", answer: "That the selected provider can answer." }],
+          open_learning_questions: [],
+          learning_boost: {
+            source_language: "English",
+            gist: "Provider readiness should be based on real answers.",
+            core_summary: "Learning automation should wait for the selected provider to answer before processing sources.",
+            learning_bits: [
+              { type: "concept", title: "Provider readiness", body: "A provider is ready only when it can answer a short analysis probe.", evidence: ["OCR text"] },
+              { type: "detail", title: "Selected provider", body: "Direct provider modes should not silently fall back to other providers.", evidence: ["OCR text"] },
+              { type: "workflow", title: "Pending sources", body: "Pending files stay in place until the selected provider can analyze them.", evidence: ["OCR text"] }
+            ],
+            general_cards: [
+              { type: "qa", front: "What should provider readiness confirm?", back: "That the selected provider can answer.", evidence: ["OCR text"] },
+              { type: "qa", front: "What happens when provider analysis is blocked?", back: "Pending files stay in place.", evidence: ["OCR text"] },
+              { type: "cloze", front: "Direct provider modes should not {{fall back}} silently.", back: "fall back", evidence: ["OCR text"] },
+              { type: "qa", front: "Why should media analysis use extracted text?", back: "Raw media bytes are not sent to the provider.", evidence: ["OCR text"] }
+            ],
+            details_to_keep: [{ kind: "rule", text: "Use the selected provider directly.", why_it_matters: "It keeps ingest behavior predictable.", evidence: ["OCR text"] }]
+          }
+        });
+      }
+    });
+    const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+    const paths = learningPaths(vault);
+
+    assert.equal(result.learning.cardsCreated >= 4, true);
+    assert.equal(result.learning.bitsCreated >= 3, true);
+    assert.match(page, /media_analysis_status: analyzed/);
+    assert.doesNotMatch(page, /Cannot read properties of undefined/);
+    assert.equal(fs.existsSync(path.join(paths.dir, "cards.jsonl")), true);
+    assert.equal(fs.existsSync(path.join(paths.dir, "bits.jsonl")), true);
+  } finally {
+    if (previous === undefined) delete process.env.LEARNING_BOOST_TESSERACT_COMMAND;
+    else process.env.LEARNING_BOOST_TESSERACT_COMMAND = previous;
+  }
+});
+
 test("document ingest preserves unextracted PDFs without metadata-only learning cards", async () => {
   const { root, vault } = makeVault();
   const source = path.join(vault, "raw", "input", "scanned.pdf");

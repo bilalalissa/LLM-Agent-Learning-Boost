@@ -38,6 +38,8 @@ To prevent future pending media/document pages, make sure the relevant local ext
 
 If the selected provider itself is unavailable, fix the Provider tab status first, then reprocess the pending source. The preserved raw asset does not need to be captured again.
 
+Learning Autopilot retries `pending_provider_analysis` media pages in small bounded batches when the selected provider becomes ready. These retries use the preserved asset path plus extracted OCR/transcript/metadata; you do not need to clip or copy the source again. If the page is still `pending_content`, add readable text, OCR support, a transcript sidecar, local ASR, or a manual description before retrying.
+
 ## Learning Output
 
 Every processed source asks the provider for a `learning_boost` object. The app normalizes that object into:

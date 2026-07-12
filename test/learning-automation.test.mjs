@@ -215,3 +215,90 @@ test("provider failure leaves raw files pending and records a blocker notificati
   assert.equal(fs.existsSync(pending), true);
   assert.match(readLearningNotifications(vault)[0].title, /paused/i);
 });
+
+test("automation retries pending media source pages when provider is ready", async () => {
+  const { root, vault } = makeVault();
+  const fakeTesseract = path.join(root, "fake-tesseract.sh");
+  fs.writeFileSync(fakeTesseract, "#!/bin/sh\necho 'Extracted diagram text about spaced repetition and provider readiness.'\n");
+  fs.chmodSync(fakeTesseract, 0o755);
+  const previous = process.env.LEARNING_BOOST_TESSERACT_COMMAND;
+  process.env.LEARNING_BOOST_TESSERACT_COMMAND = fakeTesseract;
+  const assetRel = "raw/assets/pending-diagram.png";
+  fs.mkdirSync(path.join(vault, "raw", "assets"), { recursive: true });
+  fs.mkdirSync(path.join(vault, "wiki", "sources"), { recursive: true });
+  fs.writeFileSync(path.join(vault, assetRel), "fake image bytes");
+  const sourcePage = path.join(vault, "wiki", "sources", "pending-diagram.md");
+  fs.writeFileSync(sourcePage, `---
+type: source
+status: pending_content
+created: 2026-07-11
+updated: 2026-07-11
+language: unknown
+source_path: ${assetRel}
+media_kind: image
+media_analyzed: false
+media_analysis_status: pending_provider_analysis
+provider_raw_file_sent: false
+provider_input_status: extracted_text_and_metadata_sent
+---
+
+# Pending Diagram
+
+## Summary
+
+Provider analysis is pending.
+`);
+  let calls = 0;
+
+  try {
+    const result = await runLearningAutomationForVault(vault, {
+      config: { provider: "openai_compat", providerTimeoutMs: 1000, ingestMaxChars: 4000, vaultsRoot: root, configFile: path.join(root, "config.env") },
+      provider: {
+        async complete() {
+          calls += 1;
+          if (calls === 1) return "READY";
+          return JSON.stringify({
+            language: "English",
+            summary: "A diagram about spaced repetition and provider readiness.",
+            key_points: ["Spaced repetition works best when cards are reviewed on schedule."],
+            concepts: [{ name: "Spaced repetition", summary: "Reviewing cards at increasing intervals." }],
+            entities: [],
+            open_questions: [],
+            contradictions: [],
+            source_learning_questions: [{ question: "What should be reviewed on schedule?", answer: "Learning cards." }],
+            open_learning_questions: [],
+            learning_boost: {
+              source_language: "English",
+              gist: "Review cards on schedule.",
+              core_summary: "The diagram connects provider readiness with scheduled review.",
+              learning_bits: [
+                { type: "concept", title: "Spaced repetition", body: "Review at increasing intervals.", evidence: ["OCR text"] },
+                { type: "detail", title: "Readiness", body: "Automation should run when the selected provider can answer.", evidence: ["OCR text"] },
+                { type: "workflow", title: "Review loop", body: "Process source, create cards, then review due cards.", evidence: ["OCR text"] }
+              ],
+              general_cards: [
+                { type: "qa", front: "What is spaced repetition?", back: "Reviewing cards at increasing intervals.", evidence: ["OCR text"] },
+                { type: "qa", front: "When should automation process learning sources?", back: "When the selected provider can answer.", evidence: ["OCR text"] },
+                { type: "qa", front: "What should happen after a source is processed?", back: "Review due cards.", evidence: ["OCR text"] },
+                { type: "cloze", front: "Learning cards should be reviewed on {{schedule}}.", back: "schedule", evidence: ["OCR text"] }
+              ],
+              details_to_keep: [{ kind: "rule", text: "Keep reviews scheduled.", why_it_matters: "It supports retention.", evidence: ["OCR text"] }]
+            }
+          });
+        }
+      },
+      force: true,
+      pendingMediaLimit: 1
+    });
+    const page = fs.readFileSync(sourcePage, "utf8");
+
+    assert.equal(result.status, "processed");
+    assert.equal(result.processed, 1);
+    assert.match(page, /media_analysis_status: analyzed/);
+    assert.match(page, /## Learning Boost/);
+    assert.equal(readLearningNotifications(vault).some((item) => item.type === "source_processed"), true);
+  } finally {
+    if (previous === undefined) delete process.env.LEARNING_BOOST_TESSERACT_COMMAND;
+    else process.env.LEARNING_BOOST_TESSERACT_COMMAND = previous;
+  }
+});

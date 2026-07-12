@@ -34,8 +34,12 @@ export async function ingestVault(vaultPath, config, provider = createProvider(c
     await yieldToEventLoop();
     results.push(await ingestFile(vaultPath, sourcePath, config, provider));
   }
-  if (process.env.LLM_WIKI_REPROCESS_PENDING_MEDIA === "1") {
-    results.push(...await reprocessPendingMediaPages(vaultPath, provider));
+  const shouldReprocessPendingMedia = options.reprocessPendingMedia === true || process.env.LLM_WIKI_REPROCESS_PENDING_MEDIA === "1";
+  if (shouldReprocessPendingMedia) {
+    const pendingMediaLimit = Number.isFinite(Number(options.pendingMediaLimit))
+      ? Number(options.pendingMediaLimit)
+      : (options.reprocessPendingMedia === true ? 2 : 0);
+    results.push(...await reprocessPendingMediaPages(vaultPath, provider, { limit: pendingMediaLimit }));
   }
   return results;
 }
@@ -245,17 +249,18 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
   };
 }
 
-async function reprocessPendingMediaPages(vaultPath, provider) {
-  const sourceDir = path.join(vaultPath, "wiki", "sources");
-  const results = [];
-  const files = [];
-  if (!fs.existsSync(sourceDir)) return results;
-  walk(sourceDir, files);
+export function countPendingMediaPages(vaultPath, options = {}) {
+  return pendingMediaPagePaths(vaultPath, options).length;
+}
 
-  for (const sourcePagePath of files.filter((file) => file.endsWith(".md"))) {
+async function reprocessPendingMediaPages(vaultPath, provider, options = {}) {
+  const results = [];
+  const limit = Math.max(0, Number(options.limit || 0));
+  let attempted = 0;
+
+  for (const sourcePagePath of pendingMediaPagePaths(vaultPath, { limit })) {
     await yieldToEventLoop();
     const text = fs.readFileSync(sourcePagePath, "utf8");
-    if (!/^media_kind:\s*.+$/m.test(text) || /^media_analysis_status:\s*analyzed\s*$/m.test(text)) continue;
     const assetRel = text.match(/^source_path:\s*(.+)$/m)?.[1]?.trim().replace(/^["']|["']$/g, "");
     const mediaKind = text.match(/^media_kind:\s*(.+)$/m)?.[1]?.trim() || "media";
     if (!assetRel) continue;
@@ -308,8 +313,30 @@ async function reprocessPendingMediaPages(vaultPath, provider) {
       pendingContent: analysis.status === "pending_content",
       pendingProviderAnalysis: analysis.status === "pending_provider_analysis"
     });
+    attempted += 1;
+    if (limit > 0 && attempted >= limit) break;
   }
   return results;
+}
+
+function pendingMediaPagePaths(vaultPath, options = {}) {
+  const sourceDir = path.join(vaultPath, "wiki", "sources");
+  const limit = Math.max(0, Number(options.limit || 0));
+  const result = [];
+  const files = [];
+  if (!fs.existsSync(sourceDir)) return result;
+  walk(sourceDir, files);
+
+  for (const sourcePagePath of files.filter((file) => file.endsWith(".md"))) {
+    const text = fs.readFileSync(sourcePagePath, "utf8");
+    if (!/^media_kind:\s*.+$/m.test(text)) continue;
+    if (/^media_analysis_status:\s*analyzed\s*$/m.test(text)) continue;
+    const assetRel = text.match(/^source_path:\s*(.+)$/m)?.[1]?.trim().replace(/^["']|["']$/g, "");
+    if (!assetRel || !fs.existsSync(path.join(vaultPath, assetRel))) continue;
+    result.push(sourcePagePath);
+    if (limit > 0 && result.length >= limit) break;
+  }
+  return result;
 }
 
 function yieldToEventLoop() {
@@ -407,7 +434,8 @@ function parseMediaJson(text, media, input = {}) {
     open_questions: asLearningItems(raw.open_questions),
     contradictions: asArray(raw.contradictions),
     source_learning_questions: asLearningItems(raw.source_learning_questions),
-    open_learning_questions: asLearningItems(raw.open_learning_questions)
+    open_learning_questions: asLearningItems(raw.open_learning_questions),
+    processing_notes: asArray(raw.processing_notes)
   };
   const context = analysisContext(input, {
     sourceRel: "",

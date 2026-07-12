@@ -13,7 +13,7 @@ import { getConfig, readProviderConfigForUi, setConfigFilePath, updateProviderCo
 import { answerQuestion } from "./chat-lib.mjs";
 import { saveChatAsRawSource } from "./chat-source.mjs";
 import { preflightBrowserClip, saveBrowserClip } from "./clip.mjs";
-import { ingestVault } from "./ingest-lib.mjs";
+import { countPendingMediaPages, ingestVault } from "./ingest-lib.mjs";
 import { enrichLearningBitForDisplay, enrichLearningCardForDisplay } from "./learning-card-display.mjs";
 import {
   learningAutomationStatus,
@@ -113,6 +113,7 @@ const providerStatusCache = {
   data: null,
   loading: false,
   error: "",
+  startedAt: "",
   updatedAt: ""
 };
 const listTabKinds = new Set(["files", "archives", "topics"]);
@@ -2650,9 +2651,10 @@ function parseWorkerStdout(output) {
 }
 
 async function cachedProviderStatus(options = {}) {
+  healStaleProviderStatusWorker();
   const stale = !providerStatusCache.updatedAt || Date.now() - Date.parse(providerStatusCache.updatedAt) > 30000;
   if ((options.force || stale) && !providerStatusCache.loading) {
-    const refresh = runProviderStatusWorker({ timeoutMs: 7000 }).catch((error) => {
+    const refresh = runProviderStatusWorker({ timeoutMs: providerStatusWorkerTimeoutMs(config) }).catch((error) => {
       providerStatusCache.error = error.message;
       if (!providerStatusCache.data) {
         providerStatusCache.data = providerStatusFallback(error.message);
@@ -2681,12 +2683,25 @@ async function cachedProviderStatus(options = {}) {
       detail: `Last known provider status was ready at ${formatLocal(new Date(payload.updatedAt))}. Refreshing now before treating the provider as available.`
     };
   }
+  if (payload.error && payload.statusColor === "green") {
+    const when = payload.updatedAt ? formatLocal(new Date(payload.updatedAt)) : "an earlier check";
+    return {
+      ...payload,
+      lastKnownStatus: payload.status,
+      lastKnownStatusColor: payload.statusColor,
+      status: "Last provider check failed",
+      statusColor: "orange",
+      statusDetail: `Last known ready status is from ${when}. Latest refresh failed: ${payload.error}`,
+      detail: `Last known ready status is from ${when}. Latest refresh failed: ${payload.error}`
+    };
+  }
   return payload;
 }
 
 function runProviderStatusWorker(options = {}) {
   if (providerStatusWorker) return Promise.resolve(providerStatusCache.data || providerStatusFallback("Provider status refresh is already running."));
   providerStatusCache.loading = true;
+  providerStatusCache.startedAt = new Date().toISOString();
   providerStatusCache.error = "";
   return new Promise((resolve) => {
     const resultFile = tempWorkerResultFile("llm-learning-provider-status", "provider");
@@ -2703,6 +2718,7 @@ function runProviderStatusWorker(options = {}) {
       clearTimeout(timeout);
       providerStatusWorker = null;
       providerStatusCache.loading = false;
+      providerStatusCache.startedAt = "";
       cleanupWorkerResult(resultFile);
       if (message?.ok && message.status) {
         providerStatusCache.data = message.status;
@@ -2722,6 +2738,34 @@ function runProviderStatusWorker(options = {}) {
     worker.on("exit", () => finish(readWorkerResult(resultFile)));
     worker.on("error", (error) => finish({ ok: false, error: error.message }));
   });
+}
+
+function healStaleProviderStatusWorker() {
+  if (!providerStatusCache.loading) return;
+  const started = Date.parse(providerStatusCache.startedAt || "");
+  const maxAge = Math.max(5000, providerStatusWorkerTimeoutMs(config) + 3000);
+  if (Number.isFinite(started) && Date.now() - started <= maxAge) return;
+  try {
+    providerStatusWorker?.kill?.("SIGKILL");
+  } catch {
+    // Best-effort cleanup only.
+  }
+  providerStatusWorker = null;
+  providerStatusCache.loading = false;
+  providerStatusCache.startedAt = "";
+  providerStatusCache.error = "Provider status worker did not finish cleanly and was reset.";
+  if (!providerStatusCache.data) providerStatusCache.data = providerStatusFallback(providerStatusCache.error);
+  providerStatusCache.updatedAt = providerStatusCache.updatedAt || new Date().toISOString();
+}
+
+function providerStatusWorkerTimeoutMs(currentConfig = config) {
+  if (["openai_subscription", "openai_oauth", "chatgpt"].includes(currentConfig.provider)) {
+    return Math.max(30000, Math.min(Number(currentConfig.openai?.codexTimeoutMs || 45000), 65000));
+  }
+  if (currentConfig.provider === "mlx_lm_cli") {
+    return Math.max(15000, Math.min(Number(currentConfig.mlxLmCli?.timeoutMs || 30000), 45000));
+  }
+  return Math.max(7000, Math.min(Number(currentConfig.localAI?.healthTimeoutMs || currentConfig.providerTimeoutMs || 12000), 20000));
 }
 
 function providerStatusFallback(detail) {
@@ -3337,7 +3381,7 @@ function nextAutoIngestVault() {
 
 function safeRawCandidateCount(vaultPath) {
   try {
-    return listRawCandidates(vaultPath).length;
+    return listRawCandidates(vaultPath).length + countPendingMediaPages(vaultPath, { limit: 3 });
   } catch (error) {
     console.warn(`[auto-ingest] could not scan ${vaultName(vaultPath)} raw candidates: ${error.message}`);
     return 0;
