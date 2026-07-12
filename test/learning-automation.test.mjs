@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   learningAutomationStatus,
+  providerReadinessTimeoutMs,
   readAutomationSettings,
   readLearningNotifications,
   recordLearningNotification,
@@ -60,6 +61,27 @@ test("automation settings can pause only the vault autopilot", () => {
   assert.equal(status.status, "paused");
 });
 
+test("automation settings support pause snooze resume and stop controls", async () => {
+  const { vault } = makeVault();
+  updateAutomationSettings(vault, { automationControl: "paused" });
+  assert.equal(learningAutomationStatus(vault).status, "paused");
+
+  const snoozedUntil = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  updateAutomationSettings(vault, { automationControl: "snoozed", snoozedUntil });
+  assert.equal(learningAutomationStatus(vault).status, "snoozed");
+
+  updateAutomationSettings(vault, { automationControl: "running", snoozedUntil: "" });
+  assert.equal(learningAutomationStatus(vault).status, "watching");
+
+  updateAutomationSettings(vault, { automationControl: "stopped" });
+  const result = await runLearningAutomationForVault(vault, {
+    config: { provider: "openai_compat", providerTimeoutMs: 1000, ingestMaxChars: 4000 },
+    provider: { async complete() { return "unused"; } },
+    force: false
+  });
+  assert.equal(result.status, "stopped");
+});
+
 test("notification queue supports native delivery and read actions", () => {
   const { vault } = makeVault();
   const notice = recordLearningNotification(vault, {
@@ -76,6 +98,40 @@ test("notification queue supports native delivery and read actions", () => {
   assert.equal(readLearningNotifications(vault)[0].readAt, "");
   updateLearningNotificationAction(vault, notice.id, "read");
   assert.equal(readLearningNotifications(vault)[0].status, "read");
+});
+
+test("provider blocked notifications are throttled into one updated alert", () => {
+  const { vault } = makeVault();
+  const first = recordLearningNotification(vault, {
+    type: "provider_blocked",
+    title: "Learning processing paused",
+    body: "Provider did not answer.",
+    detail: "Provider timeout after 12s."
+  });
+  const second = recordLearningNotification(vault, {
+    type: "provider_blocked",
+    title: "Learning processing paused",
+    body: "Provider still did not answer.",
+    detail: "Provider timeout after 30s."
+  });
+  const notifications = readLearningNotifications(vault, { limit: 20 });
+
+  assert.equal(first.id, second.id);
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].repeated, 2);
+  assert.match(notifications[0].detail, /30s/);
+});
+
+test("provider readiness timeout follows selected provider policy", () => {
+  assert.equal(providerReadinessTimeoutMs({
+    provider: "openai_subscription",
+    providerTimeoutMs: 12000,
+    openai: { codexTimeoutMs: 180000 }
+  }), 180000);
+  assert.equal(providerReadinessTimeoutMs({
+    provider: "openai_compat",
+    providerTimeoutMs: 12000
+  }), 12000);
 });
 
 test("notification queue tracks Apple Reminders mirror state separately", () => {

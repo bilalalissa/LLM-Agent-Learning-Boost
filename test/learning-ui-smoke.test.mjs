@@ -245,6 +245,9 @@ test("Chat tab exposes controlled remote research controls", () => {
 test("Learning tab has timeline, bounded tab loading, read-state, and verified export hooks", () => {
   for (const label of [
     "Learning Timeline",
+    "Study Plan",
+    "Short quiz/test",
+    "Spaced review",
     "Next 7 days",
     "Later",
     "Undated",
@@ -260,6 +263,14 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
     assert.match(serverSource, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
   assert.match(serverSource, /renderLearningTimeline/);
+  assert.match(serverSource, /renderLearningDailyStudyPlan/);
+  assert.match(serverSource, /buildFastDailyStudyPlan/);
+  assert.match(serverSource, /learning-daily-plan/);
+  assert.match(serverSource, /learning-daily-sessions/);
+  assert.match(serverSource, /automationControlText/);
+  assert.match(serverSource, /Resume/);
+  assert.match(serverSource, /Snooze 1 hour/);
+  assert.match(serverSource, /Automatic learning stopped/);
   assert.match(serverSource, /groupTimelineItems/);
   assert.match(serverSource, /tabPayloadStatus/);
   assert.match(serverSource, /loading: status === "loading"/);

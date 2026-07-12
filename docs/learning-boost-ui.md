@@ -74,6 +74,12 @@ The dated Learning Timeline sits near the top of the tab so time-sensitive work 
 
 Clicking a timeline item routes to the relevant place: Cards And Bits, Source-To-Plan Map, Revise Plans And Goals, Provider, or the export/review controls. The timeline does not write Calendar events; it is a navigation and awareness surface.
 
+## Today's Study Plan
+
+`Today's Study Plan` turns the current best plan and spaced-repetition state into short study sessions. It uses due cards, due bits, unread items, preferred session length, and plan-linked sources to suggest what to do now, later today, and at wrap-up.
+
+The session cards include `Spaced review`, `Concept practice`, `Short quiz/test`, and `Plan and goal check`. Each card has a local suggested time, duration, explanation, and one direct action. These cards are guidance only; they do not write Calendar or Reminders entries unless you open an export preview and confirm it.
+
 ## Flexible Layout
 
 Learning panels use wrapping grids and natural-height cards. Stepper items and numbered flow lanes use full-width buttons so labels do not collapse into vertical text. Controls, chips, notification rows, plan timelines, source evidence paths, Arabic/English mixed titles, and card backs wrap or clamp inside their containers instead of overlapping or hiding content.
@@ -122,6 +128,13 @@ Files, Archive, and Topics show explicit index states instead of ambiguous empty
 The file-list endpoints return `ready`, `ready_empty`, `stale_refreshing`, `loading`, or `error`. The UI uses fetch timeouts so slow capture scans or background ingest work do not leave a table stuck on `Loading...`.
 
 Scheduled Learning Autopilot runs are intentionally small. The scheduler picks one vault with pending raw files and processes a small batch, then returns control to the app. This prevents a large raw folder or slow provider call from turning the global status into a long-running timeout. Use `Process pending now` when you want to push a larger selected-vault batch immediately.
+
+The Autopilot controls also support explicit runtime state:
+
+- `Resume`: continue background processing and study-plan updates.
+- `Pause`: pause background work without clearing pending files or settings.
+- `Snooze 1 hour`: pause temporarily and resume after the snooze expires.
+- `Stop`: stop automatic learning for that vault until the user resumes it.
 
 ## Capture Scan Status
 

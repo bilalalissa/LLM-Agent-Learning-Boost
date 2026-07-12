@@ -367,9 +367,10 @@ const server = http.createServer(async (request, response) => {
       const payload = JSON.parse(body || "{}");
       const vaultPath = resolveLearningVaultPath(payload.vault);
       const settings = updateAutomationSettings(vaultPath, payload.settings || {});
+      const state = automationRuntimeFromSettings(settings);
       setAutomationRuntime(vaultPath, {
-        status: settings.learningAutopilot ? "watching" : "paused",
-        detail: settings.learningAutopilot ? "Learning Autopilot is watching for safe work." : "Learning Autopilot is paused for this vault."
+        status: state.status,
+        detail: state.detail
       });
       const reminderMirror = await syncNotificationReminderMirrorIfEnabled(vaultPath);
       refreshTabData("learning");
@@ -1941,6 +1942,7 @@ function fastLearningVault(vaultPath) {
   };
   const remoteSettings = safeReadJson(path.join(dir, "remote-research-settings.json"), {});
   const stats = fastLearningStats({ bits, cards, reviews, plans, sourceLinks });
+  stats.dailyStudyPlan = buildFastDailyStudyPlan({ stats, learningProfile });
   return {
     vault,
     userProfile,
@@ -2034,6 +2036,88 @@ function fastLearningStats({ bits, cards, reviews, plans, sourceLinks }) {
     recentCards: visibleCards.slice(0, 10),
     recentBits: allBits.slice(0, 12)
   };
+}
+
+function buildFastDailyStudyPlan({ stats = {}, learningProfile = {} } = {}) {
+  const sessionMinutes = Math.max(5, Math.min(60, Number(learningProfile.preferredSessionMinutes || 25)));
+  const dueCards = stats.dueCards || [];
+  const dueBits = stats.dueBits || [];
+  const queueCards = stats.studyQueueCards || [];
+  const queueBits = stats.studyQueueBits || [];
+  const plan = stats.bestPlan || {};
+  const totalDue = dueCards.length + dueBits.length;
+  const cardsReady = queueCards.length || stats.cards || 0;
+  const bitsReady = queueBits.length || stats.bits || 0;
+  const shortSession = Math.max(5, Math.min(15, Math.round(sessionMinutes / 2)));
+  const fullSession = Math.max(shortSession, sessionMinutes);
+  const sessions = [
+    {
+      id: "review-now",
+      label: "Now",
+      title: "Spaced review",
+      time: fastStudyTime(0),
+      durationMinutes: shortSession,
+      detail: totalDue
+        ? `${Math.min(12, totalDue)} due item(s): ${dueCards.length} card(s), ${dueBits.length} bit(s).`
+        : "No due reviews. Start with the first unread card or bit.",
+      action: "open-practice",
+      target: "learning-cards-bits",
+      priority: totalDue ? "high" : "normal"
+    },
+    {
+      id: "concept-practice",
+      label: "Today",
+      title: "Concept practice",
+      time: fastStudyTime(3),
+      durationMinutes: fullSession,
+      detail: plan?.title
+        ? `Use the best plan queue: ${plan.title}. ${cardsReady} card(s), ${bitsReady} bit(s) ready.`
+        : `${cardsReady} card(s) and ${bitsReady} bit(s) are ready for practice.`,
+      action: "open-practice",
+      target: "learning-cards-bits",
+      priority: cardsReady || bitsReady ? "high" : "normal"
+    },
+    {
+      id: "quiz-check",
+      label: "Later",
+      title: "Short quiz/test",
+      time: fastStudyTime(7),
+      durationMinutes: shortSession,
+      detail: cardsReady
+        ? `Run a short recall check from ${Math.min(8, cardsReady)} plan-prioritized card(s).`
+        : "Process one source first, then Learning Boost can build a quiz set.",
+      action: cardsReady ? "open-practice" : "process-pending",
+      target: cardsReady ? "learning-cards-bits" : "learning-autopilot-settings",
+      priority: cardsReady ? "normal" : "blocked"
+    },
+    {
+      id: "plan-adjust",
+      label: "Wrap-up",
+      title: "Plan and goal check",
+      time: fastStudyTime(10),
+      durationMinutes: 5,
+      detail: plan?.title
+        ? `Check whether ${plan.title} still matches today's cards, bits, and sources.`
+        : "Draft or review a plan after new sources are processed.",
+      action: "draft-plans",
+      target: "learning-plan-guide",
+      priority: plan?.id ? "normal" : "blocked"
+    }
+  ];
+  return {
+    planId: plan?.id || "",
+    planTitle: plan?.title || "",
+    scheduler: learningProfile.scheduler || "spaced",
+    sessionMinutes,
+    dueCount: totalDue,
+    readyCount: cardsReady + bitsReady,
+    sessions
+  };
+}
+
+function fastStudyTime(offsetHours) {
+  const date = new Date(Date.now() + offsetHours * 60 * 60 * 1000);
+  return date.toISOString();
 }
 
 function fastSourceGroups(sourceLinks) {
@@ -2171,8 +2255,26 @@ function defaultFastAutomationSettings() {
     autoSuggestPlanUpdates: true,
     nativeMacNotifications: true,
     mirrorNotificationsToReminders: true,
+    automationControl: "running",
+    snoozedUntil: "",
     requireApprovalForExternalWrites: true
   };
+}
+
+function automationRuntimeFromSettings(settings = {}) {
+  if (settings.learningAutopilot === false || settings.automationControl === "stopped") {
+    return { status: "stopped", detail: "Learning Autopilot is stopped for this vault." };
+  }
+  if (settings.automationControl === "paused") {
+    return { status: "paused", detail: "Learning Autopilot is paused. Use Resume to continue automatic learning." };
+  }
+  if (settings.automationControl === "snoozed") {
+    const until = Date.parse(settings.snoozedUntil || "");
+    if (Number.isFinite(until) && until > Date.now()) {
+      return { status: "snoozed", detail: `Learning Autopilot is snoozed until ${formatLocal(new Date(until))}.` };
+    }
+  }
+  return { status: "watching", detail: "Learning Autopilot is watching for safe work." };
 }
 
 function appProfileIndexFile() {
@@ -2560,13 +2662,26 @@ async function cachedProviderStatus(options = {}) {
     });
     if (!providerStatusCache.data || options.force) await refresh;
   }
-  return {
-    ...(providerStatusCache.data || providerStatusFallback(providerStatusCache.error || "Provider status has not finished loading.")),
+  const data = providerStatusCache.data || providerStatusFallback(providerStatusCache.error || "Provider status has not finished loading.");
+  const payload = {
+    ...data,
     loading: providerStatusCache.loading,
     stale: Boolean(providerStatusCache.updatedAt && stale),
     error: providerStatusCache.error,
     updatedAt: providerStatusCache.updatedAt
   };
+  if (payload.stale && payload.loading && payload.statusColor === "green") {
+    return {
+      ...payload,
+      lastKnownStatus: payload.status,
+      lastKnownStatusColor: payload.statusColor,
+      status: "Refreshing provider readiness",
+      statusColor: "orange",
+      statusDetail: `Last known provider status was ready at ${formatLocal(new Date(payload.updatedAt))}. Refreshing now before treating the provider as available.`,
+      detail: `Last known provider status was ready at ${formatLocal(new Date(payload.updatedAt))}. Refreshing now before treating the provider as available.`
+    };
+  }
+  return payload;
 }
 
 function runProviderStatusWorker(options = {}) {
@@ -4317,7 +4432,7 @@ function renderHtml() {
     .learning-event-feed { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
     .learning-event-feed li { display: grid; grid-template-columns: minmax(120px, .35fr) minmax(0, 1fr); gap: 8px; border-bottom: 1px solid var(--line); padding: 6px 0; }
     .learning-event-feed time { color: var(--muted); font-size: 12px; }
-    .learning-autopilot-hero, .learning-study-surface, .learning-plan-guide, .learning-notification-center {
+    .learning-autopilot-hero, .learning-daily-plan, .learning-study-surface, .learning-plan-guide, .learning-notification-center {
       border: 1px solid var(--line);
       border-radius: 8px;
       background: color-mix(in srgb, var(--panel) 94%, var(--soft));
@@ -4340,6 +4455,20 @@ function renderHtml() {
     .learning-stepper li em { grid-column: 2; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: break-word; }
     .learning-stepper li.active { border-color: var(--accent); background: color-mix(in srgb, var(--mark) 36%, var(--panel)); transform: translateY(-2px); }
     .learning-stepper li.active span { background: var(--accent); color: #fff; }
+    .learning-daily-plan { display: grid; gap: 12px; }
+    .learning-daily-plan-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr)); gap: 8px; }
+    .learning-daily-plan-summary span { display: grid; gap: 2px; border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: var(--panel); min-width: 0; overflow-wrap: break-word; }
+    .learning-daily-plan-summary strong { font-size: 18px; color: var(--text); }
+    .learning-daily-plan-summary small { color: var(--muted); }
+    .learning-daily-sessions { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr)); gap: 10px; padding: 0; margin: 0; list-style: none; }
+    .learning-daily-sessions li { display: grid; gap: 8px; min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel); }
+    .learning-daily-sessions li.high { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); background: color-mix(in srgb, var(--mark) 28%, var(--panel)); }
+    .learning-daily-sessions li.blocked { opacity: .84; }
+    .learning-daily-sessions button.learning-target-button { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 9px; width: 100%; min-width: 0; text-align: start; white-space: normal; word-break: normal; overflow-wrap: break-word; }
+    .learning-daily-sessions button.learning-target-button > span { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 800; }
+    .learning-daily-sessions div { min-width: 0; display: grid; gap: 3px; }
+    .learning-daily-sessions em { color: var(--muted); font-style: normal; }
+    .learning-daily-sessions p { margin: 0; color: var(--muted); overflow-wrap: break-word; }
     .learning-study-surface { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(min(260px, 100%), .8fr); gap: 14px; }
     .learning-study-header { grid-column: 1 / -1; }
     .learning-card-topic-groups { display: grid; gap: 12px; }
@@ -4876,10 +5005,15 @@ function renderHtml() {
             </div>
             <div class="learning-button-row">
               <button class="primary" type="submit">Save Autopilot settings</button>
+              <button id="resume-learning-autopilot" class="secondary" type="button">Resume</button>
+              <button id="pause-learning-autopilot" class="secondary" type="button">Pause</button>
+              <button id="snooze-learning-autopilot" class="secondary" type="button">Snooze 1 hour</button>
+              <button id="stop-learning-autopilot" class="secondary" type="button">Stop</button>
               <button id="process-pending-learning" class="secondary" type="button">Process pending now</button>
               <button id="test-native-notification" class="secondary" type="button">Send test notification</button>
               <button id="sync-reminder-notifications" class="secondary" type="button">Sync alerts to Reminders</button>
             </div>
+            <p id="learning-autopilot-control-state" class="muted">Automatic learning is ready.</p>
           </form>
         </details>
 
@@ -5326,6 +5460,11 @@ function renderHtml() {
     const behaviorSettingsForm = document.querySelector("#behavior-settings-form");
     const learningAutomationForm = document.querySelector("#learning-automation-form");
     const learningAutopilotToggle = document.querySelector("#learning-autopilot-toggle");
+    const learningAutopilotControlState = document.querySelector("#learning-autopilot-control-state");
+    const resumeLearningAutopilot = document.querySelector("#resume-learning-autopilot");
+    const pauseLearningAutopilot = document.querySelector("#pause-learning-autopilot");
+    const snoozeLearningAutopilot = document.querySelector("#snooze-learning-autopilot");
+    const stopLearningAutopilot = document.querySelector("#stop-learning-autopilot");
     const autoProcessNewSourcesToggle = document.querySelector("#auto-process-new-sources-toggle");
     const autoDraftPlansToggle = document.querySelector("#auto-draft-plans-toggle");
     const autoSuggestPlanUpdatesToggle = document.querySelector("#auto-suggest-plan-updates-toggle");
@@ -5696,6 +5835,10 @@ function renderHtml() {
     refreshLearning.addEventListener("click", loadLearning);
     learningNotificationControl.addEventListener("click", requestBehaviorNotifications);
     learningAutomationForm.addEventListener("submit", saveLearningAutomationSettings);
+    resumeLearningAutopilot.addEventListener("click", () => setLearningAutopilotControl("running"));
+    pauseLearningAutopilot.addEventListener("click", () => setLearningAutopilotControl("paused"));
+    snoozeLearningAutopilot.addEventListener("click", () => setLearningAutopilotControl("snoozed"));
+    stopLearningAutopilot.addEventListener("click", () => setLearningAutopilotControl("stopped"));
     processPendingLearning.addEventListener("click", processPendingLearningNow);
     testNativeNotification.addEventListener("click", sendNativeNotificationTest);
     syncReminderNotifications.addEventListener("click", syncNotificationsToReminders);
@@ -7338,6 +7481,7 @@ function renderHtml() {
       const notifications = state.notifications || [];
       learningVault.value = state.vault;
       learningAutopilotToggle.checked = automationSettings.learningAutopilot !== false;
+      learningAutopilotControlState.textContent = automationControlText(automationSettings, automation);
       autoProcessNewSourcesToggle.checked = automationSettings.autoProcessNewSources !== false;
       autoDraftPlansToggle.checked = automationSettings.autoDraftPlans !== false;
       autoSuggestPlanUpdatesToggle.checked = automationSettings.autoSuggestPlanUpdates !== false;
@@ -7421,6 +7565,7 @@ function renderHtml() {
       learningStatusBox.innerHTML = '<h2>Learning Boost</h2>' +
         renderLearningAutopilotWorkspace(state, { automation, resourceGroups, sourceLinks, sourceGroups, plans, goals, updateSuggestions, coach, stats, notifications }) +
         renderLearningTimeline(state, { plans, goals, sourceLinks, stats, updateSuggestions }) +
+        renderLearningDailyStudyPlan(state, { stats }) +
         renderLearningStepByStepFlow(state, { automation, resourceGroups, sourceLinks, sourceGroups, plans, goals, updateSuggestions, stats }) +
         renderLearningSourceMap(state, { sourceLinks, sourceGroups, plans, goals, coach, stats }) +
         renderLearningStudyTools(state, { stats, sourceLinks }) +
@@ -7646,6 +7791,26 @@ function renderHtml() {
       } catch {
         return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-");
       }
+    }
+
+    function renderLearningDailyStudyPlan(state, context) {
+      const plan = context.stats.dailyStudyPlan || {};
+      const sessions = plan.sessions || [];
+      return '<section id="learning-daily-study-plan" class="learning-daily-plan learning-scroll-target">' +
+        '<div class="learning-study-header"><h3>Today\\'s Study Plan</h3><p>Automatic, spaced-repetition guidance from the current best learning plan, due cards, unread bits, and your preferred session length.</p></div>' +
+        '<div class="learning-daily-plan-summary">' +
+          '<span><strong>' + escapeHtml(plan.scheduler || "spaced") + '</strong><small>schedule</small></span>' +
+          '<span><strong>' + escapeHtml(String(plan.sessionMinutes || 25)) + ' min</strong><small>target session</small></span>' +
+          '<span><strong>' + escapeHtml(String(plan.dueCount || 0)) + '</strong><small>due now</small></span>' +
+          '<span><strong>' + escapeHtml(String(plan.readyCount || 0)) + '</strong><small>ready items</small></span>' +
+        '</div>' +
+        (plan.planTitle ? '<button class="learning-chip plan" type="button" data-learning-target="plan" data-plan-id="' + escapeHtml(plan.planId || "") + '">Best plan: ' + escapeHtml(plan.planTitle) + '</button>' : '<span class="learning-chip plan">Best plan: waiting for enough processed sources</span>') +
+        '<ol class="learning-daily-sessions">' + (sessions.length ? sessions.map((session, index) =>
+          '<li class="' + escapeHtml(session.priority || "normal") + '"><button class="learning-target-button" type="button" data-learning-target="learning-section" data-section="' + escapeHtml(session.target || "learning-cards-bits") + '"><span>' + escapeHtml(String(index + 1)) + '</span><div><strong>' + escapeHtml(session.label || "Study") + ' · ' + escapeHtml(session.title || "Learning session") + '</strong><em>' + escapeHtml(shortEventTime(session.time) || "") + ' · ' + escapeHtml(String(session.durationMinutes || 10)) + ' min</em><p>' + escapeHtml(session.detail || "") + '</p></div></button>' +
+          (session.action ? '<button class="secondary" type="button" data-learning-action="' + escapeHtml(session.action) + '">' + escapeHtml(session.action === "open-practice" ? "Start practice" : session.action === "process-pending" ? "Process source" : "Open task") + '</button>' : '') +
+          '</li>'
+        ).join("") : '<li><span>1</span><div><strong>No study items yet</strong><p>Process one source to create cards and bits.</p></div></li>') + '</ol>' +
+      '</section>';
     }
 
     function renderLearningStepByStepFlow(state, context) {
@@ -8352,10 +8517,16 @@ function renderHtml() {
       if (!vault) return;
       learningFeedback.textContent = "Saving Autopilot settings...";
       try {
+        const currentAutomationControl = selectedLearningVault()?.automation?.settings?.automationControl || "running";
+        const nextAutomationControl = learningAutopilotToggle.checked
+          ? (currentAutomationControl === "stopped" ? "running" : currentAutomationControl)
+          : "stopped";
         const data = await postLearningAction("/api/learning/automation-settings", {
           vault,
           settings: {
             learningAutopilot: learningAutopilotToggle.checked,
+            automationControl: nextAutomationControl,
+            snoozedUntil: selectedLearningVault()?.automation?.settings?.snoozedUntil || "",
             autoProcessNewSources: autoProcessNewSourcesToggle.checked,
             autoDraftPlans: autoDraftPlansToggle.checked,
             autoSuggestPlanUpdates: autoSuggestPlanUpdatesToggle.checked,
@@ -8371,6 +8542,52 @@ function renderHtml() {
       } catch (error) {
         learningFeedback.textContent = error.message;
       }
+    }
+
+    async function setLearningAutopilotControl(control) {
+      const vault = selectedLearningVault()?.vault || learningVault.value;
+      if (!vault) return;
+      const snoozedUntil = control === "snoozed" ? new Date(Date.now() + 60 * 60 * 1000).toISOString() : "";
+      const learningAutopilot = control !== "stopped";
+      learningFeedback.textContent = control === "running" ? "Resuming automatic learning..." : "Updating automatic learning control...";
+      try {
+        const data = await postLearningAction("/api/learning/automation-settings", {
+          vault,
+          settings: {
+            learningAutopilot,
+            automationControl: control,
+            snoozedUntil,
+            autoProcessNewSources: autoProcessNewSourcesToggle.checked,
+            autoDraftPlans: autoDraftPlansToggle.checked,
+            autoSuggestPlanUpdates: autoSuggestPlanUpdatesToggle.checked,
+            nativeMacNotifications: nativeMacNotificationsToggle.checked,
+            mirrorNotificationsToReminders: remindersNotificationMirrorToggle.checked,
+            requireApprovalForPlanActivation: true
+          }
+        });
+        patchLearningCacheVault(vault, { automation: data.automation || { settings: data.settings } });
+        learningAutopilotToggle.checked = learningAutopilot;
+        learningFeedback.textContent = automationControlFeedback(control, snoozedUntil);
+        await loadLearning({ preserveDirty: true, excludeForms: [learningAutomationForm] });
+      } catch (error) {
+        learningFeedback.textContent = error.message;
+      }
+    }
+
+    function automationControlFeedback(control, snoozedUntil) {
+      if (control === "running") return "Automatic learning resumed";
+      if (control === "paused") return "Automatic learning paused";
+      if (control === "stopped") return "Automatic learning stopped";
+      if (control === "snoozed") return "Automatic learning snoozed until " + new Date(snoozedUntil).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      return "Automatic learning updated";
+    }
+
+    function automationControlText(settings, automation) {
+      const control = settings?.learningAutopilot === false ? "stopped" : (settings?.automationControl || "running");
+      if (control === "snoozed" && settings?.snoozedUntil) return "Automatic learning snoozed until " + new Date(settings.snoozedUntil).toLocaleString();
+      if (control === "paused") return "Automatic learning paused. Resume when you want background learning to continue.";
+      if (control === "stopped") return "Automatic learning stopped for this vault.";
+      return automation?.detail || "Automatic learning is running for safe local work.";
     }
 
     async function processPendingLearningNow() {

@@ -79,6 +79,20 @@ The Learning tab shows three step-by-step lanes:
 
 Each lane shows current counts from the selected vault and includes one action button when the app already has a safe local action for that step.
 
+## Today's Study Plan
+
+The Learning tab also shows `Today's Study Plan`. This is an automatic daily study queue built from:
+
+- the current best learning plan
+- due cards and due bits from spaced repetition
+- unread cards and bits
+- your preferred session length
+- available processed sources and plan-review work
+
+The plan is split into short sessions such as `Spaced review`, `Concept practice`, `Short quiz/test`, and `Plan and goal check`. Each session has a suggested local time, a duration, a reason, and a direct action such as `Start practice` or `Process source`.
+
+The schedule is guidance, not an external calendar write. It does not create Calendar events unless you use an export flow and confirm the preview.
+
 ## Dated Learning Timeline
 
 The Learning Timeline is the first dated planning surface in the Learning tab. It groups learning work into:
@@ -191,6 +205,10 @@ Plans begin as `proposed`. Approval and activation require explicit confirmation
 ### Learning Autopilot
 
 - `Learning Autopilot`: turns the vault background learning worker on or off.
+- `Resume`: continues automatic source processing, study-plan updates, plan drafts, and notification handling.
+- `Pause`: keeps settings and queues in place but stops background learning until you resume.
+- `Snooze 1 hour`: temporarily pauses background learning and resumes after the snooze time.
+- `Stop`: stops automatic learning for that vault. You can later turn it back on with `Resume` or by saving Autopilot settings with the main toggle enabled.
 - `Auto-process new sources`: processes new `raw/`, `raw/input/`, `raw/inbox/`, and staged ResourceInbox items when the provider is ready.
 - `Auto-draft plans/goals`: drafts proposed plans after enough learning context exists.
 - `Auto-suggest plan updates`: records suggested edits when new evidence affects a plan.
@@ -246,6 +264,8 @@ The app only marks a notification as delivered after macOS accepts it. If macOS 
 Apple ecosystem delivery to other devices depends on your macOS, iCloud, Focus, and notification settings. Learning Boost can request and send macOS notifications, but it cannot force another device to mirror them.
 
 For alerts you also want on iPhone, iPad, or another Mac, enable `Sync alerts to Apple devices via Reminders` in Learning Autopilot. When enabled, Learning Boost creates privacy-safe reminder items in an Apple Reminders list named `Learning Boost`. Apple Reminders can sync those items through iCloud to your other Apple devices if your Apple ID, Reminders sync, Focus, and notification settings allow it.
+
+This is the current iPhone/iPad notification bridge. It does not require a Mac simulator. It uses the Apple Reminders app already present on macOS/iOS/iPadOS. For it to reach other devices, the same Apple ID must have Reminders iCloud sync enabled and Focus/notification settings must allow Reminders alerts.
 
 The Notification Center shows Reminders mirror state separately from macOS delivery:
 

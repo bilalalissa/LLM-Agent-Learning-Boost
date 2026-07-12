@@ -26,6 +26,8 @@ export function defaultAutomationSettings() {
     requireApprovalForPlanActivation: true,
     nativeMacNotifications: true,
     mirrorNotificationsToReminders: true,
+    automationControl: "running",
+    snoozedUntil: "",
     updated: new Date().toISOString()
   };
 }
@@ -61,8 +63,8 @@ export function learningAutomationStatus(vaultPath, runtime = {}) {
     vault: vaultName(vaultPath),
     running: runtime.running === true,
     blocked: runtime.status === "blocked",
-    status: runtime.status || (settings.learningAutopilot ? "watching" : "paused"),
-    detail: runtime.detail || (settings.learningAutopilot ? "Learning Autopilot is watching for safe work." : "Learning Autopilot is paused for this vault."),
+    status: runtime.status || automationStatusFromSettings(settings),
+    detail: runtime.detail || automationDetailFromSettings(settings),
     lastRunAt: runtime.lastRunAt || "",
     lastSuccessAt: runtime.lastSuccessAt || "",
     lastBlockedAt: runtime.lastBlockedAt || "",
@@ -81,7 +83,11 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
   const settings = readAutomationSettings(vaultPath);
   const force = options.force === true;
   if (!force && settings.learningAutopilot === false) {
-    return { skipped: true, status: "paused", detail: "Learning Autopilot is paused for this vault.", settings };
+    return { skipped: true, status: "stopped", detail: "Learning Autopilot is stopped for this vault.", settings };
+  }
+  const control = automationControlState(settings);
+  if (!force && control.paused) {
+    return { skipped: true, status: control.status, detail: control.detail, settings };
   }
 
   const sourceSettings = readSourceCaptureSettings(vaultPath);
@@ -112,7 +118,7 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
       type: "provider_blocked",
       severity: "warning",
       title: "Learning processing paused",
-      body: "The selected AI provider is not answering, so pending files were left in place.",
+      body: `The selected AI provider did not answer the Learning Autopilot probe. Pending files were left in place. ${readiness.detail}`,
       detail,
       privacy: "safe",
       actions: ["Open Provider", "Refresh health", "Try again"]
@@ -223,6 +229,23 @@ export function recordLearningNotification(vaultPath, input = {}) {
     updated: now
   });
   const existing = readJsonl(learningNotificationsPath(vaultPath));
+  const duplicateIndex = recentDuplicateNotificationIndex(existing, notification);
+  if (duplicateIndex >= 0) {
+    const next = existing.map((item, index) => index === duplicateIndex
+      ? normalizeLearningNotification({
+        ...item,
+        body: notification.body || item.body,
+        detail: notification.detail || item.detail,
+        actions: notification.actions.length ? notification.actions : item.actions,
+        severity: notification.severity || item.severity,
+        status: item.status === "dismissed" ? "unread" : item.status,
+        updated: now,
+        repeated: Number(item.repeated || 1) + 1
+      })
+      : item);
+    writeJsonl(learningNotificationsPath(vaultPath), next);
+    return normalizeLearningNotification(next[duplicateIndex]);
+  }
   if (!existing.some((item) => item.id === notification.id)) {
     appendJsonl(learningNotificationsPath(vaultPath), notification);
   }
@@ -303,8 +326,45 @@ function normalizeAutomationSettings(input = {}) {
     mirrorNotificationsToReminders: existingSchema < 2 || !hasReminderMirror
       ? true
       : input.mirrorNotificationsToReminders === true,
+    automationControl: normalizeAutomationControl(input.automationControl, input.learningAutopilot !== false),
+    snoozedUntil: validFutureIso(input.snoozedUntil) || "",
     updated: input.updated || new Date().toISOString()
   };
+}
+
+function normalizeAutomationControl(value, enabled) {
+  if (!enabled) return "stopped";
+  return ["running", "paused", "snoozed", "stopped"].includes(value) ? value : "running";
+}
+
+function automationControlState(settings = {}) {
+  if (settings.learningAutopilot === false || settings.automationControl === "stopped") {
+    return { paused: true, status: "stopped", detail: "Learning Autopilot is stopped for this vault." };
+  }
+  if (settings.automationControl === "paused") {
+    return { paused: true, status: "paused", detail: "Learning Autopilot is paused. Use Resume when you want automatic learning to continue." };
+  }
+  if (settings.automationControl === "snoozed") {
+    const until = Date.parse(settings.snoozedUntil || "");
+    if (Number.isFinite(until) && until > Date.now()) {
+      return { paused: true, status: "snoozed", detail: `Learning Autopilot is snoozed until ${new Date(until).toLocaleString()}.` };
+    }
+  }
+  return { paused: false, status: "watching", detail: "Learning Autopilot is watching for safe work." };
+}
+
+function automationStatusFromSettings(settings = {}) {
+  return automationControlState(settings).status;
+}
+
+function automationDetailFromSettings(settings = {}) {
+  return automationControlState(settings).detail;
+}
+
+function validFutureIso(value) {
+  const text = String(value || "");
+  const time = Date.parse(text);
+  return Number.isFinite(time) && time > Date.now() ? new Date(time).toISOString() : "";
 }
 
 function normalizeLearningNotification(input = {}) {
@@ -332,6 +392,7 @@ function normalizeLearningNotification(input = {}) {
     updated: input.updated || now,
     nativeDeliveryStatus,
     deliveryAttempts: Math.max(0, Number(input.deliveryAttempts || 0)),
+    repeated: Math.max(1, Number(input.repeated || 1)),
     lastDeliveryAttemptAt: input.lastDeliveryAttemptAt || "",
     nativeError: String(input.nativeError || ""),
     deliveredAt: input.deliveredAt || "",
@@ -363,7 +424,7 @@ function reminderMirrorPending(item = {}) {
 
 async function providerReadiness(provider, config = {}) {
   if (!provider?.complete) return { ready: false, detail: "Provider adapter is not available." };
-  const timeoutMs = Math.max(4000, Math.min(Number(config.providerTimeoutMs || 12000), 12000));
+  const timeoutMs = providerReadinessTimeoutMs(config);
   try {
     const text = await withTimeout(provider.complete([
       { role: "system", content: "You are a readiness probe for Learning Boost. Reply with READY only." },
@@ -374,6 +435,31 @@ async function providerReadiness(provider, config = {}) {
   } catch (error) {
     return { ready: false, detail: compactError(error) };
   }
+}
+
+export function providerReadinessTimeoutMs(config = {}) {
+  const provider = String(config.provider || "");
+  if (["openai_subscription", "openai_oauth", "chatgpt"].includes(provider)) {
+    return Math.max(30000, Math.min(Number(config.openai?.codexTimeoutMs || config.providerTimeoutMs || 180000), 180000));
+  }
+  if (provider === "mlx_lm_cli") {
+    return Math.max(15000, Math.min(Number(config.mlxLmCli?.timeoutMs || config.providerTimeoutMs || 60000), 120000));
+  }
+  return Math.max(8000, Math.min(Number(config.providerTimeoutMs || 60000), 60000));
+}
+
+function recentDuplicateNotificationIndex(existing = [], notification = {}) {
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  for (let index = existing.length - 1; index >= 0; index -= 1) {
+    const item = normalizeLearningNotification(existing[index]);
+    if (item.status === "dismissed") continue;
+    if (item.type !== notification.type) continue;
+    if (item.title !== notification.title) continue;
+    if (item.sourcePage !== notification.sourcePage) continue;
+    const created = Date.parse(item.created || item.updated || "");
+    if (Number.isFinite(created) && created >= cutoff) return index;
+  }
+  return -1;
 }
 
 function shouldDraftPlans(vaultPath, results = []) {
