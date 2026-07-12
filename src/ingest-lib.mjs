@@ -263,7 +263,8 @@ async function reprocessPendingMediaPages(vaultPath, provider, options = {}) {
 
   for (const sourcePagePath of pendingMediaPagePaths(vaultPath, {
     limit,
-    maxScanned: options.maxScanned
+    maxScanned: options.maxScanned,
+    providerReadyOnly: options.providerReadyOnly
   })) {
     await yieldToEventLoop();
     const text = fs.readFileSync(sourcePagePath, "utf8");
@@ -329,6 +330,7 @@ function pendingMediaPagePaths(vaultPath, options = {}) {
   const sourceDir = path.join(vaultPath, "wiki", "sources");
   const limit = Math.max(0, Number(options.limit || 0));
   const maxScanned = Math.max(0, Number(options.maxScanned || 0));
+  const providerReadyOnly = options.providerReadyOnly !== false;
   const result = [];
   const files = [];
   if (!fs.existsSync(sourceDir)) return result;
@@ -341,12 +343,22 @@ function pendingMediaPagePaths(vaultPath, options = {}) {
     const text = fs.readFileSync(sourcePagePath, "utf8");
     if (!/^media_kind:\s*.+$/m.test(text)) continue;
     if (/^media_analysis_status:\s*analyzed\s*$/m.test(text)) continue;
+    if (providerReadyOnly && !mediaPageReadyForProviderRetry(text)) continue;
     const assetRel = text.match(/^source_path:\s*(.+)$/m)?.[1]?.trim().replace(/^["']|["']$/g, "");
     if (!assetRel || !fs.existsSync(path.join(vaultPath, assetRel))) continue;
     result.push(sourcePagePath);
     if (limit > 0 && result.length >= limit) break;
   }
   return result;
+}
+
+function mediaPageReadyForProviderRetry(text) {
+  const mediaStatus = text.match(/^media_analysis_status:\s*(.+)$/m)?.[1]?.trim().toLowerCase() || "";
+  if (mediaStatus === "pending_provider_analysis") return true;
+  if (mediaStatus === "pending_content") return false;
+  if (/Provider call attempted:\s*yes/i.test(text) && /Extracted text\/transcript\/OCR sent:\s*yes/i.test(text)) return true;
+  if (/^##\s+(Extracted Text|Transcript|OCR Text)\b/im.test(text) && !/no readable transcript|no readable OCR|content extraction is pending/i.test(text)) return true;
+  return false;
 }
 
 function yieldToEventLoop() {

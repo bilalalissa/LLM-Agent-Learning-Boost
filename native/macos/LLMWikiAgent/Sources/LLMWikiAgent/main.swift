@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var childWindows: [NSWindow] = []
     private var notificationPollTimer: Timer?
     private var navigationRetryCounts: [ObjectIdentifier: Int] = [:]
+    private var serverHealthFailures = 0
     private weak var snapBoxView: NSView?
     private weak var snapTextView: WKWebView?
     private let closeBehaviorKey = "closeButtonKeepsRunning"
@@ -35,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
     private var defaultConfigURL: URL { appSupport.appendingPathComponent("config.env") }
     private var configPointerURL: URL { appSupport.appendingPathComponent("config-path.txt") }
+    private var serverLogURL: URL { appSupport.appendingPathComponent("server.log") }
     private var configURL: URL { selectedConfigURL() }
     private var agentURL: URL { Bundle.main.resourceURL!.appendingPathComponent("agent", isDirectory: true) }
 
@@ -795,6 +797,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         env["TZ"] = env["TZ"] ?? "America/Regina"
         env["PATH"] = expandedPath()
         process.environment = env
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            self?.appendServerLog(handle.availableData)
+        }
+        errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            self?.appendServerLog(handle.availableData)
+        }
         process.terminationHandler = { [weak self, weak process] terminatedProcess in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -813,9 +825,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         do {
             try process.run()
             serverRestartAttempts = 0
+            serverHealthFailures = 0
+            scheduleServerHealthWatchdog(after: 45)
         } catch {
             showAlert("Node.js required", "Install Node.js, then restart LLM Agent Learning Boost.\n\nThe app checks /opt/homebrew/bin/node, /usr/local/bin/node, and PATH.\n\nError: \(error.localizedDescription)")
         }
+    }
+
+    private func appendServerLog(_ data: Data) {
+        guard !data.isEmpty else { return }
+        do {
+            try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: serverLogURL.path) {
+                FileManager.default.createFile(atPath: serverLogURL.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: serverLogURL)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.close()
+        } catch {
+            // Server logging must not affect the app.
+        }
+    }
+
+    private func scheduleServerHealthWatchdog(after delay: TimeInterval = 60) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.checkServerHealthAndRestartIfNeeded()
+        }
+    }
+
+    private func checkServerHealthAndRestartIfNeeded() {
+        guard !isTerminating, serverProcess?.isRunning == true,
+              let statusURL = URL(string: "http://127.0.0.1:\(port)/api/status") else { return }
+        var request = URLRequest(url: statusURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+        request.timeoutInterval = 5
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            let ok = (response as? HTTPURLResponse)?.statusCode == 200 && !(data?.isEmpty ?? true)
+            DispatchQueue.main.async {
+                guard !self.isTerminating else { return }
+                if ok {
+                    self.serverHealthFailures = 0
+                    self.scheduleServerHealthWatchdog(after: 60)
+                    return
+                }
+                self.serverHealthFailures += 1
+                self.appendServerLog(Data("[native] server health check failed \(self.serverHealthFailures) time(s)\n".utf8))
+                if self.serverHealthFailures >= 2 {
+                    self.serverHealthFailures = 0
+                    self.terminateServerProcess()
+                    self.startServer()
+                    self.loadAppWhenReady()
+                } else {
+                    self.scheduleServerHealthWatchdog(after: 20)
+                }
+            }
+        }.resume()
     }
 
     private func restartServerAndReload() {

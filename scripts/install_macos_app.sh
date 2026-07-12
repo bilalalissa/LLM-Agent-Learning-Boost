@@ -39,6 +39,11 @@ fi
 codesign --force --deep --sign "$SIGN_IDENTITY" "$TARGET"
 touch "$TARGET"
 
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -x "$LSREGISTER" ]]; then
+  "$LSREGISTER" -f "$TARGET" >/dev/null 2>&1 || true
+fi
+
 if [[ "$APPLICATIONS_ALIAS" != "$TARGET" ]]; then
   if [[ -L "$APPLICATIONS_ALIAS" ]]; then
     rm -f "$APPLICATIONS_ALIAS"
@@ -46,6 +51,10 @@ if [[ "$APPLICATIONS_ALIAS" != "$TARGET" ]]; then
     rm -rf "$APPLICATIONS_ALIAS"
   fi
   ln -s "$TARGET" "$APPLICATIONS_ALIAS" 2>/dev/null || true
+fi
+
+if [[ -x "$LSREGISTER" && -e "$APPLICATIONS_ALIAS" ]]; then
+  "$LSREGISTER" -f "$APPLICATIONS_ALIAS" >/dev/null 2>&1 || true
 fi
 
 echo "Installed: $TARGET"

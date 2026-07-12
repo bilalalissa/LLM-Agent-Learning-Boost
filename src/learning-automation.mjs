@@ -6,6 +6,7 @@ import { draftLearningPlans, readLearningPlans } from "./learning-planner.mjs";
 import { learningPaths } from "./learning-store.mjs";
 import { queueResourceInboxForIngestAsync } from "./source-capture-ingest.mjs";
 import { suggestPlanUpdates } from "./plan-update-suggester.mjs";
+import { formatLocalDateTime } from "./time.mjs";
 import {
   markResourceIngestResults,
   readSourceCaptureSettings,
@@ -57,7 +58,7 @@ export function learningAutomationStatus(vaultPath, runtime = {}) {
   const sourceSettings = readSourceCaptureSettings(vaultPath);
   const rawCandidates = listRawCandidates(vaultPath);
   const pendingMediaCount = shouldScanPendingMediaPages({ reprocessPendingMedia: false })
-    ? countPendingMediaPages(vaultPath, { limit: 12, maxScanned: 120 })
+    ? countPendingMediaPages(vaultPath, { limit: 12, maxScanned: 1000, providerReadyOnly: true })
     : 0;
   const notifications = readLearningNotifications(vaultPath, { limit: 40 });
   const pendingResources = resources.filter((item) => !["ingested", "deferred", "deleted"].includes(item.processingStatus));
@@ -119,7 +120,8 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
   const pendingMediaBefore = reprocessPendingMedia
     ? countPendingMediaPages(vaultPath, {
         limit: options.pendingMediaLimit || 3,
-        maxScanned: options.pendingMediaScanLimit || 120
+        maxScanned: options.pendingMediaScanLimit || 1000,
+        providerReadyOnly: true
       })
     : 0;
 
@@ -127,11 +129,11 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
     const skippedStagingCount = staged.skipped?.length || 0;
     return {
       skipped: false,
-      status: skippedStagingCount ? "blocked" : "idle",
+      status: skippedStagingCount ? "capture_attention" : "idle",
       detail: staged.staged.length
         ? `Staged ${staged.staged.length} captured resource(s); waiting for next scan.`
         : skippedStagingCount
-          ? `${skippedStagingCount} captured resource(s) could not be queued. Check Source Capture status for permission, cloud-only, or unsupported-file details.`
+          ? `${skippedStagingCount} captured resource(s) need Source Capture attention before they can be processed. No provider call was attempted.`
           : "No pending learning sources.",
       staged: staged.staged,
       skippedResources: staged.skipped || [],
@@ -176,7 +178,8 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
     limit: options.resourceLimit || options.limit || 12,
     reprocessPendingMedia,
     pendingMediaLimit: options.pendingMediaLimit || 2,
-    pendingMediaScanLimit: options.pendingMediaScanLimit || 120
+    pendingMediaScanLimit: options.pendingMediaScanLimit || 1000,
+    providerReadyOnly: true
   });
   const marked = markResourceIngestResults(vaultPath, results);
   const completedResults = results.filter((result) =>
@@ -419,7 +422,7 @@ function automationControlState(settings = {}) {
   if (settings.automationControl === "snoozed") {
     const until = Date.parse(settings.snoozedUntil || "");
     if (Number.isFinite(until) && until > Date.now()) {
-      return { paused: true, status: "snoozed", detail: `Learning Autopilot is snoozed until ${new Date(until).toLocaleString()}.` };
+      return { paused: true, status: "snoozed", detail: `Learning Autopilot is snoozed until ${formatLocalDateTime(until)}.` };
     }
   }
   return { paused: false, status: "watching", detail: "Learning Autopilot is watching for safe work." };

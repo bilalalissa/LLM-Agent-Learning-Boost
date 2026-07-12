@@ -64,6 +64,7 @@ import {
   markResourceIngestResults,
   purgeExpiredResources,
   readSourceCaptureSettings,
+  resourceInbox,
   updateSourceCaptureSettings
 } from "./source-capture.mjs";
 import { collectScreenshots } from "./source-collectors/screenshots-collector.mjs";
@@ -1782,6 +1783,17 @@ function cachedTabPayload(kind) {
 
 function recoverStuckTabLoading(kind, state) {
   if (!state.loading || !state.lastStartedAt) return;
+  const worker = tabDataWorkers.get(kind);
+  if (!worker) {
+    state.loading = false;
+    state.lastFinishedAt = new Date().toISOString();
+    if (!state.ready && !state.items.length) {
+      state.ready = true;
+      state.error = state.error || "Tab data refresh was interrupted. Use Refresh to scan this tab again.";
+      state.updatedAt = state.updatedAt || new Date().toISOString();
+    }
+    return;
+  }
   const started = Date.parse(state.lastStartedAt);
   if (!Number.isFinite(started) || Date.now() - started < 15000) return;
   state.loading = false;
@@ -1789,7 +1801,6 @@ function recoverStuckTabLoading(kind, state) {
     state.error = "Tab data scan did not finish. Cached rows will stay visible when available; this usually means iCloud or a vault scan is still busy.";
   }
   state.lastFinishedAt = new Date().toISOString();
-  const worker = tabDataWorkers.get(kind);
   if (worker) {
     worker.kill?.("SIGTERM");
     tabDataWorkers.delete(kind);
@@ -2949,7 +2960,6 @@ function tabPayloadStatus(state, stale) {
   if (state.error && state.items.length) return stale || state.loading ? "stale_refreshing" : "ready";
   if (state.error) return "error";
   if (state.items.length && state.loading) return "stale_refreshing";
-  if (state.items.length && stale) return "stale_refreshing";
   if (state.items.length) return "ready";
   if (state.loading && state.ready && !state.items.length) return "ready_empty";
   if (state.loading || !state.ready) return "loading";
@@ -3326,6 +3336,14 @@ function runProviderStatusWorker(options = {}) {
 
 function healStaleProviderStatusWorker() {
   if (!providerStatusCache.loading) return;
+  if (!providerStatusWorker) {
+    providerStatusCache.loading = false;
+    providerStatusCache.startedAt = "";
+    providerStatusCache.error = providerStatusCache.error || "Provider status refresh was interrupted. Use Refresh health to run a new readiness check.";
+    if (!providerStatusCache.data) providerStatusCache.data = providerStatusFallback(providerStatusCache.error);
+    providerStatusCache.updatedAt = providerStatusCache.updatedAt || new Date().toISOString();
+    return;
+  }
   const started = Date.parse(providerStatusCache.startedAt || "");
   const maxAge = Math.max(5000, providerStatusWorkerTimeoutMs(config) + 3000);
   if (Number.isFinite(started) && Date.now() - started <= maxAge) return;
@@ -3920,9 +3938,11 @@ async function runAutoIngest() {
         console.log(`[auto-ingest] ${result.vault}: ${result.source} -> ${result.sourcePage}`);
       }
     }
+    const attention = completedVaults.find((item) => item.automationResult?.status === "capture_attention")?.automationResult;
+    const idleDetail = attention?.detail || `${vaultName(pendingVault.vaultPath)} has no ready files after staging at ${formatLocal(new Date())}.`;
     lastIngestMessage = count
       ? reportStatus(`Operation progress: 100%. Processed ${count} file${count === 1 ? "" : "s"} from ${vaultName(pendingVault.vaultPath)} at ${formatLocal(new Date())}.`)
-      : reportStatus(`Operation progress: 100%. ${vaultName(pendingVault.vaultPath)} has no ready files after staging at ${formatLocal(new Date())}.`);
+      : reportStatus(`Operation progress: 100%. ${idleDetail}`);
     autoIngestBackoffUntil = 0;
     ingestProgress = progressState({
       completed: count,
@@ -3986,8 +4006,21 @@ function nextAutoIngestVault() {
     const vaultPath = vaults[cursor];
     const runtime = automationRuntimeFor(vaultPath);
     if (runtime.status === "stopped") continue;
+    const settings = readAutomationSettings(vaultPath);
+    const control = automationRuntimeFromSettings(settings);
+    if (["paused", "snoozed", "stopped"].includes(control.status)) continue;
+    const pendingRawCount = safeRawCandidateCount(vaultPath);
+    const pendingResourceCount = safeQueueableResourceCount(vaultPath);
+    const pendingMediaCount = safePendingProviderMediaCount(vaultPath);
+    if (!pendingRawCount && !pendingResourceCount && !pendingMediaCount) continue;
     autoIngestVaultCursor = (cursor + 1) % vaults.length;
-    return { vaultPath, pendingRawCount: 1, pendingRawCountKnown: false };
+    return {
+      vaultPath,
+      pendingRawCount: pendingRawCount + pendingResourceCount + pendingMediaCount,
+      pendingRawCountKnown: true,
+      pendingResourceCount,
+      pendingMediaCount
+    };
   }
   return null;
 }
@@ -3997,6 +4030,32 @@ function safeRawCandidateCount(vaultPath) {
     return listRawCandidates(vaultPath).length;
   } catch (error) {
     console.warn(`[auto-ingest] could not scan ${vaultName(vaultPath)} raw candidates: ${error.message}`);
+    return 0;
+  }
+}
+
+function safeQueueableResourceCount(vaultPath) {
+  try {
+    return resourceInbox(vaultPath).filter((item) => {
+      if (["ingested", "deferred", "deleted"].includes(item.processingStatus)) return false;
+      if (item.sourceType === "browser_clip") return false;
+      if (item.processingStatus === "ready_for_ingest" || item.processingStatus === "queued_for_ingest") return true;
+      if (item.processingStatus !== "captured") return false;
+      const permissions = item.permissions || {};
+      if (item.file) return permissions.contentApproved === true;
+      return permissions.userApproved === true && Boolean(item.url || item.description || item.title);
+    }).length;
+  } catch (error) {
+    console.warn(`[auto-ingest] could not scan ${vaultName(vaultPath)} ResourceInbox: ${error.message}`);
+    return 0;
+  }
+}
+
+function safePendingProviderMediaCount(vaultPath) {
+  try {
+    return countPendingMediaPages(vaultPath, { limit: 3, maxScanned: 1000, providerReadyOnly: true });
+  } catch (error) {
+    console.warn(`[auto-ingest] could not scan ${vaultName(vaultPath)} pending media pages: ${error.message}`);
     return 0;
   }
 }
@@ -4338,7 +4397,7 @@ function updateRuntimeFromAutomationResult(vaultPath, result = {}) {
     detail: result.detail || "Learning automation finished.",
     lastRunAt: now,
     lastSuccessAt: result.status === "processed" ? now : automationRuntimeFor(vaultPath).lastSuccessAt || "",
-    lastBlockedAt: result.status === "blocked" ? now : automationRuntimeFor(vaultPath).lastBlockedAt || ""
+    lastBlockedAt: ["blocked", "retrying"].includes(result.status) ? now : automationRuntimeFor(vaultPath).lastBlockedAt || ""
   });
 }
 
@@ -5110,6 +5169,15 @@ function renderHtml() {
     .learning-type-legend span::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--kind, var(--accent)); border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 60%, var(--line)); }
     .learning-action-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; min-width: 0; }
     .learning-action-row button, .learning-button-row button { flex: 0 1 auto; min-width: min(180px, 100%); max-width: 100%; white-space: normal; overflow-wrap: break-word; word-break: normal; text-align: center; }
+    .learning-target-button, .learning-flow-step-button, .learning-stepper button, .learning-daily-sessions button, .learning-action-row button, .learning-form button, #source-capture-form button, .learning-chip, .learning-capture-status, .learning-capture-status * {
+      writing-mode: horizontal-tb;
+      text-orientation: mixed;
+      white-space: normal;
+      word-break: normal;
+      overflow-wrap: break-word;
+      line-height: 1.25;
+      min-width: 0;
+    }
     .learning-card.danger { border-color: color-mix(in srgb, #dc2626 45%, var(--line)); }
     .learning-card.warning { border-color: color-mix(in srgb, #f59e0b 55%, var(--line)); }
     .learning-flowchart { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(128px, 100%), 1fr)); gap: 8px; align-items: stretch; margin: 10px 0 14px; }
@@ -5248,8 +5316,8 @@ function renderHtml() {
     .learning-flow-lane .learning-flow-step-button > div { min-width: 0; display: grid; gap: 2px; }
     .learning-flow-lane strong { display: block; font-size: 13px; }
     .learning-flow-lane em { display: block; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: break-word; }
-    .learning-flow-lane .learning-action-row { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; }
-    .learning-flow-lane .learning-action-row button { width: 100%; min-width: 0; overflow-wrap: anywhere; word-break: normal; }
+    .learning-flow-lane .learning-action-row { display: flex; flex-wrap: wrap; align-items: stretch; }
+    .learning-flow-lane .learning-action-row button { width: auto; min-width: min(180px, 100%); overflow-wrap: break-word; word-break: normal; }
     .learning-plan-summary { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
     .learning-plan-summary strong { font-size: 16px; }
     .learning-plan-summary span:not(.learning-chip) { color: var(--muted); }
@@ -7067,6 +7135,16 @@ function renderHtml() {
       topicsTypeFilter.value = "";
       renderTopicsTable();
     });
+    document.addEventListener("click", (event) => {
+      const retry = event.target.closest(".table-retry");
+      if (!retry) return;
+      const tab = retry.dataset.retryTab;
+      retry.disabled = true;
+      retry.textContent = "Retrying...";
+      if (tab === "files") loadFiles({ refresh: true });
+      if (tab === "archives") loadArchives({ refresh: true });
+      if (tab === "topics") loadTopics({ refresh: true });
+    });
     document.querySelectorAll("th.sortable").forEach((header) => {
       header.addEventListener("click", () => {
         const table = header.dataset.table;
@@ -7171,7 +7249,7 @@ function renderHtml() {
             filesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Vault files are still being indexed."));
           }
           if (filesLoadPolls <= 4) setTimeout(() => loadFiles(), filesLoadPolls <= 2 ? 1400 : 5000);
-          else if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Vault files are still indexing in the background. The table will update when rows are available.");
+          else if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Vault files are still indexing in the background. The table will update when rows are available.", "files");
           return;
         }
         filesLoadPolls = 0;
@@ -7185,7 +7263,7 @@ function renderHtml() {
           renderFilesTable();
           filesBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached files. Automatic refresh failed: " + error.message));
         } else {
-          filesBody.innerHTML = tabStatusRow(7, error.message);
+          filesBody.innerHTML = tabStatusRow(7, error.message, "files");
         }
       }
     }
@@ -7492,7 +7570,7 @@ function renderHtml() {
             archivesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Archive history is still being indexed."));
           }
           if (archivesLoadPolls <= 4) setTimeout(() => loadArchives(), archivesLoadPolls <= 2 ? 1400 : 5000);
-          else if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Archive history is still indexing in the background. The table will update when rows are available.");
+          else if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Archive history is still indexing in the background. The table will update when rows are available.", "archives");
           return;
         }
         archivesLoadPolls = 0;
@@ -7506,7 +7584,7 @@ function renderHtml() {
           renderArchivesTable();
           archivesBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached archives. Automatic refresh failed: " + error.message));
         } else {
-          archivesBody.innerHTML = tabStatusRow(7, error.message);
+          archivesBody.innerHTML = tabStatusRow(7, error.message, "archives");
         }
       }
     }
@@ -7771,7 +7849,7 @@ function renderHtml() {
             topicsBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Topics are still being indexed."));
           }
           if (topicsLoadPolls <= 4) setTimeout(() => loadTopics(), topicsLoadPolls <= 2 ? 1400 : 5000);
-          else if (!topicsCache.length) topicsBody.innerHTML = tabStatusRow(7, "Topics are still indexing in the background. The table will update when rows are available.");
+          else if (!topicsCache.length) topicsBody.innerHTML = tabStatusRow(7, "Topics are still indexing in the background. The table will update when rows are available.", "topics");
           return;
         }
         topicsLoadPolls = 0;
@@ -7788,13 +7866,14 @@ function renderHtml() {
           renderTopicsTable();
           topicsBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached topics. Automatic refresh failed: " + error.message));
         } else {
-          topicsBody.innerHTML = tabStatusRow(7, error.message);
+          topicsBody.innerHTML = tabStatusRow(7, error.message, "topics");
         }
       }
     }
 
-    function tabStatusRow(colspan, message) {
-      return '<tr><td colspan="' + escapeHtml(String(colspan)) + '" class="muted">' + escapeHtml(message) + '</td></tr>';
+    function tabStatusRow(colspan, message, kind = "") {
+      const retry = kind ? ' <button class="secondary table-retry" type="button" data-retry-tab="' + escapeHtml(kind) + '">Retry</button>' : "";
+      return '<tr><td colspan="' + escapeHtml(String(colspan)) + '" class="muted table-status-cell">' + escapeHtml(message) + retry + '</td></tr>';
     }
 
     function tabStatusMessage(data, fallback) {
@@ -9285,13 +9364,13 @@ function renderHtml() {
       if (control === "running") return "Automatic learning resumed";
       if (control === "paused") return "Automatic learning paused";
       if (control === "stopped") return "Automatic learning stopped";
-      if (control === "snoozed") return "Automatic learning snoozed until " + new Date(snoozedUntil).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      if (control === "snoozed") return "Automatic learning snoozed until " + formatClientTime(snoozedUntil);
       return "Automatic learning updated";
     }
 
     function automationControlText(settings, automation) {
       const control = settings?.learningAutopilot === false ? "stopped" : (settings?.automationControl || "running");
-      if (control === "snoozed" && settings?.snoozedUntil) return "Automatic learning snoozed until " + new Date(settings.snoozedUntil).toLocaleString();
+      if (control === "snoozed" && settings?.snoozedUntil) return "Automatic learning snoozed until " + formatClientTime(settings.snoozedUntil);
       if (control === "paused") return "Automatic learning paused. Resume when you want background learning to continue.";
       if (control === "stopped") return "Automatic learning stopped for this vault.";
       return automation?.detail || "Automatic learning is running for safe local work.";

@@ -12,6 +12,8 @@ const clipperPopupSource = fs.readFileSync(path.resolve("extension/arc-clipper/p
 const clipperPopupHtml = fs.readFileSync(path.resolve("extension/arc-clipper/popup.html"), "utf8");
 const clipperBackgroundSource = fs.readFileSync(path.resolve("extension/arc-clipper/background.js"), "utf8");
 const clipperContentSource = fs.readFileSync(path.resolve("extension/arc-clipper/content.js"), "utf8");
+const macosWrapperSource = fs.readFileSync(path.resolve("native/macos/LLMWikiAgent/Sources/LLMWikiAgent/main.swift"), "utf8");
+const macosInstallScript = fs.readFileSync(path.resolve("scripts/install_macos_app.sh"), "utf8");
 
 test("Learning Boost UI includes Stage 8 sections and working-memory panels", () => {
   for (const label of [
@@ -88,6 +90,8 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.ok(serverSource.includes(".learning-flow-lane li { display: block;"));
   assert.match(serverSource, /\.learning-stepper button \{[^}]*overflow-wrap: (break-word|anywhere)/);
   assert.match(serverSource, /\.learning-flow-lane \.learning-flow-step-button \{[^}]*overflow-wrap: (break-word|anywhere)/);
+  assert.match(serverSource, /writing-mode: horizontal-tb/);
+  assert.match(serverSource, /#source-capture-form button/);
   assert.match(serverSource, /learning-flow-step-button/);
   assert.doesNotMatch(serverSource, /\.learning-jump, \.learning-target-button \{[^}]*overflow-wrap: anywhere/);
   assert.ok(!serverSource.includes(".learning-stepper li { position: relative; display: grid; grid-template-columns: 28px"));
@@ -290,7 +294,10 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(automationSource, /recoveredFromStaleRuntime/);
   assert.match(serverSource, /autoIngestVaultCursor/);
   assert.match(serverSource, /Learning Autopilot is checking/);
-  assert.doesNotMatch(serverSource, /const pendingRawCount = safeRawCandidateCount\(vaultPath\);/);
+  assert.match(serverSource, /const pendingRawCount = safeRawCandidateCount\(vaultPath\);/);
+  assert.match(serverSource, /const pendingResourceCount = safeQueueableResourceCount\(vaultPath\);/);
+  assert.match(serverSource, /const pendingMediaCount = safePendingProviderMediaCount\(vaultPath\);/);
+  assert.match(serverSource, /if \(!pendingRawCount && !pendingResourceCount && !pendingMediaCount\) continue;/);
   assert.match(serverSource, /Resume/);
   assert.match(serverSource, /Snooze 1 hour/);
   assert.match(serverSource, /Automatic learning stopped/);
@@ -299,6 +306,7 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /loading: status === "loading"/);
   assert.match(serverSource, /scheduleTabDataRefresh/);
   assert.match(serverSource, /state\.items\.length && state\.loading/);
+  assert.doesNotMatch(serverSource, /state\.items\.length && stale\) return "stale_refreshing"/);
   assert.doesNotMatch(serverSource, /refreshTabData\(kind\);/);
   assert.doesNotMatch(serverSource, /loading: status === "loading" \|\| status === "stale_refreshing"/);
   assert.doesNotMatch(serverSource, /data-tab-refresh/);
@@ -315,6 +323,11 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /filesLoadPolls <= 2 \? 1400 : 5000/);
   assert.match(serverSource, /filesBody\.innerHTML = tabStatusRow\(7, "Loading vault files/);
   assert.match(serverSource, /archivesBody\.innerHTML = tabStatusRow\(7, "Loading archive history/);
+  assert.match(serverSource, /class="secondary table-retry"/);
+  assert.match(serverSource, /data-retry-tab/);
+  assert.match(serverSource, /loadFiles\(\{ refresh: true \}\)/);
+  assert.match(serverSource, /loadArchives\(\{ refresh: true \}\)/);
+  assert.match(serverSource, /loadTopics\(\{ refresh: true \}\)/);
   assert.doesNotMatch(serverSource, /filesLoadPolls <= 18/);
   assert.doesNotMatch(serverSource, /archivesLoadPolls <= 18/);
   assert.match(serverSource, /if \(data\.error && !\(data\.vaults \|\| \[\]\)\.length\) throw new Error\(data\.error\);/);
@@ -343,6 +356,17 @@ test("Learning saves preserve unrelated dirty fields and expose source insight p
   assert.match(serverSource, /api\/learning\/process-resources/);
   assert.match(serverSource, /autoProcessCapturedResources/);
   assert.match(serverSource, /processingStatus: "ready_for_ingest"/);
+});
+
+test("macOS wrapper logs server output and installer refreshes app registration", () => {
+  assert.match(macosWrapperSource, /serverLogURL/);
+  assert.match(macosWrapperSource, /appendServerLog/);
+  assert.match(macosWrapperSource, /serverHealthFailures/);
+  assert.match(macosWrapperSource, /scheduleServerHealthWatchdog/);
+  assert.match(macosWrapperSource, /checkServerHealthAndRestartIfNeeded/);
+  assert.match(macosInstallScript, /LaunchServices\.framework\/Support\/lsregister/);
+  assert.match(macosInstallScript, /\$LSREGISTER" -f "\$TARGET"/);
+  assert.match(macosInstallScript, /\$LSREGISTER" -f "\$APPLICATIONS_ALIAS"/);
 });
 
 test("Stage 8 confirmation gates are present in the app UI", () => {

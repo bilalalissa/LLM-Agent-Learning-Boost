@@ -373,7 +373,8 @@ test("pending media scan can be capped for automatic startup checks", async () =
   }
 
   assert.equal(countPendingMediaPages(vault, { limit: 1, maxScanned: 40 }), 0);
-  assert.equal(countPendingMediaPages(vault, { limit: 1, maxScanned: 200 }), 1);
+  assert.equal(countPendingMediaPages(vault, { limit: 1, maxScanned: 200 }), 0);
+  assert.equal(countPendingMediaPages(vault, { limit: 1, maxScanned: 200, providerReadyOnly: false }), 1);
 
   let providerCalls = 0;
   const result = await runLearningAutomationForVault(vault, {
@@ -392,4 +393,38 @@ test("pending media scan can be capped for automatic startup checks", async () =
 
   assert.equal(result.status, "idle");
   assert.equal(providerCalls, 0);
+});
+
+test("pending media retry count only includes provider-ready media by default", () => {
+  const { vault } = makeVault();
+  const sourceDir = path.join(vault, "wiki", "sources");
+  const assetDir = path.join(vault, "raw", "assets");
+  fs.mkdirSync(sourceDir, { recursive: true });
+  fs.mkdirSync(assetDir, { recursive: true });
+  fs.writeFileSync(path.join(assetDir, "needs-ocr.png"), "fake image");
+  fs.writeFileSync(path.join(assetDir, "has-ocr.png"), "fake image");
+  fs.writeFileSync(path.join(sourceDir, "needs-ocr.md"), `---
+type: source
+media_kind: image
+media_analysis_status: pending_content
+source_path: raw/assets/needs-ocr.png
+---
+# Needs OCR
+`);
+  fs.writeFileSync(path.join(sourceDir, "has-ocr.md"), `---
+type: source
+media_kind: image
+media_analysis_status: pending_provider_analysis
+source_path: raw/assets/has-ocr.png
+---
+# Has OCR
+
+## Provider Input
+
+- Provider call attempted: yes
+- Extracted text/transcript/OCR sent: yes
+`);
+
+  assert.equal(countPendingMediaPages(vault, { maxScanned: 20 }), 1);
+  assert.equal(countPendingMediaPages(vault, { maxScanned: 20, providerReadyOnly: false }), 2);
 });
