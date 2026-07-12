@@ -286,6 +286,7 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /mobileStudyPayload/);
   assert.match(serverSource, /authorizedMobileStudyRequest/);
   assert.match(serverSource, /api\/mobile\/study/);
+  assert.match(serverSource, /api\/learning\/mobile-study/);
   assert.match(serverSource, /api\/mobile\/review/);
   assert.match(serverSource, /LEARNING_BOOST_MOBILE_TOKEN/);
   assert.match(serverSource, /learning-daily-plan/);

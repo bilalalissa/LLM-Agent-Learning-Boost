@@ -8,6 +8,30 @@ import { ensureDir, isIngestibleRawFile, slugify } from "./vaults.mjs";
 
 const execFileAsync = promisify(execFile);
 
+export function resourceInboxQueueState(vaultPath) {
+  const resources = resourceInbox(vaultPath);
+  const queueable = [];
+  const attention = [];
+  for (const item of resources) {
+    if (["ingested", "deferred", "deleted"].includes(item.processingStatus)) continue;
+    if (resourceEligibleForQueue(item)) {
+      queueable.push(item);
+    } else {
+      attention.push({
+        ...item,
+        attentionReason: resourceAttentionReason(item)
+      });
+    }
+  }
+  return {
+    resources,
+    queueable,
+    attention,
+    queueableCount: queueable.length,
+    attentionCount: attention.length
+  };
+}
+
 export function queueResourceInboxForIngest(vaultPath, options = {}) {
   const limit = Math.max(1, Number(options.limit || 12));
   const now = options.now instanceof Date ? options.now : new Date();
@@ -254,6 +278,14 @@ function resourceEligibleForQueue(item = {}) {
   const permissions = item.permissions || {};
   if (item.file) return permissions.contentApproved === true;
   return permissions.userApproved === true && Boolean(item.url || item.description || item.title);
+}
+
+function resourceAttentionReason(item = {}) {
+  if (item.sourceType === "browser_clip") return "Browser clips are saved directly by the extension.";
+  if (item.ingest?.lastQueueError) return item.ingest.lastQueueError;
+  if (item.recommendedNextAction) return item.recommendedNextAction;
+  if (item.processingStatus === "needs_review") return "Review and approve this captured item before automatic ingest.";
+  return "Resource is not approved for ingest queueing.";
 }
 
 function prepareQueueInput(vaultPath, item, now) {

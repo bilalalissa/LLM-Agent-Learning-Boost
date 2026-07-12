@@ -16,6 +16,7 @@ import {
 } from "../src/learning-automation.mjs";
 import { countPendingMediaPages } from "../src/ingest-lib.mjs";
 import { ensureLearningScaffold } from "../src/learning-store.mjs";
+import { resourceInboxPath } from "../src/source-capture.mjs";
 
 function makeVault() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "learning-automation-"));
@@ -73,6 +74,34 @@ test("stale runtime pause clears from status when no pending learning work remai
   assert.equal(status.status, "watching");
   assert.equal(status.recoveredFromStaleRuntime, true);
   assert.match(status.detail, /No pending learning sources/);
+});
+
+test("automation status separates queueable resources from source-capture review items", () => {
+  const { vault } = makeVault();
+  const inbox = resourceInboxPath(vault);
+  fs.writeFileSync(inbox, [
+    JSON.stringify({
+      id: "review-1",
+      title: "Screenshot needs review",
+      sourceType: "screenshot",
+      processingStatus: "needs_review",
+      recommendedNextAction: "Preserve screenshot and approve image analysis only if useful."
+    }),
+    JSON.stringify({
+      id: "ready-1",
+      title: "Ready note",
+      sourceType: "manual",
+      processingStatus: "ready_for_ingest",
+      description: "A ready captured note."
+    })
+  ].join("\n") + "\n");
+
+  const status = learningAutomationStatus(vault);
+
+  assert.equal(status.pendingResourceCount, 1);
+  assert.equal(status.attentionResourceCount, 1);
+  assert.equal(status.attentionResources[0].id, "review-1");
+  assert.match(status.attentionResources[0].reason, /screenshot/i);
 });
 
 test("runtime retry remains automatic and not blocked while pending work exists", () => {

@@ -4,13 +4,12 @@ import { trackBehaviorEvent } from "./behavior-tracker.mjs";
 import { countPendingMediaPages, ingestVault } from "./ingest-lib.mjs";
 import { draftLearningPlans, readLearningPlans } from "./learning-planner.mjs";
 import { learningPaths } from "./learning-store.mjs";
-import { queueResourceInboxForIngestAsync } from "./source-capture-ingest.mjs";
+import { queueResourceInboxForIngestAsync, resourceInboxQueueState } from "./source-capture-ingest.mjs";
 import { suggestPlanUpdates } from "./plan-update-suggester.mjs";
 import { formatLocalDateTime } from "./time.mjs";
 import {
   markResourceIngestResults,
-  readSourceCaptureSettings,
-  resourceInbox
+  readSourceCaptureSettings
 } from "./source-capture.mjs";
 import { listRawCandidates, vaultName } from "./vaults.mjs";
 
@@ -54,23 +53,25 @@ export function learningNotificationsPath(vaultPath) {
 
 export function learningAutomationStatus(vaultPath, runtime = {}) {
   const settings = readAutomationSettings(vaultPath);
-  const resources = resourceInbox(vaultPath);
+  const resourceState = resourceInboxQueueState(vaultPath);
+  const resources = resourceState.resources;
   const sourceSettings = readSourceCaptureSettings(vaultPath);
   const rawCandidates = listRawCandidates(vaultPath);
-  const pendingMediaCount = shouldScanPendingMediaPages({ reprocessPendingMedia: false })
-    ? countPendingMediaPages(vaultPath, { limit: 12, maxScanned: 1000, providerReadyOnly: true })
-    : 0;
+  const pendingMediaCount = Number(runtime.pendingMediaCount || 0);
   const notifications = readLearningNotifications(vaultPath, { limit: 40 });
-  const pendingResources = resources.filter((item) => !["ingested", "deferred", "deleted"].includes(item.processingStatus));
+  const queueableResources = resourceState.queueable;
+  const attentionResources = resourceState.attention;
   const settingsStatus = automationStatusFromSettings(settings);
   const settingsDetail = automationDetailFromSettings(settings);
   const runtimeStatus = runtime.status || settingsStatus;
-  const pendingWorkCount = rawCandidates.length + pendingMediaCount + pendingResources.length;
+  const pendingWorkCount = rawCandidates.length + pendingMediaCount + queueableResources.length;
   const userPaused = ["paused", "snoozed", "stopped"].includes(settingsStatus);
   const staleRuntimePause = ["paused", "blocked", "retrying"].includes(runtimeStatus) && pendingWorkCount === 0 && !userPaused;
   const effectiveStatus = staleRuntimePause ? settingsStatus : runtimeStatus;
   const effectiveDetail = staleRuntimePause
-    ? "No pending learning sources. Learning Autopilot is watching for safe work."
+    ? (attentionResources.length
+      ? `${attentionResources.length} captured resource(s) need Source Capture review before automation can process them.`
+      : "No pending learning sources. Learning Autopilot is watching for safe work.")
     : (runtime.detail || settingsDetail);
   return {
     settings,
@@ -86,7 +87,14 @@ export function learningAutomationStatus(vaultPath, runtime = {}) {
     pendingRawCount: rawCandidates.length,
     pendingMediaCount,
     pendingRaw: rawCandidates.slice(0, 12).map((file) => path.relative(vaultPath, file).replace(/\\/g, "/")),
-    pendingResourceCount: pendingResources.length,
+    pendingResourceCount: queueableResources.length,
+    attentionResourceCount: attentionResources.length,
+    attentionResources: attentionResources.slice(0, 8).map((item) => ({
+      id: item.id || "",
+      title: item.title || item.file || item.url || "Captured resource",
+      status: item.processingStatus || "",
+      reason: item.attentionReason || ""
+    })),
     resourceInboxCount: resources.length,
     sourceCaptureAutoProcess: sourceSettings.autoProcessCapturedResources !== false,
     notificationsUnread: notifications.filter((item) => !item.readAt && item.status !== "dismissed").length,

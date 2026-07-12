@@ -156,7 +156,7 @@ The Autopilot controls also support explicit runtime state:
 
 Source Capture includes Scan capture sources now. It runs safe local collectors for enabled watch folders, screenshot folders, ResourceInbox staging status, and preview-safe opened-document metadata when explicitly enabled. It shows captured, duplicate, skipped, and last-scan counts so enabled capture controls have visible feedback.
 
-Skipped files are grouped by collector, extension, reason, count, and sample filenames. Common document, image, media, subtitle, URL, and text/data formats are queued as best-effort sources when readable. Files that cannot be copied because of iCloud or macOS permissions stay visible as per-file blockers instead of stopping the app.
+Skipped files are grouped by collector, extension, reason, count, and sample filenames. Common document, image, media, subtitle, URL, and text/data formats are queued as best-effort sources when readable. Files that cannot be copied because of iCloud or macOS permissions stay visible as per-file blockers instead of stopping the app. The Learning status now separates queueable captured resources from review-needed capture attention, so screenshots, opened-document previews, browser clips, and permission blockers do not appear as failed provider work.
 
 The scan does not silently start live screen recording, broad browser history import, or full monitoring.
 

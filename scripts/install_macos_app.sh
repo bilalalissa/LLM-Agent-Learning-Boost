@@ -8,6 +8,10 @@ APP="$ROOT/build/macos/LLM Agent Learning Boost.app"
 TARGET_DIR="${LEARNING_BOOST_INSTALL_DIR:-$HOME/Applications}"
 TARGET="$TARGET_DIR/LLM Agent Learning Boost.app"
 APPLICATIONS_ALIAS="/Applications/LLM Agent Learning Boost.app"
+LOGIN_ITEM_ENABLED="false"
+if osascript -e 'tell application "System Events" to get the name of every login item' 2>/dev/null | grep -Eq '(^|, )(LLM Agent Learning Boost|LLMWikiAgent)(,|$)'; then
+  LOGIN_ITEM_ENABLED="true"
+fi
 
 pkill -x LLMWikiAgent >/dev/null 2>&1 || true
 pkill -x LLMAgentLearningBoost >/dev/null 2>&1 || true
@@ -58,8 +62,29 @@ if [[ -x "$LSREGISTER" && -e "$APPLICATIONS_ALIAS" ]]; then
   "$LSREGISTER" -f "$APPLICATIONS_ALIAS" >/dev/null 2>&1 || true
 fi
 
+osascript >/dev/null 2>&1 <<'APPLESCRIPT' || true
+tell application "System Events"
+  repeat with itemName in {"LLMWikiAgent", "LLM Agent Learning Boost"}
+    repeat with loginItem in (every login item whose name is itemName)
+      delete loginItem
+    end repeat
+  end repeat
+end tell
+APPLESCRIPT
+
+if [[ "$LOGIN_ITEM_ENABLED" == "true" ]]; then
+  osascript >/dev/null 2>&1 <<APPLESCRIPT || true
+tell application "System Events"
+  make login item at end with properties {path:"$TARGET", hidden:false}
+end tell
+APPLESCRIPT
+fi
+
 echo "Installed: $TARGET"
 if [[ -L "$APPLICATIONS_ALIAS" ]]; then
   echo "Applications alias: $APPLICATIONS_ALIAS -> $TARGET"
+fi
+if [[ "$LOGIN_ITEM_ENABLED" == "true" ]]; then
+  echo "Refreshed Login Item: $TARGET"
 fi
 echo "Open it from /Applications or run: open '$TARGET'"

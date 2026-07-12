@@ -45,7 +45,7 @@ import { createProvider } from "./provider.mjs";
 import { providerStatus } from "./provider-status.mjs";
 import { recordPlanUpdateChoice, suggestPlanUpdates } from "./plan-update-suggester.mjs";
 import { preflightStatus } from "./preflight.mjs";
-import { queueResourceInboxForIngestAsync } from "./source-capture-ingest.mjs";
+import { queueResourceInboxForIngestAsync, resourceInboxQueueState } from "./source-capture-ingest.mjs";
 import {
   remoteResearch,
   saveRemoteSourcesToResourceInbox,
@@ -364,7 +364,7 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
-  if (request.method === "GET" && url.pathname === "/api/mobile/study") {
+  if (request.method === "GET" && (url.pathname === "/api/mobile/study" || url.pathname === "/api/learning/mobile-study")) {
     if (!authorizedMobileStudyRequest(request, response, url)) return;
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(mobileStudyPayload(url)));
@@ -2241,12 +2241,14 @@ function fastLearningAutomationStatusForVault(vaultPath) {
   const resourceStats = fastResourceInboxStatsFromCache(cachedVault);
   const notificationStats = fastNotificationStatsFromCache(cachedVault);
   const runtimeStatus = runtime.status || settingsState.status;
-  const pendingWorkCount = pendingRaw.length + resourceStats.pending;
+  const pendingWorkCount = pendingRaw.length + resourceStats.pending + Number(runtime.pendingMediaCount || 0);
   const userPaused = ["paused", "snoozed", "stopped"].includes(settingsState.status);
   const staleRuntimePause = ["paused", "blocked", "retrying"].includes(runtimeStatus) && pendingWorkCount === 0 && !userPaused;
   const effectiveStatus = staleRuntimePause ? settingsState.status : runtimeStatus;
   const effectiveDetail = staleRuntimePause
-    ? "No pending learning sources. Learning Autopilot is watching for safe work."
+    ? (resourceStats.attention
+      ? `${resourceStats.attention} captured resource(s) need Source Capture review before automation can process them.`
+      : "No pending learning sources. Learning Autopilot is watching for safe work.")
     : (runtime.detail || settingsState.detail);
   return {
     settings,
@@ -2260,9 +2262,10 @@ function fastLearningAutomationStatusForVault(vaultPath) {
     lastSuccessAt: runtime.lastSuccessAt || "",
     lastBlockedAt: runtime.lastBlockedAt || "",
     pendingRawCount: pendingRaw.length,
-    pendingMediaCount: 0,
+    pendingMediaCount: Number(runtime.pendingMediaCount || 0),
     pendingRaw: pendingRaw.slice(0, 12),
     pendingResourceCount: resourceStats.pending,
+    attentionResourceCount: resourceStats.attention,
     resourceInboxCount: resourceStats.total,
     sourceCaptureAutoProcess: sourceSettings.autoProcessCapturedResources !== false,
     notificationsUnread: notificationStats.unread,
@@ -2278,22 +2281,42 @@ function fastPendingRawCandidates(vaultPath) {
 
 function fastResourceInboxStats(learningDir) {
   const items = safeReadJsonlLimited(path.join(learningDir, "resource-inbox.jsonl"), 2 * 1024 * 1024, 5000);
-  const pending = items.filter((item) => !["ingested", "deferred", "deleted"].includes(item.processingStatus)).length;
-  return { total: items.length, pending };
+  const state = splitResourceQueueStats(items);
+  return { total: items.length, ...state };
 }
 
 function fastResourceInboxStatsFromCache(cachedVault = {}) {
   const groups = cachedVault.sourceCapture?.groups;
   const items = Array.isArray(groups?.resources) ? groups.resources : [];
   if (items.length) {
-    const pending = items.filter((item) => !["ingested", "deferred", "deleted"].includes(item.processingStatus)).length;
-    return { total: items.length, pending };
+    return { total: items.length, ...splitResourceQueueStats(items) };
   }
   const runtime = cachedVault.automation || {};
   return {
     total: Number(runtime.resourceInboxCount || 0),
-    pending: Number(runtime.pendingResourceCount || 0)
+    pending: Number(runtime.pendingResourceCount || 0),
+    attention: Number(runtime.attentionResourceCount || 0)
   };
+}
+
+function splitResourceQueueStats(items = []) {
+  let pending = 0;
+  let attention = 0;
+  for (const item of items) {
+    if (["ingested", "deferred", "deleted"].includes(item.processingStatus)) continue;
+    if (resourceEligibleForFastQueue(item)) pending += 1;
+    else attention += 1;
+  }
+  return { pending, attention };
+}
+
+function resourceEligibleForFastQueue(item = {}) {
+  if (item.sourceType === "browser_clip") return false;
+  if (item.processingStatus === "ready_for_ingest" || item.processingStatus === "queued_for_ingest") return true;
+  if (item.processingStatus !== "captured") return false;
+  const permissions = item.permissions || {};
+  if (item.file) return permissions.contentApproved === true;
+  return permissions.userApproved === true && Boolean(item.url || item.description || item.title);
 }
 
 function fastNotificationStats(learningDir) {
@@ -3913,6 +3936,14 @@ async function runAutoIngest() {
         ? `Learning Autopilot is processing ${Math.min(pendingVault.pendingRawCount, batchSize)} of ${pendingVault.pendingRawCount} pending file(s) in ${vaultName(pendingVault.vaultPath)}.`
         : `Learning Autopilot is checking ${vaultName(pendingVault.vaultPath)} for pending sources in a background worker.`
     };
+    lastIngestMessage = reportStatus(`Operation progress: ${ingestProgress.percent}%. ${ingestProgress.detail}`);
+    setAutomationRuntime(pendingVault.vaultPath, {
+      running: true,
+      status: "processing",
+      detail: ingestProgress.detail,
+      pendingMediaCount: pendingVault.pendingMediaCount || 0,
+      pendingResourceCount: pendingVault.pendingResourceCount || 0
+    });
     const workerResult = await runAutoIngestWorker({
       vaultPath: pendingVault.vaultPath,
       options: {
@@ -3998,7 +4029,7 @@ function autoIngestWorkerTimeoutMs() {
     config.openai?.timeoutMs
   ].map((value) => Number(value || 0)).filter((value) => Number.isFinite(value) && value > 0);
   const providerBudget = Math.max(60000, ...providerTimeouts);
-  return Math.min(Math.max(providerBudget + 30000, 90000), 180000);
+  return Math.min(Math.max(providerBudget + 120000, 120000), 300000);
 }
 
 function nextAutoIngestVault() {
@@ -4039,15 +4070,7 @@ function safeRawCandidateCount(vaultPath) {
 
 function safeQueueableResourceCount(vaultPath) {
   try {
-    return resourceInbox(vaultPath).filter((item) => {
-      if (["ingested", "deferred", "deleted"].includes(item.processingStatus)) return false;
-      if (item.sourceType === "browser_clip") return false;
-      if (item.processingStatus === "ready_for_ingest" || item.processingStatus === "queued_for_ingest") return true;
-      if (item.processingStatus !== "captured") return false;
-      const permissions = item.permissions || {};
-      if (item.file) return permissions.contentApproved === true;
-      return permissions.userApproved === true && Boolean(item.url || item.description || item.title);
-    }).length;
+    return resourceInboxQueueState(vaultPath).queueableCount;
   } catch (error) {
     console.warn(`[auto-ingest] could not scan ${vaultName(vaultPath)} ResourceInbox: ${error.message}`);
     return 0;

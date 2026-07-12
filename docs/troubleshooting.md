@@ -105,7 +105,7 @@ For audio/video transcription, install or expose a working `whisper` command on 
 
 ## Unexpected "Choose Application" Window
 
-Older installer builds used an AppleScript app-name lookup before replacing the app bundle. macOS could show a `Choose Application` dialog asking where `LLMWikiAgent` or `LLM Agent Learning Boost` is. The current bundle uses `LLMAgentLearningBoost` as its internal executable name, stops old `LLMWikiAgent` and new helper processes directly, avoids the AppleScript chooser path, and refreshes Launch Services registration for the installed bundle.
+Older installer builds used an AppleScript app-name lookup before replacing the app bundle. macOS could show a `Choose Application` dialog asking where `LLMWikiAgent` or `LLM Agent Learning Boost` is. The current bundle uses `LLMAgentLearningBoost` as its internal executable name, stops old `LLMWikiAgent` and new helper processes directly, avoids the AppleScript chooser path, refreshes Launch Services registration for the installed bundle, and refreshes any existing Login Item so it points at the current installed app path.
 
 If the dialog is already open, cancel it once, reinstall the current app, and relaunch from `/Applications/LLM Agent Learning Boost.app`.
 
