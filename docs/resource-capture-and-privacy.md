@@ -109,7 +109,7 @@ Unsupported files, missing folders, unreadable files, files already in `raw/proc
 
 Watch-folder dedupe uses local path, file size, and modified time. Repeated scans do not keep re-adding the same file. In the default `ready_for_ingest` mode, supported files in an explicitly selected watch folder are approved for local queueing into `raw/input/`. In `needs_review` mode, the file is recorded in ResourceInbox but is not copied into `raw/input/` until approved later.
 
-Copy failures, including iCloud or macOS permission errors such as `EPERM`, are recorded on that one ResourceInbox item or skipped group. They do not stop the entire app or block Files, Archive, Topics, or Learning from loading. Fix the file permission, move the file to a readable local folder, or choose a different watch folder, then scan again.
+Copy failures, including iCloud or macOS permission errors such as `EPERM`, are recorded on that one ResourceInbox item or skipped group. They do not stop the entire app or block Files, Archive, Topics, or Learning from loading. Automatic ResourceInbox staging uses a small queue-attempt budget per pass and killable copy timeouts, so a cloud-only or locked file becomes a visible per-file blocker instead of freezing the background worker. Fix the file permission, move the file to a readable local folder, or choose a different watch folder, then scan again.
 
 ## Screenshot and Media Privacy
 

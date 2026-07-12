@@ -78,7 +78,7 @@ Clicking a timeline item routes to the relevant place: Cards And Bits, Source-To
 
 `Today's Study Plan` turns the current best plan and spaced-repetition state into short study sessions. It uses due cards, due bits, unread items, preferred session length, and plan-linked sources to suggest what to do now, later today, and at wrap-up.
 
-The session cards include `Spaced review`, `Concept practice`, `Short quiz/test`, and `Plan and goal check`. Each card has a local suggested time, duration, explanation, and one direct action. These cards are guidance only; they do not write Calendar or Reminders entries unless you open an export preview and confirm it.
+The session cards include `Spaced review`, `Concept practice`, `Short quiz/test`, and `Plan and goal check`. Each card has a local suggested time, duration, explanation, and one direct action. Learning Boost uses recent card/bit review activity to suggest useful study hours when enough activity exists; otherwise it spreads the sessions across the day with default spacing. These cards are guidance only; they do not write Calendar or Reminders entries unless you open an export preview and confirm it.
 
 ## Mobile Study
 
@@ -137,9 +137,11 @@ Use `Edit item` in the practice window when a generated card or bit needs a bett
 
 ## Tab Loading
 
-Files, Archive, and Topics show explicit index states instead of ambiguous empty tables. During a first scan they show loading. If stale rows exist, those rows stay visible while the refresh runs. If the scan finishes with no rows, the tab shows an empty state. If the scan stalls or fails, the tab shows the latest bounded status and refreshes automatically the next time the tab or sidebar is read; it does not leave the table in an infinite polling loop.
+Files, Archive, and Topics show explicit index states instead of ambiguous empty tables. The app loads persisted cached rows first so opening a tab does not start a slow iCloud scan. If stale rows exist, those rows stay visible. If no cache exists, the tab shows a bounded empty/error state with a refresh option. Manual refresh runs a bounded worker; the table does not stay in an infinite `Loading...` loop.
 
 The file-list endpoints return `ready`, `ready_empty`, `stale_refreshing`, `loading`, or `error`. The UI uses fetch timeouts so slow capture scans or background ingest work do not leave a table stuck on `Loading...`.
+
+Historical Learning backfill is a maintenance action, not a normal startup action. Use `npm run learning:backfill` when you want to repair old source pages and source-to-plan links. Routine Autopilot continues to watch and process new `raw/`, `raw/input/`, and `raw/inbox/` work automatically.
 
 Scheduled Learning Autopilot runs are intentionally small. The scheduler picks one vault with pending raw files and processes a small batch, then returns control to the app. This prevents a large raw folder or slow provider call from turning the global status into a long-running timeout. Use `Process pending now` when you want to push a larger selected-vault batch immediately.
 

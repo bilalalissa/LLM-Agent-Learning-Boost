@@ -39,7 +39,10 @@ export async function ingestVault(vaultPath, config, provider = createProvider(c
     const pendingMediaLimit = Number.isFinite(Number(options.pendingMediaLimit))
       ? Number(options.pendingMediaLimit)
       : (options.reprocessPendingMedia === true ? 2 : 0);
-    results.push(...await reprocessPendingMediaPages(vaultPath, provider, { limit: pendingMediaLimit }));
+    results.push(...await reprocessPendingMediaPages(vaultPath, provider, {
+      limit: pendingMediaLimit,
+      maxScanned: options.pendingMediaScanLimit
+    }));
   }
   return results;
 }
@@ -258,7 +261,10 @@ async function reprocessPendingMediaPages(vaultPath, provider, options = {}) {
   const limit = Math.max(0, Number(options.limit || 0));
   let attempted = 0;
 
-  for (const sourcePagePath of pendingMediaPagePaths(vaultPath, { limit })) {
+  for (const sourcePagePath of pendingMediaPagePaths(vaultPath, {
+    limit,
+    maxScanned: options.maxScanned
+  })) {
     await yieldToEventLoop();
     const text = fs.readFileSync(sourcePagePath, "utf8");
     const assetRel = text.match(/^source_path:\s*(.+)$/m)?.[1]?.trim().replace(/^["']|["']$/g, "");
@@ -322,12 +328,16 @@ async function reprocessPendingMediaPages(vaultPath, provider, options = {}) {
 function pendingMediaPagePaths(vaultPath, options = {}) {
   const sourceDir = path.join(vaultPath, "wiki", "sources");
   const limit = Math.max(0, Number(options.limit || 0));
+  const maxScanned = Math.max(0, Number(options.maxScanned || 0));
   const result = [];
   const files = [];
   if (!fs.existsSync(sourceDir)) return result;
   walk(sourceDir, files);
 
+  let scanned = 0;
   for (const sourcePagePath of files.filter((file) => file.endsWith(".md"))) {
+    scanned += 1;
+    if (maxScanned > 0 && scanned > maxScanned) break;
     const text = fs.readFileSync(sourcePagePath, "utf8");
     if (!/^media_kind:\s*.+$/m.test(text)) continue;
     if (/^media_analysis_status:\s*analyzed\s*$/m.test(text)) continue;

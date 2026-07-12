@@ -56,16 +56,29 @@ export function learningAutomationStatus(vaultPath, runtime = {}) {
   const resources = resourceInbox(vaultPath);
   const sourceSettings = readSourceCaptureSettings(vaultPath);
   const rawCandidates = listRawCandidates(vaultPath);
-  const pendingMediaCount = countPendingMediaPages(vaultPath, { limit: 50 });
+  const pendingMediaCount = shouldScanPendingMediaPages({ reprocessPendingMedia: false })
+    ? countPendingMediaPages(vaultPath, { limit: 12, maxScanned: 120 })
+    : 0;
   const notifications = readLearningNotifications(vaultPath, { limit: 40 });
   const pendingResources = resources.filter((item) => !["ingested", "deferred", "deleted"].includes(item.processingStatus));
+  const settingsStatus = automationStatusFromSettings(settings);
+  const settingsDetail = automationDetailFromSettings(settings);
+  const runtimeStatus = runtime.status || settingsStatus;
+  const pendingWorkCount = rawCandidates.length + pendingMediaCount + pendingResources.length;
+  const userPaused = ["paused", "snoozed", "stopped"].includes(settingsStatus);
+  const staleRuntimePause = ["paused", "blocked"].includes(runtimeStatus) && pendingWorkCount === 0 && !userPaused;
+  const effectiveStatus = staleRuntimePause ? settingsStatus : runtimeStatus;
+  const effectiveDetail = staleRuntimePause
+    ? "No pending learning sources. Learning Autopilot is watching for safe work."
+    : (runtime.detail || settingsDetail);
   return {
     settings,
     vault: vaultName(vaultPath),
     running: runtime.running === true,
-    blocked: runtime.status === "blocked",
-    status: runtime.status || automationStatusFromSettings(settings),
-    detail: runtime.detail || automationDetailFromSettings(settings),
+    blocked: effectiveStatus === "blocked",
+    status: effectiveStatus,
+    detail: effectiveDetail,
+    recoveredFromStaleRuntime: staleRuntimePause,
     lastRunAt: runtime.lastRunAt || "",
     lastSuccessAt: runtime.lastSuccessAt || "",
     lastBlockedAt: runtime.lastBlockedAt || "",
@@ -95,19 +108,33 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
   const sourceSettings = readSourceCaptureSettings(vaultPath);
   const started = new Date();
   const staged = settings.autoProcessNewSources && sourceSettings.autoProcessCapturedResources !== false
-    ? await queueResourceInboxForIngestAsync(vaultPath, { limit: options.resourceLimit || 12 })
+    ? await queueResourceInboxForIngestAsync(vaultPath, {
+        limit: options.resourceLimit || 12,
+        maxQueueAttempts: options.maxQueueAttempts,
+        copyTimeoutMs: options.copyTimeoutMs
+      })
     : { staged: [] };
   const rawBefore = listRawCandidates(vaultPath);
-  const pendingMediaBefore = countPendingMediaPages(vaultPath, { limit: options.pendingMediaLimit || 3 });
+  const reprocessPendingMedia = shouldScanPendingMediaPages(options);
+  const pendingMediaBefore = reprocessPendingMedia
+    ? countPendingMediaPages(vaultPath, {
+        limit: options.pendingMediaLimit || 3,
+        maxScanned: options.pendingMediaScanLimit || 120
+      })
+    : 0;
 
   if (!rawBefore.length && !pendingMediaBefore) {
+    const skippedStagingCount = staged.skipped?.length || 0;
     return {
       skipped: false,
-      status: "idle",
+      status: skippedStagingCount ? "blocked" : "idle",
       detail: staged.staged.length
         ? `Staged ${staged.staged.length} captured resource(s); waiting for next scan.`
-        : "No pending learning sources.",
+        : skippedStagingCount
+          ? `${skippedStagingCount} captured resource(s) could not be queued. Check Source Capture status for permission, cloud-only, or unsupported-file details.`
+          : "No pending learning sources.",
       staged: staged.staged,
+      skippedResources: staged.skipped || [],
       processed: 0,
       results: [],
       settings
@@ -147,8 +174,9 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
 
   const results = await ingestVault(vaultPath, options.config, options.provider, {
     limit: options.resourceLimit || options.limit || 12,
-    reprocessPendingMedia: true,
-    pendingMediaLimit: options.pendingMediaLimit || 2
+    reprocessPendingMedia,
+    pendingMediaLimit: options.pendingMediaLimit || 2,
+    pendingMediaScanLimit: options.pendingMediaScanLimit || 120
   });
   const marked = markResourceIngestResults(vaultPath, results);
   const completedResults = results.filter((result) =>
@@ -219,6 +247,10 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
     updateSuggestions,
     settings
   };
+}
+
+function shouldScanPendingMediaPages(options = {}) {
+  return options.reprocessPendingMedia === true || process.env.LLM_WIKI_REPROCESS_PENDING_MEDIA === "1";
 }
 
 export function readLearningNotifications(vaultPath, options = {}) {

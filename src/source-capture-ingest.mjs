@@ -1,8 +1,12 @@
 import crypto from "node:crypto";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 import { resourceInbox, resourceInboxPath, writeResourcesPage } from "./source-capture.mjs";
 import { ensureDir, isIngestibleRawFile, slugify } from "./vaults.mjs";
+
+const execFileAsync = promisify(execFile);
 
 export function queueResourceInboxForIngest(vaultPath, options = {}) {
   const limit = Math.max(1, Number(options.limit || 12));
@@ -116,6 +120,7 @@ export function queueResourceInboxForIngest(vaultPath, options = {}) {
 
 export async function queueResourceInboxForIngestAsync(vaultPath, options = {}) {
   const limit = Math.max(1, Number(options.limit || 12));
+  const maxQueueAttempts = Math.max(limit, Number(options.maxQueueAttempts || Math.max(limit * 3, 6)));
   const now = options.now instanceof Date ? options.now : new Date();
   const current = resourceInbox(vaultPath);
   const queued = [];
@@ -123,9 +128,10 @@ export async function queueResourceInboxForIngestAsync(vaultPath, options = {}) 
   const existingByKey = existingQueuedResources(vaultPath, current);
   const next = [];
   let changed = false;
+  let queueAttempts = 0;
 
   for (const item of current) {
-    if (queued.length >= limit) {
+    if (queued.length >= limit || queueAttempts >= maxQueueAttempts) {
       next.push(item);
       continue;
     }
@@ -193,6 +199,7 @@ export async function queueResourceInboxForIngestAsync(vaultPath, options = {}) 
       continue;
     }
 
+    queueAttempts += 1;
     try {
       await writePreparedQueueInput(vaultPath, prepared, options.copyTimeoutMs || 8000);
     } catch (error) {
@@ -415,27 +422,28 @@ function renderMetadataMarkdown(item = {}) {
 async function writePreparedQueueInput(vaultPath, prepared, timeoutMs) {
   const destination = path.join(vaultPath, prepared.rawInput);
   await fs.promises.mkdir(path.dirname(destination), { recursive: true });
-  await withTimeout(
-    prepared.copyFrom
-      ? fs.promises.copyFile(prepared.copyFrom, destination)
-      : fs.promises.writeFile(destination, prepared.content),
-    timeoutMs,
-    `Timed out while queueing ${prepared.copyFrom || prepared.rawInput}.`
-  );
-}
-
-async function withTimeout(promise, timeoutMs, message) {
-  let timer;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), Math.max(1000, Number(timeoutMs || 8000)));
-      })
-    ]);
-  } finally {
-    clearTimeout(timer);
+  const boundedTimeout = Math.max(1000, Number(timeoutMs || 8000));
+  if (prepared.copyFrom) {
+    try {
+      await execFileAsync("/bin/cp", ["-p", prepared.copyFrom, destination], {
+        timeout: boundedTimeout,
+        killSignal: "SIGKILL",
+        maxBuffer: 1024 * 1024
+      });
+      return;
+    } catch (error) {
+      try {
+        await fs.promises.rm(destination, { force: true });
+      } catch {
+        // Ignore cleanup failures; the queue error is more useful.
+      }
+      if (error.killed || error.signal === "SIGKILL" || error.code === "ETIMEDOUT") {
+        throw new Error(`Timed out while queueing ${prepared.copyFrom}. The file may be cloud-only, locked, or blocked by macOS permissions.`);
+      }
+      throw error;
+    }
   }
+  await fs.promises.writeFile(destination, prepared.content);
 }
 
 function yamlString(value) {

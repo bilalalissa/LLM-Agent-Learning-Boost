@@ -33,7 +33,7 @@ Files dropped into `raw/`, `raw/input/`, or `raw/inbox/` are candidates for proc
 
 If the selected provider cannot answer, Learning Boost leaves the file pending and records a blocker. It should not create a successful source page that only says a baseline page was made because AI was unavailable.
 
-When the app starts, it also checks older processed source pages. If a page already has Summary, Key Points, questions, and links but lacks Learning Boost sections or `.llm-wiki/learning/` card/bit records, the app repairs that from the existing source-page evidence. This makes already processed sources visible in the Learning tab without rewriting human notes or pretending a new provider analysis happened.
+Older processed source pages can be repaired with the maintenance backfill command. If a page already has Summary, Key Points, questions, and links but lacks Learning Boost sections or `.llm-wiki/learning/` card/bit records, the backfill derives learning records from the existing source-page evidence without rewriting human notes or pretending a new provider analysis happened. This no longer runs on every app start; use `npm run learning:backfill` when you intentionally want to repair historical material.
 
 ## Bits And Cards
 
@@ -87,9 +87,12 @@ The Learning tab also shows `Today's Study Plan`. This is an automatic daily stu
 - due cards and due bits from spaced repetition
 - unread cards and bits
 - your preferred session length
+- recent review/read activity, when enough activity exists to infer useful study hours
 - available processed sources and plan-review work
 
 The plan is split into short sessions such as `Spaced review`, `Concept practice`, `Short quiz/test`, and `Plan and goal check`. Each session has a suggested local time, a duration, a reason, and a direct action such as `Start practice` or `Process source`.
+
+When you have review history, Learning Boost suggests multiple daily study shots near the hours when you usually mark cards or bits reviewed. If there is not enough history yet, it uses default spacing across now, later today, and wrap-up. This timing only changes the suggested study surface; it does not automatically create Calendar events.
 
 The schedule is guidance, not an external calendar write. It does not create Calendar events unless you use an export flow and confirm the preview.
 
@@ -182,7 +185,9 @@ The practice window also lets you edit a card or bit before saving review feedba
 
 Routine background auto-ingest is bounded so it does not monopolize the app. Each scheduled run processes one pending vault and one pending file. Manual `Process pending now` uses the same one-file batch by default, which keeps the app responsive when one source or provider call is slow.
 
-If a worker exceeds the background time limit, Learning Boost pauses that vault, leaves pending files in place, and records the last worker state instead of marking the source as successfully processed. The next bounded run retries after a short backoff. Use the Provider tab first if the pause repeats because the selected provider is not answering.
+ResourceInbox staging is bounded too. Each automatic pass attempts only a small number of captured-resource queue operations, and file copies are killed after a short timeout. If a watch-folder file is cloud-only, locked, or blocked by macOS permissions, that one ResourceInbox item records the blocker and the rest of the app stays usable. The Learning tab shows the blocker in Source Capture status, and you can `Pause`, `Snooze`, or `Stop` Autopilot while you fix the file or move it to a readable local folder.
+
+If a worker exceeds the background time limit, Learning Boost pauses that vault, leaves pending files in place, and records the last worker state instead of marking the source as successfully processed. The next bounded run retries after a short backoff. If the queue is empty by the next status check, the stale pause clears and the vault returns to watching. Use the Provider tab first if the pause repeats because the selected provider is not answering.
 
 Autopilot also retries older media source pages marked `pending_provider_analysis` once the selected provider is ready. The retry is bounded to a small number of pages per run, so the app stays responsive while old image, audio, or video captures gradually become real learning bits and cards. Pages marked `pending_content` still need readable OCR text, transcript text, local ASR, keyframe OCR, or a manual description before provider analysis can run.
 
@@ -196,13 +201,15 @@ Files, Archive, Topics, and the side Topics list report explicit loading states:
 - `stale_refreshing`: cached rows remain visible while a background refresh runs.
 - `error`: indexing failed or timed out.
 
-The app no longer treats a loading index as “No processed files yet.” If indexing takes too long, the table shows a bounded status and then refreshes automatically on the next tab/sidebar read instead of polling forever or asking for a manual retry. Slow capture scans and background ingest work are kept off the main tab-loading path so these lists can stay responsive.
+The app no longer treats a loading index as “No processed files yet.” It loads persisted cached rows first. If no cache exists, it shows a bounded empty/error state with a refresh option instead of polling forever. Slow capture scans, historical backfill, and background ingest work are kept off the main tab-loading path so these lists can stay responsive.
 
 Learning Boost now treats the configured vault root and its persisted vault cache as the normal vault source. Background tab workers receive that cached vault list directly, so they do not rediscover every Obsidian app vault on each refresh. The Obsidian registry file is opt-in only with `LLM_WIKI_INCLUDE_OBSIDIAN_REGISTRY=1`, so a slow or locked `obsidian.json` file does not block Files, Archive, Topics, side Topics, shared settings, or Learning startup.
 
-When a deep Learning scan is slow, the Learning tab opens from the persisted Learning cache if one is available. If no cache has been written yet, it opens a minimal vault-only view instead of blocking the whole app. The deeper automation, coaching, ResourceInbox, card/bit, and plan refresh then catches up in background workers. This means the vault selector and core app controls should remain reachable even while iCloud or Obsidian is still syncing.
+When a deep Learning scan is slow, the Learning tab opens from the persisted Learning cache if one is available. If no cache has been written yet, it opens a minimal vault-only view instead of blocking the whole app. Use the visible refresh/action controls to run a bounded deeper read when needed. This means the vault selector and core app controls should remain reachable even while iCloud or Obsidian is still syncing.
 
-Startup Learning backfill also runs in a separate worker. It may repair old source pages and source-to-plan links in the background, but it should not block Files, Archive, Topics, Provider, or Status requests.
+The Autopilot status strip uses a fast snapshot path. It reads small settings files, shallow `raw/`, `raw/input/`, and `raw/inbox/` counts, ResourceInbox counts, and notification counts instead of waiting for the full Learning scan. Pause, Snooze, Stop, Resume, and notification status should therefore stay visible even if a deep card/bit refresh is still running.
+
+Historical Learning backfill is opt-in. It may repair old source pages and source-to-plan links, but it is intentionally not part of normal startup because old iCloud files can block open calls. Run `npm run learning:backfill` from Terminal, or set `LLM_WIKI_ENABLE_STARTUP_LEARNING_BACKFILL=1` only when you are deliberately doing a startup repair pass.
 
 ## Plans And Goals
 

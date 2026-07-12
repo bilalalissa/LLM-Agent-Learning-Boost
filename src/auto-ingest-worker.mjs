@@ -57,7 +57,10 @@ async function main() {
         config,
         provider,
         force: workerOptions.force === true,
-        resourceLimit: workerOptions.resourceLimit || workerOptions.limit || 12
+        resourceLimit: workerOptions.resourceLimit || workerOptions.limit || 12,
+        maxQueueAttempts: workerOptions.maxQueueAttempts,
+        copyTimeoutMs: workerOptions.copyTimeoutMs,
+        pendingMediaScanLimit: workerOptions.pendingMediaScanLimit
       });
       vaultResult.automationResult = automationResult;
       processed += Number(automationResult?.processed || 0);

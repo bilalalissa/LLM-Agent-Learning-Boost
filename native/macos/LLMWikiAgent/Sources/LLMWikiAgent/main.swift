@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import Darwin
 import ServiceManagement
 import UniformTypeIdentifiers
 import UserNotifications
@@ -41,12 +42,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.setActivationPolicy(.regular)
         ensureConfig()
         repairDefaultConfigIfPossible()
-        configureNotifications()
         installStatusItem()
         makeWindow()
         startServer()
-        runStartupChecks()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.runStartupChecks()
+        }
         loadAppWhenReady()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            self?.configureNotifications()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -94,8 +99,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func configureNotifications() {
-        let center = UNUserNotificationCenter.current()
-        center.delegate = self
         DispatchQueue.main.async {
             self.notificationPollTimer?.invalidate()
             self.notificationPollTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
@@ -195,6 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func requestNotificationAuthorizationIfNeeded(completion: @escaping (UNAuthorizationStatus, String?) -> Void) {
         let center = UNUserNotificationCenter.current()
+        center.delegate = self
         center.getNotificationSettings { settings in
             let status = settings.authorizationStatus
             if self.isNotificationAuthorized(status) {
@@ -238,6 +242,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func deliverLearningNotification(id: String?, title: String, body: String, completion: @escaping (String?) -> Void) {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -247,7 +253,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             content: content,
             trigger: nil
         )
-        UNUserNotificationCenter.current().add(request) { error in
+        center.add(request) { error in
             completion(error?.localizedDescription)
         }
     }
@@ -1287,7 +1293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return true
         }
         if provider == "openai_subscription" {
-            return runQuick(["codex", "login", "status"]).lowercased().contains("logged in")
+            return commandExists("codex")
         }
         let keyNames = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_COMPAT_API_KEY", "GEMINI_API_KEY", "GEMINI_OAUTH_ACCESS_TOKEN"]
         return keyNames.contains { key in
@@ -1316,8 +1322,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         p.standardOutput = pipe
         p.standardError = pipe
         try? p.run()
-        p.waitUntilExit()
+        let deadline = Date().addingTimeInterval(3)
+        while p.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if p.isRunning {
+            p.terminate()
+            Thread.sleep(forTimeInterval: 0.1)
+            if p.isRunning {
+                kill(p.processIdentifier, SIGKILL)
+            }
+        }
         return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    }
+
+    private func commandExists(_ command: String) -> Bool {
+        for folder in expandedPath().split(separator: ":") {
+            let path = "\(folder)/\(command)"
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return true
+            }
+        }
+        return false
     }
 
     private func expandTilde(_ path: String) -> String {

@@ -14,6 +14,7 @@ import {
   updateAutomationSettings,
   updateLearningNotificationAction
 } from "../src/learning-automation.mjs";
+import { countPendingMediaPages } from "../src/ingest-lib.mjs";
 import { ensureLearningScaffold } from "../src/learning-store.mjs";
 
 function makeVault() {
@@ -60,6 +61,18 @@ test("automation settings can pause only the vault autopilot", () => {
   assert.equal(settings.learningAutopilot, false);
   assert.equal(settings.autoDraftPlans, false);
   assert.equal(status.status, "paused");
+});
+
+test("stale runtime pause clears from status when no pending learning work remains", () => {
+  const { vault } = makeVault();
+  const status = learningAutomationStatus(vault, {
+    status: "paused",
+    detail: "Learning Autopilot paused after a slow file timed out."
+  });
+
+  assert.equal(status.status, "watching");
+  assert.equal(status.recoveredFromStaleRuntime, true);
+  assert.match(status.detail, /No pending learning sources/);
 });
 
 test("automation settings support pause snooze resume and stop controls", async () => {
@@ -311,6 +324,7 @@ Provider analysis is pending.
         }
       },
       force: true,
+      reprocessPendingMedia: true,
       pendingMediaLimit: 1
     });
     const page = fs.readFileSync(sourcePage, "utf8");
@@ -324,4 +338,40 @@ Provider analysis is pending.
     if (previous === undefined) delete process.env.LEARNING_BOOST_TESSERACT_COMMAND;
     else process.env.LEARNING_BOOST_TESSERACT_COMMAND = previous;
   }
+});
+
+test("pending media scan can be capped for automatic startup checks", async () => {
+  const { vault } = makeVault();
+  const sourceDir = path.join(vault, "wiki", "sources");
+  const assetDir = path.join(vault, "raw", "assets");
+  fs.mkdirSync(sourceDir, { recursive: true });
+  fs.mkdirSync(assetDir, { recursive: true });
+  fs.writeFileSync(path.join(assetDir, "late.png"), "fake image");
+  for (let index = 0; index < 150; index += 1) {
+    const media = index === 149;
+    fs.writeFileSync(path.join(sourceDir, `source-${String(index).padStart(3, "0")}.md`), media
+      ? "---\nmedia_kind: image\nmedia_analysis_status: pending_content\nsource_path: raw/assets/late.png\n---\n# Late media\n"
+      : "---\ntype: source\n---\n# Ordinary source\n");
+  }
+
+  assert.equal(countPendingMediaPages(vault, { limit: 1, maxScanned: 40 }), 0);
+  assert.equal(countPendingMediaPages(vault, { limit: 1, maxScanned: 200 }), 1);
+
+  let providerCalls = 0;
+  const result = await runLearningAutomationForVault(vault, {
+    config: { provider: "openai_compat", providerTimeoutMs: 1000, ingestMaxChars: 4000 },
+    provider: {
+      async complete() {
+        providerCalls += 1;
+        return "READY";
+      }
+    },
+    force: true,
+    reprocessPendingMedia: true,
+    pendingMediaLimit: 1,
+    pendingMediaScanLimit: 40
+  });
+
+  assert.equal(result.status, "idle");
+  assert.equal(providerCalls, 0);
 });

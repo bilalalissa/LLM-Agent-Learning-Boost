@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 
 const serverSource = fs.readFileSync(path.resolve("src/server.mjs"), "utf8");
+const automationSource = fs.readFileSync(path.resolve("src/learning-automation.mjs"), "utf8");
 const clipperPopupSource = fs.readFileSync(path.resolve("extension/arc-clipper/popup.js"), "utf8");
 const clipperPopupHtml = fs.readFileSync(path.resolve("extension/arc-clipper/popup.html"), "utf8");
 const clipperBackgroundSource = fs.readFileSync(path.resolve("extension/arc-clipper/background.js"), "utf8");
@@ -107,6 +108,9 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /notificationTargetType/);
   assert.match(serverSource, /prefers-reduced-motion/);
   assert.match(serverSource, /api\/learning\/automation-status/);
+  assert.match(serverSource, /fastLearningAutomationStatusForVault/);
+  assert.match(serverSource, /fastPendingRawCandidates/);
+  assert.match(serverSource, /safeReadJsonlLimited/);
   assert.match(serverSource, /api\/learning\/automation-settings/);
   assert.match(serverSource, /api\/learning\/process-pending/);
   assert.match(serverSource, /api\/learning\/notifications/);
@@ -261,13 +265,19 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
     "Learning Profile Summary",
     "Mobile Study",
     "Learning Boost Mobile Study",
-    "Reviewed from mobile study."
+    "Reviewed from mobile study.",
+    "recent study activity",
+    "default spacing"
   ]) {
     assert.match(serverSource, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
   assert.match(serverSource, /renderLearningTimeline/);
   assert.match(serverSource, /renderLearningDailyStudyPlan/);
   assert.match(serverSource, /buildFastDailyStudyPlan/);
+  assert.match(serverSource, /fastReviewActivity/);
+  assert.match(serverSource, /fastStudyTimes/);
+  assert.match(serverSource, /timingBasis/);
+  assert.match(serverSource, /activeHours/);
   assert.match(serverSource, /renderMobileStudyHtml/);
   assert.match(serverSource, /mobileStudyPayload/);
   assert.match(serverSource, /authorizedMobileStudyRequest/);
@@ -277,6 +287,10 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /learning-daily-plan/);
   assert.match(serverSource, /learning-daily-sessions/);
   assert.match(serverSource, /automationControlText/);
+  assert.match(automationSource, /recoveredFromStaleRuntime/);
+  assert.match(serverSource, /autoIngestVaultCursor/);
+  assert.match(serverSource, /Learning Autopilot is checking/);
+  assert.doesNotMatch(serverSource, /const pendingRawCount = safeRawCandidateCount\(vaultPath\);/);
   assert.match(serverSource, /Resume/);
   assert.match(serverSource, /Snooze 1 hour/);
   assert.match(serverSource, /Automatic learning stopped/);

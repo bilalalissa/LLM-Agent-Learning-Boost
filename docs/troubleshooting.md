@@ -10,11 +10,17 @@ The app should keep cached rows visible while a background index refresh runs. I
 
 Learning Boost uses the configured `VAULTS_ROOT` and its persisted vault cache for normal tab loading. The Obsidian registry file is not read unless you explicitly set `LLM_WIKI_INCLUDE_OBSIDIAN_REGISTRY=1`, so a slow or locked `~/Library/Application Support/obsidian/obsidian.json` should not block normal tab loading.
 
-If Learning opens while a deep scan is slow, it uses the persisted Learning cache when available. If no cache exists yet, it opens a minimal vault-only view instead of blocking the app. After iCloud finishes syncing, the tabs refresh again automatically; changing tabs also triggers a fresh bounded read.
+If Learning opens while a deep scan is slow, it uses the persisted Learning cache when available. If no cache exists yet, it opens a minimal vault-only view instead of blocking the app. Use the visible refresh/retry controls when you want a fresh bounded scan; normal tab opening stays cache-first so iCloud cannot freeze the UI.
 
-Startup Learning backfill is a background worker. It may repair older source pages and source-to-plan links, but it should not block the main server. If the app was updated while an older build was stuck, reinstalling with `./scripts/install_macos_app.sh` also stops stale orphan workers so old tab scans do not keep running beside the new app.
+Autopilot status is intentionally lighter than the full Learning scan. It reads only small Learning settings, shallow pending-source counts, and notification counters, so Pause, Snooze, Stop, Resume, and alert counts remain available while deeper card/bit refreshes continue in the background.
 
-If a Local sidebar topic opens with a cached summary instead of full page content, the app process could not read that live vault file quickly enough. The fallback uses the cached topic title, path, summary, type, and updated date so navigation still works. Grant `/Applications/LLM Agent Learning Boost.app` access to the vault/iCloud folder in macOS Privacy settings and make sure the file is downloaded locally. The sidebar will refresh automatically on the next bounded topic read.
+Historical Learning backfill is now opt-in maintenance. It may repair older source pages and source-to-plan links, but it is not launched on every app start because old iCloud source pages can be slow to open. To run it intentionally from Terminal, use `npm run learning:backfill`. If you are debugging a development build and want startup backfill, set `LLM_WIKI_ENABLE_STARTUP_LEARNING_BACKFILL=1`.
+
+If a Local sidebar topic opens with a cached summary instead of full page content, the app process could not read that live vault file quickly enough. The fallback uses the cached topic title, path, summary, type, and updated date so navigation still works. The app now reads vault pages directly from the Node process instead of shelling out through a short `cat` timeout, which improves iCloud-backed vault reads. If it still happens, grant `/Applications/LLM Agent Learning Boost.app` access to the vault/iCloud folder in macOS Privacy settings and make sure the file is downloaded locally. The sidebar will refresh automatically on the next bounded topic read.
+
+## Learning Says Provider Paused But No Files Are Pending
+
+Learning Autopilot records a pause when a background worker exceeds its time limit. If the pending queue is empty by the next status check, the app clears that stale pause and returns the vault to watching. If the warning repeats with pending files still listed, open Provider and confirm the selected provider can answer a short readiness probe.
 
 ## Time Or Date Looks Wrong
 
@@ -89,6 +95,14 @@ For audio/video transcription, install or expose a working `whisper` command on 
 Older installer builds used an AppleScript app-name lookup before replacing the app bundle. macOS could show a `Choose Application` dialog asking where `LLMWikiAgent` or `LLM Agent Learning Boost` is. The installer now stops the running helper process directly and does not trigger that chooser.
 
 If the dialog is already open, cancel it once, reinstall the current app, and relaunch from `/Applications/LLM Agent Learning Boost.app`.
+
+Current installs place the real app bundle in `~/Applications/LLM Agent Learning Boost.app` and create `/Applications/LLM Agent Learning Boost.app` as a symlink. This avoids macOS freezing the development bundle during replacement while preserving the normal `/Applications` launch path.
+
+## iPhone Or iPad Alerts Do Not Appear
+
+macOS notifications do not always relay to iPhone or iPad. To pass Learning Boost alerts through the Apple ecosystem, enable `Sync alerts to Apple devices via Reminders` in Learning Autopilot. The app mirrors privacy-safe alert titles into an Apple Reminders list named `Learning Boost`; iCloud Reminders can then notify other Apple devices if Reminders sync, notification permission, and Focus settings allow it.
+
+Use `/mobile` for active study on iPhone or iPad. Use Reminders mirroring for cross-device alerts.
 
 ## RemNote Export Requires Confirmation
 

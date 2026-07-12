@@ -2,7 +2,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile, execFileSync, spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { formatLocalDateKey, formatLocalDateTime, resolveLocalTimeZone } from "./time.mjs";
 import { deleteArchivedItems } from "./archive-delete.mjs";
@@ -84,6 +84,7 @@ let autoIngestIntervalMs = 0;
 let autoIngestStartTimer = null;
 let autoIngestBackoffUntil = 0;
 let autoIngestWorker = null;
+let autoIngestVaultCursor = 0;
 let startupLearningBackfillStarted = false;
 let startupLearningBackfillWorker = null;
 let lastIngestMessage = compactStatusMessage("Auto-ingest has not run yet.");
@@ -121,12 +122,15 @@ const listTabKinds = new Set(["files", "archives", "topics"]);
 const tabCacheDir = path.join(os.homedir(), "Library", "Application Support", "LLM Agent Learning Boost", "tab-cache");
 const startupTabRefreshDelayMs = positiveEnvNumber("LLM_WIKI_STARTUP_TAB_REFRESH_DELAY_MS", 12000);
 const startupAutoIngestDelayMs = positiveEnvNumber("LLM_WIKI_STARTUP_AUTO_INGEST_DELAY_MS", 30000);
+const autoRefreshTabs = process.env.LLM_WIKI_AUTO_REFRESH_TABS === "1";
+const autoResolveProviderBlockedNotifications = process.env.LLM_WIKI_RESOLVE_PROVIDER_BLOCKED_NOTIFICATIONS === "1";
 const learningAutomationRuntime = new Map();
 let vaultPathCache = [];
 let vaultPathCacheRoot = "";
 const captureScanRuntime = new Map();
 const captureScanWorkers = new Map();
 installSyncReadDirTrace();
+installSyncReadFileTrace();
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
@@ -551,9 +555,18 @@ const server = http.createServer(async (request, response) => {
         detail: "This is a privacy-safe test notification.",
         actions: ["Open Learning", "Review alerts"]
       });
-      const reminderMirror = await syncNotificationReminderMirrorIfEnabled(vaultPath);
+      void syncNotificationReminderMirrorIfEnabled(vaultPath).then(() => refreshTabData("learning")).catch((error) => {
+        console.error(`[learning-reminders] ${error.stack || error.message}`);
+      });
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ vault: vaultName(vaultPath), notification, reminderMirror }));
+      response.end(JSON.stringify({
+        vault: vaultName(vaultPath),
+        notification,
+        reminderMirror: {
+          queued: true,
+          detail: "Apple Reminders mirroring will run in the background when enabled."
+        }
+      }));
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: error.message }));
@@ -1433,11 +1446,13 @@ const server = http.createServer(async (request, response) => {
 
 server.listen(config.chatPort, config.bridgeHost, () => {
   console.log(`LLM Agent Learning Boost UI: http://${config.bridgeHost}:${config.chatPort}`);
+  hydratePersistedTabCachesAtStartup();
+  void primeVaultPathCacheAsync(config);
   setTimeout(() => {
     void localAiRouterSupervisor.start();
   }, 1000);
   scheduleStartupLearningBackfill();
-  if (process.env.LLM_WIKI_DISABLE_STARTUP_TAB_REFRESH !== "1") {
+  if (process.env.LLM_WIKI_ENABLE_STARTUP_TAB_REFRESH === "1") {
     ["files", "archives", "topics"].forEach((kind, index) => {
       setTimeout(() => scheduleTabDataRefresh(kind), startupTabRefreshDelayMs + (index * 2500));
     });
@@ -1453,7 +1468,7 @@ async function startAutoIngest() {
 }
 
 function scheduleStartupLearningBackfill() {
-  if (startupLearningBackfillStarted || process.env.LLM_WIKI_DISABLE_STARTUP_LEARNING_BACKFILL === "1") return;
+  if (startupLearningBackfillStarted || process.env.LLM_WIKI_ENABLE_STARTUP_LEARNING_BACKFILL !== "1") return;
   startupLearningBackfillStarted = true;
   const delay = positiveEnvNumber("LLM_WIKI_STARTUP_LEARNING_BACKFILL_DELAY_MS", 15000);
   setTimeout(() => {
@@ -1514,11 +1529,23 @@ function ensureAutoIngestScheduler() {
   if (!config.autoIngestOnStart) {
     stopAutoIngestScheduler();
     lastIngestMessage = reportStatus("Automatic raw file processing is off. Enable it to process raw/inbox and raw/input automatically.");
+    ingestProgress = progressState({
+      completed: 1,
+      total: 1,
+      vault: "",
+      detail: lastIngestMessage
+    });
     return;
   }
   if (autoIngestTimer && autoIngestIntervalMs === config.watchIntervalMs) return;
   stopAutoIngestScheduler();
   lastIngestMessage = reportStatus("Automatic raw file processing is on. Watching raw/inbox and raw/input for every vault.");
+  ingestProgress = progressState({
+    completed: 1,
+    total: 1,
+    vault: "",
+    detail: lastIngestMessage
+  });
   autoIngestStartTimer = setTimeout(() => {
     autoIngestStartTimer = null;
     void startAutoIngest();
@@ -1594,15 +1621,79 @@ function installSyncReadDirTrace() {
   }
 }
 
+function installSyncReadFileTrace() {
+  if (process.env.LLM_WIKI_TRACE_SYNC_READFILE !== "1") return;
+  const traceFile = process.env.LLM_WIKI_TRACE_SYNC_READFILE_FILE || "";
+  const original = fs.readFileSync.bind(fs);
+  try {
+    fs.readFileSync = function tracedReadFileSync(target, options) {
+      try {
+        const stack = new Error().stack
+          ?.split("\n")
+          .slice(2, 8)
+          .map((line) => line.trim())
+          .join(" | ") || "";
+        const line = `[sync-readfile] ${new Date().toISOString()} ${String(target)}${stack ? ` ${stack}` : ""}`;
+        process._rawDebug(line);
+        if (traceFile) fs.appendFileSync(traceFile, `${line}\n`, "utf8");
+      } catch {
+        // Tracing must never affect app behavior.
+      }
+      return original(target, options);
+    };
+  } catch {
+    // Some runtimes may not allow patching the imported fs object.
+  }
+}
+
 function cachedVaultPaths(currentConfig = config, options = {}) {
   const root = path.resolve(currentConfig.vaultsRoot || ".");
   if (vaultPathCacheRoot === root && vaultPathCache.length) return vaultPathCache;
   const persisted = readPersistedVaultPaths(currentConfig);
   if (persisted.length) return setVaultPathCache(currentConfig, persisted, { persist: false });
-  const derived = deriveVaultPathsFromPersistedCaches(currentConfig);
-  if (derived.length) return setVaultPathCache(currentConfig, derived, { persist: true });
   if (options.allowScan === true) return setVaultPathCache(currentConfig, listVaults(currentConfig.vaultsRoot), { persist: true });
   return [];
+}
+
+async function primeVaultPathCacheAsync(currentConfig = config) {
+  const root = path.resolve(currentConfig.vaultsRoot || ".");
+  if (vaultPathCacheRoot === root && vaultPathCache.length) return vaultPathCache;
+  try {
+    const entries = await fs.promises.readdir(root, { withFileTypes: true });
+    const vaultPaths = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const full = path.join(root, entry.name);
+      if (await looksLikeVaultDirectoryAsync(full, entry.name)) vaultPaths.push(full);
+    }
+    if (vaultPaths.length) {
+      setVaultPathCache(
+        currentConfig,
+        vaultPaths.sort((a, b) => vaultName(a).localeCompare(vaultName(b), undefined, { sensitivity: "base" })),
+        { persist: false }
+      );
+    }
+    return vaultPathCacheRoot === root ? vaultPathCache : [];
+  } catch (error) {
+    console.warn(`[tab-data] could not prime vault cache: ${error.message}`);
+    return [];
+  }
+}
+
+async function looksLikeVaultDirectoryAsync(vaultPath, name) {
+  if (String(name || "").endsWith("-vault")) return true;
+  return (await pathExistsAsync(path.join(vaultPath, ".obsidian"))) ||
+    (await pathExistsAsync(path.join(vaultPath, "AGENTS.md"))) ||
+    (await pathExistsAsync(path.join(vaultPath, "CLAUDE.md")));
+}
+
+async function pathExistsAsync(file) {
+  try {
+    await fs.promises.access(file);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function setVaultPathCache(currentConfig = config, vaultPaths = [], options = {}) {
@@ -1665,10 +1756,15 @@ function writePersistedVaultPaths(currentConfig = config, vaultPaths = []) {
 
 function cachedTabPayload(kind) {
   const state = tabDataCache[kind] || cacheState();
-  recoverStuckTabLoading(kind, state);
   hydratePersistedTabCache(kind, state);
+  recoverStuckTabLoading(kind, state);
   const stale = isTabCacheStale(state);
-  if ((!state.ready || stale) && !state.loading) scheduleTabDataRefresh(kind);
+  if (autoRefreshTabs && (!state.ready || stale) && !state.loading) scheduleTabDataRefresh(kind);
+  if (!autoRefreshTabs && listTabKinds.has(kind) && !state.ready && !state.loading) {
+    state.ready = true;
+    state.error = state.error || "No cached rows are available yet. Use Refresh to scan this tab.";
+    state.updatedAt = state.updatedAt || new Date().toISOString();
+  }
   const key = kind === "archives" ? "archives" : kind;
   const status = tabPayloadStatus(state, stale);
   return {
@@ -1709,6 +1805,24 @@ function hydratePersistedTabCache(kind, state) {
   state.error = state.error || "";
   state.updatedAt = persisted.updatedAt || new Date().toISOString();
   updateVaultCacheFromRows(state.items);
+}
+
+function hydratePersistedTabCachesAtStartup() {
+  for (const kind of listTabKinds) {
+    hydratePersistedTabCache(kind, tabDataCache[kind]);
+  }
+  const learning = readPersistedLearningCache();
+  if (learning?.data?.vaults?.length && !tabDataCache.learning.data?.vaults?.length) {
+    tabDataCache.learning = {
+      ...tabDataCache.learning,
+      data: learning.data,
+      ready: true,
+      loading: false,
+      error: "",
+      updatedAt: learning.updatedAt || new Date().toISOString()
+    };
+    updateVaultCacheFromLearning(learning.data);
+  }
 }
 
 function listTopicsFromFastIndexes(currentConfig) {
@@ -1781,7 +1895,6 @@ function dateFromFastLocal(value) {
 
 function cachedLearningPayload() {
   const state = tabDataCache.learning || cacheState();
-  hydratePersistedLearningCache(state);
   if (!state.data?.vaults?.length) {
     const minimal = buildMinimalLearningPayload(config);
     if (minimal.vaults.length) {
@@ -1793,7 +1906,7 @@ function cachedLearningPayload() {
     }
   }
   const stale = isTabCacheStale(state);
-  if ((!state.ready || stale) && !state.loading) scheduleTabDataRefresh("learning");
+  if (autoRefreshTabs && (!state.ready || stale) && !state.loading) scheduleTabDataRefresh("learning");
   const data = state.data ? enrichLearningRuntime(state.data) : { vaults: [], appProfileIndex: { schemaVersion: 1, profiles: [] } };
   return {
     ...data,
@@ -1835,6 +1948,8 @@ function mobileStudyPayload(url = new URL("http://127.0.0.1/mobile")) {
       id: plan.planId || "",
       title: plan.planTitle || "",
       scheduler: plan.scheduler || "spaced",
+      timingBasis: plan.timingBasis || "default spacing",
+      activeHours: plan.activeHours || [],
       sessionMinutes: plan.sessionMinutes || 25,
       dueCount: plan.dueCount || 0,
       readyCount: plan.readyCount || 0,
@@ -2043,7 +2158,7 @@ function renderMobileStudyHtml(url) {
       vaultSelect.innerHTML = (data.vaults || []).map((name) => '<option value="' + escapeHtml(name) + '"' + (name === data.vault ? " selected" : "") + '>' + escapeHtml(name) + '</option>').join("");
       notice.hidden = data.mobileAccess.tokenConfigured || data.mobileAccess.host === "127.0.0.1";
       notice.textContent = "For iPhone/iPad LAN access, set MAC_BRIDGE_HOST=0.0.0.0 and LEARNING_BOOST_MOBILE_TOKEN in config.env, then open /mobile?token=... from the device.";
-      summary.innerHTML = metric("Due", data.counts.dueCards + data.counts.dueBits) + metric("Ready", data.plan.readyCount) + metric("Cards", data.counts.cards) + metric("Bits", data.counts.bits);
+      summary.innerHTML = metric("Due", data.counts.dueCards + data.counts.dueBits) + metric("Ready", data.plan.readyCount) + metric("Cards", data.counts.cards) + metric("Bits", data.counts.bits) + metric("Timing", data.plan.timingBasis || "default spacing");
       sessions.innerHTML = (data.plan.sessions || []).map(renderSession).join("") || '<p class="muted">No study sessions yet.</p>';
       cards.innerHTML = (data.cards || []).map(renderCard).join("") || '<p class="muted">No cards yet. Process one source first.</p>';
       bits.innerHTML = (data.bits || []).map(renderBit).join("") || '<p class="muted">No bits yet. Process one source first.</p>';
@@ -2076,50 +2191,140 @@ function renderMobileStudyHtml(url) {
 }
 
 function cachedLearningAutomationStatus(vaultParam = "") {
-  const payload = cachedLearningPayload();
   const requested = String(vaultParam || "").trim();
-  const vaults = (payload.vaults || [])
-    .filter((item) => !requested || item.vault === requested)
-    .map((item) => {
-      const runtime = cachedVaultRuntimeForName(item.vault);
-      const automation = item.automation || {};
-      const sourceCapture = item.sourceCapture || {};
-      const notifications = item.notifications || [];
-      return {
-        settings: automation.settings || defaultFastAutomationSettings(),
-        vault: item.vault,
-        running: runtime.running === true || automation.running === true,
-        blocked: runtime.status === "blocked" || automation.blocked === true,
-        status: runtime.status || automation.status || "snapshot",
-        detail: runtime.detail || automation.detail || "Fast Learning snapshot loaded; deep automation status refreshes in the background.",
-        lastRunAt: runtime.lastRunAt || automation.lastRunAt || "",
-        lastSuccessAt: runtime.lastSuccessAt || automation.lastSuccessAt || "",
-        lastBlockedAt: runtime.lastBlockedAt || automation.lastBlockedAt || "",
-        pendingRawCount: Number(automation.pendingRawCount || 0),
-        pendingRaw: Array.isArray(automation.pendingRaw) ? automation.pendingRaw.slice(0, 12) : [],
-        pendingResourceCount: Number(automation.pendingResourceCount || sourceCapture.groups?.length || 0),
-        resourceInboxCount: Number(automation.resourceInboxCount || sourceCapture.groups?.length || 0),
-        sourceCaptureAutoProcess: sourceCapture.settings?.autoProcessCapturedResources !== false,
-        notificationsUnread: notifications.filter((notification) => !notification.readAt && notification.status !== "dismissed").length,
-        notificationsPendingNative: notifications.filter((notification) => notification.status === "pending").length
-      };
-    });
+  const vaultPaths = cachedVaultPaths(config);
+  const vaults = vaultPaths
+    .filter((vaultPath) => !requested || vaultName(vaultPath) === requested)
+    .map((vaultPath) => fastLearningAutomationStatusForVault(vaultPath));
   if (requested && !vaults.length) throw new Error(`Unknown vault: ${requested}`);
   return {
     vaults,
     ingestRunning,
     ingestProgress,
     lastIngestMessage,
-    loading: payload.loading === true,
-    stale: payload.stale === true,
-    error: payload.error || "",
-    updatedAt: payload.updatedAt || ""
+    loading: false,
+    stale: false,
+    error: "",
+    updatedAt: new Date().toISOString()
   };
 }
 
-function cachedVaultRuntimeForName(name) {
-  const vaultPath = cachedVaultPaths(config).find((item) => vaultName(item) === name);
-  return vaultPath ? automationRuntimeFor(vaultPath) : {};
+function fastLearningAutomationStatusForVault(vaultPath) {
+  const vault = vaultName(vaultPath);
+  const cachedVault = (tabDataCache.learning?.data?.vaults || []).find((item) => item?.vault === vault) || {};
+  const settings = {
+    ...defaultFastAutomationSettings(),
+    ...(cachedVault.automation?.settings || {})
+  };
+  const sourceSettings = {
+    ...defaultFastSourceCaptureSettings(),
+    ...(cachedVault.sourceCapture?.settings || {})
+  };
+  const runtime = automationRuntimeFor(vaultPath);
+  const settingsState = automationRuntimeFromSettings(settings);
+  const pendingRaw = fastPendingRawCandidates(vaultPath);
+  const resourceStats = fastResourceInboxStatsFromCache(cachedVault);
+  const notificationStats = fastNotificationStatsFromCache(cachedVault);
+  const runtimeStatus = runtime.status || settingsState.status;
+  const pendingWorkCount = pendingRaw.length + resourceStats.pending;
+  const userPaused = ["paused", "snoozed", "stopped"].includes(settingsState.status);
+  const staleRuntimePause = ["paused", "blocked"].includes(runtimeStatus) && pendingWorkCount === 0 && !userPaused;
+  const effectiveStatus = staleRuntimePause ? settingsState.status : runtimeStatus;
+  const effectiveDetail = staleRuntimePause
+    ? "No pending learning sources. Learning Autopilot is watching for safe work."
+    : (runtime.detail || settingsState.detail);
+  return {
+    settings,
+    vault,
+    running: runtime.running === true,
+    blocked: effectiveStatus === "blocked",
+    status: effectiveStatus,
+    detail: effectiveDetail || "Learning Autopilot status snapshot loaded.",
+    recoveredFromStaleRuntime: staleRuntimePause,
+    lastRunAt: runtime.lastRunAt || "",
+    lastSuccessAt: runtime.lastSuccessAt || "",
+    lastBlockedAt: runtime.lastBlockedAt || "",
+    pendingRawCount: pendingRaw.length,
+    pendingMediaCount: 0,
+    pendingRaw: pendingRaw.slice(0, 12),
+    pendingResourceCount: resourceStats.pending,
+    resourceInboxCount: resourceStats.total,
+    sourceCaptureAutoProcess: sourceSettings.autoProcessCapturedResources !== false,
+    notificationsUnread: notificationStats.unread,
+    notificationsPendingNative: notificationStats.pendingNative,
+    notificationsPendingReminderMirror: notificationStats.pendingReminderMirror
+  };
+}
+
+function fastPendingRawCandidates(vaultPath) {
+  const runtime = automationRuntimeFor(vaultPath);
+  return Array.isArray(runtime.pendingRaw) ? runtime.pendingRaw.slice(0, 50) : [];
+}
+
+function fastResourceInboxStats(learningDir) {
+  const items = safeReadJsonlLimited(path.join(learningDir, "resource-inbox.jsonl"), 2 * 1024 * 1024, 5000);
+  const pending = items.filter((item) => !["ingested", "deferred", "deleted"].includes(item.processingStatus)).length;
+  return { total: items.length, pending };
+}
+
+function fastResourceInboxStatsFromCache(cachedVault = {}) {
+  const groups = cachedVault.sourceCapture?.groups;
+  const items = Array.isArray(groups?.resources) ? groups.resources : [];
+  if (items.length) {
+    const pending = items.filter((item) => !["ingested", "deferred", "deleted"].includes(item.processingStatus)).length;
+    return { total: items.length, pending };
+  }
+  const runtime = cachedVault.automation || {};
+  return {
+    total: Number(runtime.resourceInboxCount || 0),
+    pending: Number(runtime.pendingResourceCount || 0)
+  };
+}
+
+function fastNotificationStats(learningDir) {
+  const items = safeReadJsonlLimited(path.join(learningDir, "notifications.jsonl"), 2 * 1024 * 1024, 1000)
+    .filter((item) => item.status !== "dismissed");
+  return {
+    unread: items.filter((item) => !item.readAt).length,
+    pendingNative: items.filter((item) => item.status === "pending" && Number(item.deliveryAttempts || 0) < 5).length,
+    pendingReminderMirror: items.filter((item) => item.reminderMirrorStatus === "pending").length
+  };
+}
+
+function fastNotificationStatsFromCache(cachedVault = {}) {
+  const items = Array.isArray(cachedVault.notifications) ? cachedVault.notifications.filter((item) => item.status !== "dismissed") : [];
+  return {
+    unread: items.filter((item) => !item.readAt).length,
+    pendingNative: items.filter((item) => item.status === "pending" && Number(item.deliveryAttempts || 0) < 5).length,
+    pendingReminderMirror: items.filter((item) => item.reminderMirrorStatus === "pending").length
+  };
+}
+
+function safeReadJsonlLimited(file, maxBytes = 1024 * 1024, maxLines = 2000) {
+  let fd = null;
+  try {
+    fd = fs.openSync(file, "r");
+    const buffer = Buffer.alloc(maxBytes);
+    const bytes = fs.readSync(fd, buffer, 0, maxBytes, 0);
+    return buffer.toString("utf8", 0, bytes)
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(-maxLines)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch {}
+    }
+  }
 }
 
 function hydratePersistedLearningCache(state) {
@@ -2346,6 +2551,7 @@ function fastLearningStats({ bits, cards, reviews, plans, sourceLinks }) {
     cards: cards.length,
     plans: plans.length,
     sourceLinks: sourceLinks.length,
+    reviewActivity: fastReviewActivity(reviews),
     allCards: visibleCards,
     allBits,
     reviewedCards: readCardIds.size,
@@ -2373,12 +2579,13 @@ function buildFastDailyStudyPlan({ stats = {}, learningProfile = {} } = {}) {
   const bitsReady = queueBits.length || stats.bits || 0;
   const shortSession = Math.max(5, Math.min(15, Math.round(sessionMinutes / 2)));
   const fullSession = Math.max(shortSession, sessionMinutes);
+  const studyTimes = fastStudyTimes(stats.reviewActivity, learningProfile);
   const sessions = [
     {
       id: "review-now",
       label: "Now",
       title: "Spaced review",
-      time: fastStudyTime(0),
+      time: studyTimes[0] || fastStudyTime(0),
       durationMinutes: shortSession,
       detail: totalDue
         ? `${Math.min(12, totalDue)} due item(s): ${dueCards.length} card(s), ${dueBits.length} bit(s).`
@@ -2391,7 +2598,7 @@ function buildFastDailyStudyPlan({ stats = {}, learningProfile = {} } = {}) {
       id: "concept-practice",
       label: "Today",
       title: "Concept practice",
-      time: fastStudyTime(3),
+      time: studyTimes[1] || fastStudyTime(3),
       durationMinutes: fullSession,
       detail: plan?.title
         ? `Use the best plan queue: ${plan.title}. ${cardsReady} card(s), ${bitsReady} bit(s) ready.`
@@ -2404,7 +2611,7 @@ function buildFastDailyStudyPlan({ stats = {}, learningProfile = {} } = {}) {
       id: "quiz-check",
       label: "Later",
       title: "Short quiz/test",
-      time: fastStudyTime(7),
+      time: studyTimes[2] || fastStudyTime(7),
       durationMinutes: shortSession,
       detail: cardsReady
         ? `Run a short recall check from ${Math.min(8, cardsReady)} plan-prioritized card(s).`
@@ -2417,7 +2624,7 @@ function buildFastDailyStudyPlan({ stats = {}, learningProfile = {} } = {}) {
       id: "plan-adjust",
       label: "Wrap-up",
       title: "Plan and goal check",
-      time: fastStudyTime(10),
+      time: studyTimes[3] || fastStudyTime(10),
       durationMinutes: 5,
       detail: plan?.title
         ? `Check whether ${plan.title} still matches today's cards, bits, and sources.`
@@ -2431,6 +2638,8 @@ function buildFastDailyStudyPlan({ stats = {}, learningProfile = {} } = {}) {
     planId: plan?.id || "",
     planTitle: plan?.title || "",
     scheduler: learningProfile.scheduler || "spaced",
+    timingBasis: (stats.reviewActivity?.activeHours || []).length ? "recent study activity" : "default spacing",
+    activeHours: stats.reviewActivity?.activeHours || [],
     sessionMinutes,
     dueCount: totalDue,
     readyCount: cardsReady + bitsReady,
@@ -2441,6 +2650,48 @@ function buildFastDailyStudyPlan({ stats = {}, learningProfile = {} } = {}) {
 function fastStudyTime(offsetHours) {
   const date = new Date(Date.now() + offsetHours * 60 * 60 * 1000);
   return date.toISOString();
+}
+
+function fastReviewActivity(reviews = []) {
+  const hourCounts = new Map();
+  const cutoff = Date.now() - 45 * 24 * 60 * 60 * 1000;
+  for (const event of reviews || []) {
+    const when = Date.parse(event.reviewedAt || event.created || event.updated || event.at || "");
+    if (!Number.isFinite(when) || when < cutoff) continue;
+    const hour = Number(new Intl.DateTimeFormat("en-CA", {
+      timeZone: config.timeZone || resolveLocalTimeZone(),
+      hour: "numeric",
+      hour12: false
+    }).format(new Date(when)));
+    if (!Number.isFinite(hour)) continue;
+    hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
+  }
+  const activeHours = [...hourCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+    .slice(0, 4)
+    .map(([hour, count]) => ({ hour, count }));
+  return {
+    activeHours,
+    sampleSize: [...hourCounts.values()].reduce((sum, count) => sum + count, 0)
+  };
+}
+
+function fastStudyTimes(activity = {}, learningProfile = {}) {
+  const hours = (activity.activeHours || []).map((item) => Number(item.hour)).filter((hour) => Number.isFinite(hour));
+  const defaults = [0, 3, 7, 10].map(fastStudyTime);
+  if (!hours.length) return defaults;
+  const minute = Math.max(0, Math.min(55, Number(learningProfile.preferredStudyMinute || 0)));
+  const now = new Date();
+  const times = [];
+  for (const hour of hours) {
+    const candidate = new Date(now);
+    candidate.setHours(hour, minute, 0, 0);
+    if (candidate.getTime() < now.getTime() + 5 * 60 * 1000) {
+      candidate.setDate(candidate.getDate() + 1);
+    }
+    times.push(candidate.toISOString());
+  }
+  return [...times, ...defaults].slice(0, 4);
 }
 
 function fastSourceGroups(sourceLinks) {
@@ -2794,19 +3045,20 @@ function refreshTabData(kind = "all", options = {}) {
     tabDataCache[item].lastStartedAt = new Date(started).toISOString();
   }
   console.log(`[tab-data] ${kind} refresh started.`);
-  const resultFile = tempWorkerResultFile("llm-learning-tab-data", kind);
-  const traceFile = `${resultFile}.trace`;
+  const traceFile = process.env.LLM_WIKI_ENABLE_WORKER_TRACE === "1"
+    ? `${tempWorkerResultFile("llm-learning-tab-data", kind)}.trace`
+    : "";
   const workerEnv = {
     ...process.env,
-    LLM_WIKI_ENV_FILE: config.configFile,
-    LLM_WIKI_WORKER_TRACE_FILE: traceFile
+    LLM_WIKI_ENV_FILE: config.configFile
   };
+  if (traceFile) workerEnv.LLM_WIKI_WORKER_TRACE_FILE = traceFile;
   if (workerEnv.LLM_WIKI_INCLUDE_OBSIDIAN_REGISTRY !== "1") {
     workerEnv.LLM_WIKI_SKIP_OBSIDIAN_REGISTRY = "1";
   }
   const knownVaultPaths = cachedVaultPaths(config);
   if (knownVaultPaths.length) workerEnv.LLM_WIKI_VAULT_PATHS = JSON.stringify(knownVaultPaths);
-  const worker = spawn(process.execPath, [path.join(agentRoot, "src", "tab-data-worker.mjs"), kind, resultFile], {
+  const worker = spawn(process.execPath, [path.join(agentRoot, "src", "tab-data-worker.mjs"), kind], {
     cwd: agentRoot,
     env: workerEnv,
     stdio: ["ignore", "pipe", "pipe"]
@@ -2826,11 +3078,10 @@ function refreshTabData(kind = "all", options = {}) {
   const timeout = setTimeout(() => {
     if (workerFinalized || tabDataWorkers.get(kind) !== worker) return;
     workerFinalized = true;
-    clearInterval(resultPoll);
     tabDataWorkers.delete(kind);
     workerTimedOut = true;
     tabDataCache[kind].loading = false;
-    const lastRead = lastWorkerTraceLine(traceFile);
+    const lastRead = traceFile ? lastWorkerTraceLine(traceFile) : "";
     tabDataCache[kind].error = `Tab data scan is taking too long${lastRead ? ` while reading ${lastRead}` : ""}. Try again after iCloud finishes syncing this vault.`;
     tabDataCache[kind].lastFinishedAt = new Date().toISOString();
     console.warn(`[tab-data] ${kind} refresh timed out after ${Date.now() - started}ms.`);
@@ -2838,9 +3089,8 @@ function refreshTabData(kind = "all", options = {}) {
     setTimeout(() => {
       if (tabDataWorkers.get(kind) === worker) worker.kill("SIGKILL");
     }, 1000);
-    cleanupWorkerResult(resultFile);
     cleanupWorkerResult(traceFile);
-  }, 12000);
+  }, 45000);
   tabDataWorkers.set(kind, worker);
   const applyWorkerMessage = (message) => {
       if (!message?.ok) {
@@ -2869,15 +3119,15 @@ function refreshTabData(kind = "all", options = {}) {
       }
       if (!Array.isArray(result[item])) continue;
       updateVaultCacheFromRows(result[item]);
-      const persisted = listTabKinds.has(item) ? readPersistedTabCache(item) : null;
-      const nextItems = result[item].length || !persisted?.items?.length ? result[item] : persisted.items;
+      const existingItems = Array.isArray(tabDataCache[item]?.items) ? tabDataCache[item].items : [];
+      const nextItems = result[item].length || !existingItems.length ? result[item] : existingItems;
       tabDataCache[item] = {
         items: nextItems,
         ready: true,
         loading: false,
-        error: result[item].length || !persisted?.items?.length ? "" : "Live tab scan returned no rows. Showing the last cached rows; retry after iCloud finishes syncing or grant the app vault access.",
+        error: result[item].length || !existingItems.length ? "" : "Live tab scan returned no rows. Showing the current cached rows; retry after iCloud finishes syncing or grant the app vault access.",
         lastFinishedAt: new Date().toISOString(),
-        updatedAt: result[item].length || !persisted?.updatedAt ? new Date().toISOString() : persisted.updatedAt
+        updatedAt: new Date().toISOString()
       };
       if (listTabKinds.has(item) && result[item].length) writePersistedTabCache(item, tabDataCache[item].items, tabDataCache[item].updatedAt);
     }
@@ -2886,7 +3136,6 @@ function refreshTabData(kind = "all", options = {}) {
     if (workerFinalized || tabDataWorkers.get(kind) !== worker) return;
     workerFinalized = true;
     clearTimeout(timeout);
-    clearInterval(resultPoll);
     tabDataWorkers.delete(kind);
     const elapsed = Date.now() - started;
     if (message?.resultFile && !message.result) {
@@ -2899,7 +3148,6 @@ function refreshTabData(kind = "all", options = {}) {
       message = { ok: false, error: "Tab data worker finished without returning rows." };
     }
     if (message && !workerTimedOut) applyWorkerMessage(message);
-    cleanupWorkerResult(resultFile);
     cleanupWorkerResult(traceFile);
     if (early) {
       console.log(`[tab-data] ${kind} refresh result accepted in ${elapsed}ms.`);
@@ -2919,20 +3167,14 @@ function refreshTabData(kind = "all", options = {}) {
       }
     }
   };
-  const resultPoll = setInterval(() => {
-    if (workerFinalized || tabDataWorkers.get(kind) !== worker) return;
-    const message = readWorkerResult(resultFile);
-    if (message?.ok && message.result) finishWorker(message, { early: true });
-  }, 100);
   worker.on("exit", (code) => {
-    let message = readWorkerResult(resultFile) || parseWorkerStdout(workerStdout);
+    let message = parseWorkerStdout(workerStdout);
     finishWorker(message, { code });
   });
   worker.on("error", (error) => {
     if (workerFinalized || tabDataWorkers.get(kind) !== worker) return;
     workerFinalized = true;
     clearTimeout(timeout);
-    clearInterval(resultPoll);
     tabDataWorkers.delete(kind);
     console.warn(`[tab-data] ${kind} refresh failed after ${Date.now() - started}ms: ${error.message}`);
     for (const item of kinds) {
@@ -3026,14 +3268,23 @@ function runProviderStatusWorker(options = {}) {
   providerStatusCache.startedAt = new Date().toISOString();
   providerStatusCache.error = "";
   return new Promise((resolve) => {
-    const resultFile = tempWorkerResultFile("llm-learning-provider-status", "provider");
-    const worker = spawn(process.execPath, [path.join(agentRoot, "src", "provider-status-worker.mjs"), resultFile], {
+    const worker = spawn(process.execPath, [path.join(agentRoot, "src", "provider-status-worker.mjs")], {
       cwd: agentRoot,
       env: { ...process.env, LLM_WIKI_ENV_FILE: config.configFile },
-      stdio: "ignore"
+      stdio: ["ignore", "pipe", "pipe"]
     });
     providerStatusWorker = worker;
     let finalized = false;
+    let workerStdout = "";
+    let workerStderr = "";
+    worker.stdout?.on("data", (chunk) => {
+      workerStdout += chunk.toString();
+      if (workerStdout.length > 1024 * 1024) workerStdout = workerStdout.slice(-1024 * 1024);
+    });
+    worker.stderr?.on("data", (chunk) => {
+      workerStderr += chunk.toString();
+      if (workerStderr.length > 20000) workerStderr = workerStderr.slice(-20000);
+    });
     const finish = (message) => {
       if (finalized || providerStatusWorker !== worker) return;
       finalized = true;
@@ -3041,12 +3292,12 @@ function runProviderStatusWorker(options = {}) {
       providerStatusWorker = null;
       providerStatusCache.loading = false;
       providerStatusCache.startedAt = "";
-      cleanupWorkerResult(resultFile);
       if (message?.ok && message.status) {
         providerStatusCache.data = message.status;
         providerStatusCache.error = "";
       } else {
-        providerStatusCache.error = message?.error || "Provider status refresh failed.";
+        const stderr = compactStatusMessage(workerStderr || "", 240);
+        providerStatusCache.error = message?.error || stderr || "Provider status refresh failed.";
         if (!providerStatusCache.data) providerStatusCache.data = providerStatusFallback(providerStatusCache.error);
       }
       providerStatusCache.updatedAt = new Date().toISOString();
@@ -3057,7 +3308,7 @@ function runProviderStatusWorker(options = {}) {
       setTimeout(() => worker.kill("SIGKILL"), 1000);
       finish({ ok: false, error: "Provider status check timed out. The UI remains available; retry after local provider tools finish responding." });
     }, Math.max(2000, Number(options.timeoutMs || 7000)));
-    worker.on("exit", () => finish(readWorkerResult(resultFile)));
+    worker.on("exit", () => finish(parseWorkerStdout(workerStdout)));
     worker.on("error", (error) => finish({ ok: false, error: error.message }));
   });
 }
@@ -3107,7 +3358,9 @@ function providerStatusFallback(detail) {
 }
 
 function updateVaultCacheFromRows(rows = []) {
-  const names = new Set(cachedVaultPaths(config).map((item) => vaultName(item)));
+  const root = path.resolve(config.vaultsRoot || ".");
+  const existingVaults = vaultPathCacheRoot === root ? vaultPathCache : [];
+  const names = new Set(existingVaults.map((item) => vaultName(item)));
   for (const row of rows || []) {
     if (row?.vault) names.add(String(row.vault));
   }
@@ -3412,7 +3665,7 @@ function createAppleReminderForLearningNotification(vaultPath, item = {}) {
     `set newReminder to make new reminder at end of reminders of targetList with properties {name:${appleScriptLiteral(title)}, body:${appleScriptLiteral(body)}}`,
     "id of newReminder",
     "end tell"
-  ]);
+  ], { timeoutMs: 5000 });
 }
 
 function appleScriptLiteral(value) {
@@ -3586,10 +3839,14 @@ function mediaContentType(file) {
   return types[ext] || "application/octet-stream";
 }
 
-function runOsascript(lines) {
+function runOsascript(lines, options = {}) {
   return new Promise((resolve, reject) => {
     const args = lines.flatMap((line) => ["-e", line]);
-    execFile("osascript", args, { encoding: "utf8" }, (error, stdout, stderr) => {
+    execFile("osascript", args, {
+      encoding: "utf8",
+      timeout: options.timeoutMs || 0,
+      killSignal: "SIGKILL"
+    }, (error, stdout, stderr) => {
       if (error) {
         reject(new Error((stderr || error.message).trim()));
         return;
@@ -3619,14 +3876,21 @@ async function runAutoIngest() {
     ingestProgress = {
       percent: 0,
       completed: 0,
-      total: Math.max(pendingVault.pendingRawCount, 1),
+      total: Math.max(pendingVault.pendingRawCount || 1, 1),
       vault: vaultName(pendingVault.vaultPath),
-      detail: `Learning Autopilot is processing ${Math.min(pendingVault.pendingRawCount, batchSize)} of ${pendingVault.pendingRawCount} pending file(s) in ${vaultName(pendingVault.vaultPath)}.`
+      detail: pendingVault.pendingRawCountKnown
+        ? `Learning Autopilot is processing ${Math.min(pendingVault.pendingRawCount, batchSize)} of ${pendingVault.pendingRawCount} pending file(s) in ${vaultName(pendingVault.vaultPath)}.`
+        : `Learning Autopilot is checking ${vaultName(pendingVault.vaultPath)} for pending sources in a background worker.`
     };
     const workerResult = await runAutoIngestWorker({
       vaultPath: pendingVault.vaultPath,
-      options: { resourceLimit: batchSize },
-      timeoutMs: Math.max((config.providerTimeoutMs || 60000) * 5, 600000)
+      options: {
+        resourceLimit: batchSize,
+        maxQueueAttempts: 3,
+        copyTimeoutMs: 5000,
+        pendingMediaScanLimit: 120
+      },
+      timeoutMs: Math.min(Math.max((config.providerTimeoutMs || 60000) * 2, 120000), 180000)
     });
     let count = 0;
     const completedVaults = workerResult.vaults || [];
@@ -3651,7 +3915,7 @@ async function runAutoIngest() {
     autoIngestBackoffUntil = 0;
     ingestProgress = progressState({
       completed: count,
-      total: Math.max(count, pendingVault.pendingRawCount),
+      total: Math.max(count, pendingVault.pendingRawCount || 1),
       vault: vaultName(pendingVault.vaultPath),
       detail: lastIngestMessage
     });
@@ -3662,7 +3926,7 @@ async function runAutoIngest() {
     const retryAt = formatLocal(new Date(autoIngestBackoffUntil));
     if (timedOut) {
       const partialDetail = error.partialResult?.detail ? ` Last worker state: ${error.partialResult.detail}` : "";
-      const detail = `Learning Autopilot paused for ${vaultName(pendingVault.vaultPath)} after one slow file exceeded the background limit. Pending files were left in place; the next bounded run will retry after ${retryAt}.${partialDetail}`;
+      const detail = `Learning Autopilot paused for ${vaultName(pendingVault.vaultPath)} after a bounded background worker exceeded the time limit. Pending files, if any, were left in place; the next bounded run will retry after ${retryAt}.${partialDetail}`;
       setAutomationRuntime(pendingVault.vaultPath, {
         running: false,
         status: "paused",
@@ -3690,20 +3954,21 @@ async function runAutoIngest() {
 
 function nextAutoIngestVault() {
   const vaults = cachedVaultPaths(config);
-  let fallback = null;
-  for (const vaultPath of vaults) {
-    const pendingRawCount = safeRawCandidateCount(vaultPath);
-    if (!pendingRawCount) continue;
+  if (!vaults.length) return null;
+  for (let index = 0; index < vaults.length; index += 1) {
+    const cursor = (autoIngestVaultCursor + index) % vaults.length;
+    const vaultPath = vaults[cursor];
     const runtime = automationRuntimeFor(vaultPath);
-    if (!fallback) fallback = { vaultPath, pendingRawCount };
-    if (runtime.status !== "blocked") return { vaultPath, pendingRawCount };
+    if (runtime.status === "stopped") continue;
+    autoIngestVaultCursor = (cursor + 1) % vaults.length;
+    return { vaultPath, pendingRawCount: 1, pendingRawCountKnown: false };
   }
-  return fallback;
+  return null;
 }
 
 function safeRawCandidateCount(vaultPath) {
   try {
-    return listRawCandidates(vaultPath).length + countPendingMediaPages(vaultPath, { limit: 3 });
+    return listRawCandidates(vaultPath).length;
   } catch (error) {
     console.warn(`[auto-ingest] could not scan ${vaultName(vaultPath)} raw candidates: ${error.message}`);
     return 0;
@@ -4006,6 +4271,7 @@ function writePersistedLearningCache(data, updatedAt = new Date().toISOString())
 }
 
 function cleanupWorkerResult(file) {
+  if (!file) return;
   try {
     fs.rmSync(path.dirname(file), { recursive: true, force: true });
   } catch {
@@ -4135,24 +4401,18 @@ function topicContentFromCachedVault(currentConfig, input = {}) {
 }
 
 function readTopicPageWithTimeout(file) {
-  const timeout = 1500;
   try {
     const stat = fs.statSync(file);
     if (!stat.isFile()) return "";
-    if (stat.size > 2 * 1024 * 1024) {
-      return execFileSync("/usr/bin/head", ["-c", String(2 * 1024 * 1024), file], {
-        encoding: "utf8",
-        maxBuffer: 2 * 1024 * 1024,
-        timeout,
-        killSignal: "SIGKILL"
-      });
+    const bytes = Math.min(stat.size, 2 * 1024 * 1024);
+    const fd = fs.openSync(file, "r");
+    try {
+      const buffer = Buffer.alloc(bytes);
+      const read = fs.readSync(fd, buffer, 0, bytes, 0);
+      return buffer.subarray(0, read).toString("utf8");
+    } finally {
+      fs.closeSync(fd);
     }
-    return execFileSync("/bin/cat", [file], {
-      encoding: "utf8",
-      maxBuffer: 2 * 1024 * 1024,
-      timeout,
-      killSignal: "SIGKILL"
-    });
   } catch {
     return "";
   }
@@ -4232,7 +4492,6 @@ function cachedTopicRow(currentConfig, input = {}) {
   const requestedTitle = String(input.title || "").trim().toLowerCase();
   const requestedPath = String(input.path || "").trim().replace(/\.md$/i, "");
   const state = tabDataCache.topics || cacheState();
-  hydratePersistedTabCache("topics", state);
   const rows = state.items?.length ? state.items : listTopicsFromFastIndexes(currentConfig);
   return (rows || []).find((item) => {
     if (requestedVault && item.vault !== requestedVault) return false;
@@ -4455,6 +4714,7 @@ function recordProviderFallbackIfNeeded(status) {
 }
 
 function resolveProviderBlockedNotificationsIfReady(status = {}) {
+  if (!autoResolveProviderBlockedNotifications) return;
   if (status.statusColor !== "green") return;
   for (const vaultPath of cachedVaultPaths(config)) {
     try {
