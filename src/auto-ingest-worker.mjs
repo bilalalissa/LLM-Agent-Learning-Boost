@@ -60,6 +60,7 @@ async function main() {
         resourceLimit: workerOptions.resourceLimit || workerOptions.limit || 12,
         maxQueueAttempts: workerOptions.maxQueueAttempts,
         copyTimeoutMs: workerOptions.copyTimeoutMs,
+        reprocessPendingMedia: workerOptions.reprocessPendingMedia === true,
         pendingMediaScanLimit: workerOptions.pendingMediaScanLimit
       });
       vaultResult.automationResult = automationResult;

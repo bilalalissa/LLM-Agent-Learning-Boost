@@ -41,7 +41,9 @@ export async function ingestVault(vaultPath, config, provider = createProvider(c
       : (options.reprocessPendingMedia === true ? 2 : 0);
     results.push(...await reprocessPendingMediaPages(vaultPath, provider, {
       limit: pendingMediaLimit,
-      maxScanned: options.pendingMediaScanLimit
+      maxScanned: options.pendingMediaScanLimit,
+      ingestMaxChars: config.ingestMaxChars,
+      config
     }));
   }
   return results;
@@ -278,7 +280,7 @@ async function reprocessPendingMediaPages(vaultPath, provider, options = {}) {
     const sourceTitle = text.match(/^#\s+(.+)$/m)?.[1]?.trim() || path.basename(assetPath, path.extname(assetPath));
     const ext = path.extname(assetPath).toLowerCase();
     const media = mediaMetadata(assetPath, assetRel, mediaKind, ext);
-    const processedSource = processSourceFile(assetPath, { assetRel });
+    const processedSource = processSourceFile(assetPath, { assetRel, ingestMaxChars: options.ingestMaxChars });
     const analysis = mediaRequiresExtractedContent(mediaKind) && !hasMeaningfulExtractedContent(processedSource)
       ? pendingMediaAnalysis(media, { sourceTitle, processedSource })
       : await analyzeMediaSource(provider, { sourceTitle, media, assetPath, processedSource, vault: vaultName(vaultPath) });
@@ -299,6 +301,16 @@ async function reprocessPendingMediaPages(vaultPath, provider, options = {}) {
     const learningReady = Boolean(analysis.learning_boost);
     const conceptPages = learningReady ? createConceptPages(vaultPath, { date, analysis, sourceRel }) : [];
     updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages });
+    const learningResult = learningReady
+      ? appendLearningOutputs(vaultPath, {
+        sourceRel,
+        sourceTitle,
+        processedRel: assetRel,
+        boost: analysis.learning_boost,
+        sourceKind: `${mediaKind} reprocess`,
+        processingNotes: [...(processedSource.processingNotes || []), ...(analysis.processing_notes || [])]
+      }, options.config || {})
+      : { cardsCreated: 0, bitsCreated: 0, pendingProviderAnalysis: analysis.status === "pending_provider_analysis", pendingContent: analysis.status === "pending_content" };
     appendLog(vaultPath, {
       date,
       sourceRel,
@@ -316,6 +328,7 @@ async function reprocessPendingMediaPages(vaultPath, provider, options = {}) {
       sourcePage: sourceRel,
       processed: assetRel,
       conceptPages,
+      learning: learningResult,
       reprocessed: true,
       pendingContent: analysis.status === "pending_content",
       pendingProviderAnalysis: analysis.status === "pending_provider_analysis"

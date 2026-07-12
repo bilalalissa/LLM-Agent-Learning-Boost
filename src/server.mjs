@@ -3919,6 +3919,7 @@ async function runAutoIngest() {
         resourceLimit: batchSize,
         maxQueueAttempts: 3,
         copyTimeoutMs: 5000,
+        reprocessPendingMedia: pendingVault.pendingMediaCount > 0,
         pendingMediaScanLimit: 120
       },
       timeoutMs: autoIngestWorkerTimeoutMs()

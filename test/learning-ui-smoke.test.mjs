@@ -298,6 +298,7 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /const pendingResourceCount = safeQueueableResourceCount\(vaultPath\);/);
   assert.match(serverSource, /const pendingMediaCount = safePendingProviderMediaCount\(vaultPath\);/);
   assert.match(serverSource, /if \(!pendingRawCount && !pendingResourceCount && !pendingMediaCount\) continue;/);
+  assert.match(serverSource, /reprocessPendingMedia: pendingVault\.pendingMediaCount > 0/);
   assert.match(serverSource, /Resume/);
   assert.match(serverSource, /Snooze 1 hour/);
   assert.match(serverSource, /Automatic learning stopped/);

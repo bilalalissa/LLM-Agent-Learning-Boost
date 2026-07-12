@@ -351,6 +351,10 @@ Provider analysis is pending.
     assert.equal(result.processed, 1);
     assert.match(page, /media_analysis_status: analyzed/);
     assert.match(page, /## Learning Boost/);
+    assert.equal(result.results[0].learning.cardsCreated >= 4, true);
+    assert.equal(result.results[0].learning.bitsCreated >= 3, true);
+    assert.equal(fs.existsSync(path.join(vault, ".llm-wiki", "learning", "cards.jsonl")), true);
+    assert.equal(fs.existsSync(path.join(vault, ".llm-wiki", "learning", "bits.jsonl")), true);
     assert.equal(readLearningNotifications(vault).some((item) => item.type === "source_processed"), true);
   } finally {
     if (previous === undefined) delete process.env.LEARNING_BOOST_TESSERACT_COMMAND;
