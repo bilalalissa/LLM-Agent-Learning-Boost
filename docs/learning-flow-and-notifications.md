@@ -104,7 +104,7 @@ Learning Boost also serves a lightweight mobile study page at:
 http://127.0.0.1:8789/mobile
 ```
 
-On the Mac, that page works immediately. It shows the same best-plan study queue used by the Learning tab: due cards, due bits, unread items, short quiz/test sessions, and recent privacy-safe alerts. Marking a card or bit reviewed from the mobile page writes the same local review event as the desktop Learning tab.
+On the Mac, that page works immediately. It shows the same best-plan study queue used by the Learning tab: due cards, due bits, unread items, short quiz/test sessions, and recent privacy-safe alerts. Marking a card or bit reviewed from the mobile page writes the same local review event as the desktop Learning tab. When the page is open on an iPhone or iPad, it refreshes the study queue and alerts every minute, so it can act as a live local learning-alert surface without a simulator.
 
 To reach it from an iPhone or iPad without a Mac simulator, intentionally expose only this local server on a trusted LAN:
 
@@ -122,7 +122,7 @@ http://<your-mac-lan-ip>:8789/mobile?token=choose-a-long-local-token
 
 Keep this on a trusted private network. Non-local mobile requests require the token. The mobile page is intentionally narrow: it can load study queues and record card/bit review state, but it does not expose Provider settings, vault file operations, or export writes.
 
-This is separate from notifications. Use the mobile page for studying cards/bits/quizzes. Use Apple Reminders mirroring for alerts you want to sync through iCloud.
+This is separate from background system notifications. Use the mobile page for studying cards/bits/quizzes and for live alert polling while the page is open. Use Apple Reminders mirroring for alerts you want to sync through iCloud when the mobile page is not open.
 
 ## Dated Learning Timeline
 
@@ -183,9 +183,9 @@ You can add a practice note with the review. The note is stored in the review lo
 
 The practice window also lets you edit a card or bit before saving review feedback. Edits update the relevant `cards.jsonl` or `bits.jsonl` record, while review events remain append-only in `review-log.jsonl`.
 
-Routine background auto-ingest is bounded so it does not monopolize the app. Each scheduled run processes one pending vault and one pending file. Manual `Process pending now` uses the same one-file batch by default, which keeps the app responsive when one source or provider call is slow.
+Routine background auto-ingest is bounded so it does not monopolize the app. Each scheduled run processes one pending vault and one pending file. Manual `Process pending now` uses the same one-file batch and worker timeout by default, which keeps the app responsive when one source or provider call is slow. The default worker budget is capped at 180 seconds unless `LLM_WIKI_AUTO_INGEST_WORKER_TIMEOUT_MS` is set.
 
-ResourceInbox staging is bounded too. Each automatic pass attempts only a small number of captured-resource queue operations, and file copies are killed after a short timeout. If a watch-folder file is cloud-only, locked, or blocked by macOS permissions, that one ResourceInbox item records the blocker and the rest of the app stays usable. The Learning tab shows the blocker in Source Capture status, and you can `Pause`, `Snooze`, or `Stop` Autopilot while you fix the file or move it to a readable local folder.
+ResourceInbox staging is bounded too. Each automatic pass attempts only a small number of captured-resource queue operations, and file copies are killed after a short timeout. Duplicate checks trust stored ResourceInbox path and dedupe metadata rather than rechecking every older queued file on disk, which avoids iCloud-backed queue entries from holding the worker open. If a watch-folder file is cloud-only, locked, or blocked by macOS permissions, that one ResourceInbox item records the blocker and Autopilot waits before retrying that same file again. The rest of the queue and the app stay usable. The Learning tab shows the blocker in Source Capture status, and you can `Pause`, `Snooze`, or `Stop` Autopilot while you fix the file or move it to a readable local folder.
 
 If a worker exceeds the background time limit, Learning Boost marks that vault as `retrying`, leaves pending work in place, and records the last worker state instead of marking the source as successfully processed. The next bounded run retries after a short backoff. If the queue is empty by the next status check, the stale retry clears and the vault returns to watching. Use the Provider tab first if the retry repeats because the selected provider is not answering. `Retrying` is still automatic; `Pause`, `Snooze`, and `Stop` remain explicit user controls.
 

@@ -121,6 +121,7 @@ export function queueResourceInboxForIngest(vaultPath, options = {}) {
 export async function queueResourceInboxForIngestAsync(vaultPath, options = {}) {
   const limit = Math.max(1, Number(options.limit || 12));
   const maxQueueAttempts = Math.max(limit, Number(options.maxQueueAttempts || Math.max(limit * 3, 6)));
+  const retryBackoffMs = Math.max(0, Number(options.retryBackoffMs ?? 30 * 60 * 1000));
   const now = options.now instanceof Date ? options.now : new Date();
   const current = resourceInbox(vaultPath);
   const queued = [];
@@ -140,9 +141,15 @@ export async function queueResourceInboxForIngestAsync(vaultPath, options = {}) 
       next.push(item);
       continue;
     }
+    const retryWait = queueRetryWait(item, now, retryBackoffMs);
+    if (retryWait.waiting) {
+      skipped.push({ id: item.id, title: item.title, reason: retryWait.reason });
+      next.push(item);
+      continue;
+    }
 
     const existingRawInput = normalizeRel(item.rawInput || "");
-    if (existingRawInput && fs.existsSync(path.join(vaultPath, existingRawInput))) {
+    if (existingRawInput && isInsidePath(path.join(vaultPath, existingRawInput), vaultPath)) {
       queued.push({ id: item.id, title: item.title, file: existingRawInput, reused: true });
       if (item.processingStatus === "queued_for_ingest") {
         next.push(item);
@@ -173,7 +180,7 @@ export async function queueResourceInboxForIngestAsync(vaultPath, options = {}) 
     }
 
     const duplicate = prepared.dedupeKey ? existingByKey.get(prepared.dedupeKey) : null;
-    if (duplicate?.rawInput && fs.existsSync(path.join(vaultPath, duplicate.rawInput))) {
+    if (duplicate?.rawInput && isInsidePath(path.join(vaultPath, duplicate.rawInput), vaultPath)) {
       queued.push({ id: item.id, title: item.title, file: duplicate.rawInput, reused: true, duplicateOf: duplicate.id });
       changed = true;
       next.push(queuedItem(item, {
@@ -354,10 +361,25 @@ function existingQueuedResources(vaultPath, items) {
   for (const item of items) {
     const key = item.ingest?.dedupeKey || "";
     const rawInput = normalizeRel(item.rawInput || item.ingest?.rawInput || "");
-    if (!key || !rawInput || !fs.existsSync(path.join(vaultPath, rawInput))) continue;
+    if (!key || !rawInput || !isInsidePath(path.join(vaultPath, rawInput), vaultPath)) continue;
     result.set(key, { id: item.id, rawInput });
   }
   return result;
+}
+
+function queueRetryWait(item = {}, now = new Date(), retryBackoffMs = 0) {
+  const lastError = String(item.ingest?.lastQueueError || "").trim();
+  const lastAttemptAt = Date.parse(item.ingest?.lastQueueAttemptAt || "");
+  if (!lastError || !Number.isFinite(lastAttemptAt) || retryBackoffMs <= 0) {
+    return { waiting: false, reason: "" };
+  }
+  const nextAt = lastAttemptAt + retryBackoffMs;
+  if (now.getTime() >= nextAt) return { waiting: false, reason: "" };
+  const minutes = Math.max(1, Math.ceil((nextAt - now.getTime()) / 60000));
+  return {
+    waiting: true,
+    reason: `Waiting ${minutes} minute${minutes === 1 ? "" : "s"} before retrying the last queue error: ${lastError}`
+  };
 }
 
 function uniqueRawInputRel(vaultPath, item, ext, dedupeKey, now) {

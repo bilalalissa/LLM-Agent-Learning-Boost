@@ -455,7 +455,7 @@ const server = http.createServer(async (request, response) => {
       const workerResult = await runAutoIngestWorker({
         vaultPath,
         options: { force: payload.force === true, resourceLimit: payload.limit || 1 },
-        timeoutMs: Math.max((config.providerTimeoutMs || 60000) * 5, 600000)
+        timeoutMs: autoIngestWorkerTimeoutMs()
       });
       const result = workerResult.vaults?.[0]?.automationResult || {
         status: workerResult.status || "idle",
@@ -2145,6 +2145,10 @@ function renderMobileStudyHtml(url) {
       }
     });
     loadStudy(INITIAL_VAULT);
+    setInterval(() => {
+      if (document.hidden) return;
+      loadStudy(vaultSelect.value);
+    }, 60000);
     async function loadStudy(vault) {
       const query = vault ? "?vault=" + encodeURIComponent(vault) : "";
       const response = await fetch(withToken("/api/mobile/study" + query));
@@ -2154,7 +2158,7 @@ function renderMobileStudyHtml(url) {
         return;
       }
       const data = await response.json();
-      generated.textContent = data.generatedAtLocal + " · " + data.timeZone;
+      generated.textContent = data.generatedAtLocal + " · " + data.timeZone + " · refreshes alerts every minute while open";
       vaultSelect.innerHTML = (data.vaults || []).map((name) => '<option value="' + escapeHtml(name) + '"' + (name === data.vault ? " selected" : "") + '>' + escapeHtml(name) + '</option>').join("");
       notice.hidden = data.mobileAccess.tokenConfigured || data.mobileAccess.host === "127.0.0.1";
       notice.textContent = "For iPhone/iPad LAN access, set MAC_BRIDGE_HOST=0.0.0.0 and LEARNING_BOOST_MOBILE_TOKEN in config.env, then open /mobile?token=... from the device.";
@@ -2284,19 +2288,21 @@ function fastResourceInboxStatsFromCache(cachedVault = {}) {
 function fastNotificationStats(learningDir) {
   const items = safeReadJsonlLimited(path.join(learningDir, "notifications.jsonl"), 2 * 1024 * 1024, 1000)
     .filter((item) => item.status !== "dismissed");
+  const active = items.filter((item) => item.status !== "read" && !item.readAt && !item.resolvedAt);
   return {
     unread: items.filter((item) => !item.readAt).length,
-    pendingNative: items.filter((item) => item.status === "pending" && Number(item.deliveryAttempts || 0) < 5).length,
-    pendingReminderMirror: items.filter((item) => item.reminderMirrorStatus === "pending").length
+    pendingNative: active.filter((item) => item.nativeDeliveryStatus === "pending" && Number(item.deliveryAttempts || 0) < 5).length,
+    pendingReminderMirror: active.filter((item) => item.reminderMirrorStatus === "pending" && Number(item.reminderMirrorAttempts || 0) < 5).length
   };
 }
 
 function fastNotificationStatsFromCache(cachedVault = {}) {
   const items = Array.isArray(cachedVault.notifications) ? cachedVault.notifications.filter((item) => item.status !== "dismissed") : [];
+  const active = items.filter((item) => item.status !== "read" && !item.readAt && !item.resolvedAt);
   return {
     unread: items.filter((item) => !item.readAt).length,
-    pendingNative: items.filter((item) => item.status === "pending" && Number(item.deliveryAttempts || 0) < 5).length,
-    pendingReminderMirror: items.filter((item) => item.reminderMirrorStatus === "pending").length
+    pendingNative: active.filter((item) => item.nativeDeliveryStatus === "pending" && Number(item.deliveryAttempts || 0) < 5).length,
+    pendingReminderMirror: active.filter((item) => item.reminderMirrorStatus === "pending" && Number(item.reminderMirrorAttempts || 0) < 5).length
   };
 }
 
@@ -2893,7 +2899,12 @@ function cachedLearningNotifications(options = {}) {
     .flatMap((vault) => (vault.notifications || []).map((item) => ({ ...item, vault: vault.vault })))
     .filter((item) => {
       if (!pendingNativeOnly) return true;
-      return item.nativeDeliveryStatus === "pending" && Number(item.deliveryAttempts || 0) < 5;
+      return item.status !== "read"
+        && item.status !== "dismissed"
+        && !item.readAt
+        && !item.resolvedAt
+        && item.nativeDeliveryStatus === "pending"
+        && Number(item.deliveryAttempts || 0) < 5;
     })
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
     .slice(0, Number.isFinite(limit) && limit > 0 ? limit : 50);
@@ -3964,7 +3975,7 @@ function autoIngestWorkerTimeoutMs() {
     config.openai?.timeoutMs
   ].map((value) => Number(value || 0)).filter((value) => Number.isFinite(value) && value > 0);
   const providerBudget = Math.max(60000, ...providerTimeouts);
-  return Math.min(Math.max(providerBudget + 120000, 240000), 600000);
+  return Math.min(Math.max(providerBudget + 30000, 90000), 180000);
 }
 
 function nextAutoIngestVault() {
@@ -4008,19 +4019,26 @@ function runAutoIngestWorker(options = {}) {
       stdio: "ignore"
     });
     autoIngestWorker = worker;
+    let forceKillTimer = null;
+    let workerTimedOut = false;
     const finish = (callback) => {
       clearTimeout(timeout);
+      if (forceKillTimer && !workerTimedOut) clearTimeout(forceKillTimer);
       if (autoIngestWorker === worker) autoIngestWorker = null;
       callback();
     };
     const timeout = setTimeout(() => {
-      worker.kill("SIGTERM");
+      workerTimedOut = true;
       const partialResult = readWorkerResult(resultFile);
       const partialDetail = partialResult?.detail ? ` Last worker state: ${partialResult.detail}` : "";
       const error = Object.assign(new Error(`Learning Autopilot worker time limit reached.${partialDetail}`), {
         code: "AUTO_INGEST_TIMEOUT",
         partialResult
       });
+      worker.kill("SIGTERM");
+      forceKillTimer = setTimeout(() => {
+        worker.kill("SIGKILL");
+      }, 1500);
       cleanupWorkerResult(resultFile);
       finish(() => reject(error));
     }, Math.max(15000, Number(options.timeoutMs || 120000)));
@@ -8743,13 +8761,14 @@ function renderHtml() {
     function notificationStackSummary(notifications) {
       return (notifications || []).reduce((summary, item) => {
         const status = item.nativeDeliveryStatus || (item.deliveredAt ? "delivered" : "pending");
-        if (!item.readAt && item.status !== "dismissed") summary.unread += 1;
-        if (status === "pending" || (status === "failed" && (item.deliveryAttempts || 0) < 3)) summary.pendingNative += 1;
+        const active = item.status !== "read" && item.status !== "dismissed" && !item.readAt && !item.resolvedAt;
+        if (active) summary.unread += 1;
+        if (active && (status === "pending" || (status === "failed" && (item.deliveryAttempts || 0) < 3))) summary.pendingNative += 1;
         if (status === "delivered") summary.delivered += 1;
-        if (status === "permission_denied" || status === "failed") summary.blocked += 1;
+        if (active && (status === "permission_denied" || status === "failed")) summary.blocked += 1;
         if (item.reminderMirrorStatus === "mirrored") summary.mirrored += 1;
-        if (item.reminderMirrorStatus === "pending" || (item.reminderMirrorStatus === "failed" && (item.reminderMirrorAttempts || 0) < 3)) summary.pendingReminder += 1;
-        if (item.reminderMirrorStatus === "failed") summary.blocked += 1;
+        if (active && (item.reminderMirrorStatus === "pending" || (item.reminderMirrorStatus === "failed" && (item.reminderMirrorAttempts || 0) < 3))) summary.pendingReminder += 1;
+        if (active && item.reminderMirrorStatus === "failed") summary.blocked += 1;
         return summary;
       }, { unread: 0, pendingNative: 0, delivered: 0, blocked: 0, mirrored: 0, pendingReminder: 0 });
     }

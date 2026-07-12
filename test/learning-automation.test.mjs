@@ -133,13 +133,13 @@ test("provider blocked notifications are throttled into one updated alert", () =
   const { vault } = makeVault();
   const first = recordLearningNotification(vault, {
     type: "provider_blocked",
-    title: "Learning processing paused",
+    title: "Learning provider needs attention",
     body: "Provider did not answer.",
     detail: "Provider timeout after 12s."
   });
   const second = recordLearningNotification(vault, {
     type: "provider_blocked",
-    title: "Learning processing paused",
+    title: "Learning provider needs attention",
     body: "Provider still did not answer.",
     detail: "Provider timeout after 30s."
   });
@@ -156,7 +156,7 @@ test("provider blocked notifications resolve after provider recovers", () => {
   const blocked = recordLearningNotification(vault, {
     type: "provider_blocked",
     severity: "warning",
-    title: "Learning processing paused",
+    title: "Learning provider needs attention",
     body: "Provider did not answer.",
     detail: "Provider timeout after 30s."
   });
@@ -170,7 +170,10 @@ test("provider blocked notifications resolve after provider recovers", () => {
   assert.equal(notifications[0].status, "read");
   assert.equal(notifications[0].severity, "info");
   assert.equal(Boolean(notifications[0].resolvedAt), true);
+  assert.equal(notifications[0].title, "Learning provider recovered");
   assert.match(notifications[0].body, /answered again/i);
+  assert.equal(readLearningNotifications(vault, { pendingNativeOnly: true }).length, 0);
+  assert.equal(readLearningNotifications(vault, { pendingReminderOnly: true }).length, 0);
 });
 
 test("provider readiness timeout follows selected provider policy", () => {
@@ -264,7 +267,7 @@ test("provider failure leaves raw files pending and records a blocker notificati
 
   assert.equal(result.status, "blocked");
   assert.equal(fs.existsSync(pending), true);
-  assert.match(readLearningNotifications(vault)[0].title, /paused/i);
+  assert.match(readLearningNotifications(vault)[0].title, /provider needs attention/i);
 });
 
 test("automation retries pending media source pages when provider is ready", async () => {

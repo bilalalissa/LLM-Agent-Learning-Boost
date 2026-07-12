@@ -147,8 +147,8 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
     recordLearningNotification(vaultPath, {
       type: "provider_blocked",
       severity: "warning",
-      title: "Learning processing paused",
-      body: `The selected AI provider did not answer the Learning Autopilot probe. Pending files were left in place. ${readiness.detail}`,
+      title: "Learning provider needs attention",
+      body: `The selected AI provider did not answer the Learning Autopilot probe. Pending work stayed in place and automatic learning will retry. ${readiness.detail}`,
       detail,
       privacy: "safe",
       actions: ["Open Provider", "Refresh health", "Try again"]
@@ -372,7 +372,8 @@ export function resolveProviderBlockedNotifications(vaultPath, details = {}) {
       readAt: normalized.readAt || now,
       resolvedAt: now,
       severity: "info",
-      body: "The selected AI provider answered again, so Learning Autopilot can continue.",
+      title: "Learning provider recovered",
+      body: "The selected AI provider answered again. Learning Autopilot will continue automatically.",
       detail: String(details.detail || normalized.detail || "Provider recovered."),
       updated: now
     });
@@ -440,6 +441,8 @@ function validFutureIso(value) {
 
 function normalizeLearningNotification(input = {}) {
   const now = new Date().toISOString();
+  const type = String(input.type || "learning_event");
+  const resolvedProviderBlocked = type === "provider_blocked" && Boolean(input.resolvedAt);
   const nativeDeliveryStatus = ["pending", "delivered", "permission_denied", "failed"].includes(input.nativeDeliveryStatus)
     ? input.nativeDeliveryStatus
     : (input.deliveredAt ? "delivered" : "pending");
@@ -448,11 +451,13 @@ function normalizeLearningNotification(input = {}) {
     : (input.reminderMirroredAt || input.reminderExternalId ? "mirrored" : "pending");
   return {
     id: String(input.id || ""),
-    type: String(input.type || "learning_event"),
+    type,
     severity: ["info", "warning", "critical"].includes(input.severity) ? input.severity : "info",
     status: ["unread", "read", "dismissed"].includes(input.status) ? input.status : "unread",
-    title: String(input.title || "Learning Boost"),
-    body: String(input.body || ""),
+    title: resolvedProviderBlocked ? "Learning provider recovered" : String(input.title || "Learning Boost"),
+    body: resolvedProviderBlocked && /paused|did not answer|pending files were left/i.test(String(input.title || "") + " " + String(input.body || ""))
+      ? "The selected AI provider answered again. Learning Autopilot will continue automatically."
+      : String(input.body || ""),
     detail: String(input.detail || ""),
     sourcePage: String(input.sourcePage || ""),
     planId: String(input.planId || ""),
@@ -481,6 +486,8 @@ function normalizeLearningNotification(input = {}) {
 function nativeDeliveryPending(item = {}) {
   const normalized = normalizeLearningNotification(item);
   return normalized.status !== "dismissed"
+    && normalized.status !== "read"
+    && !normalized.resolvedAt
     && normalized.nativeDeliveryStatus !== "delivered"
     && normalized.nativeDeliveryStatus !== "permission_denied"
     && !normalized.deliveredAt
@@ -490,6 +497,8 @@ function nativeDeliveryPending(item = {}) {
 function reminderMirrorPending(item = {}) {
   const normalized = normalizeLearningNotification(item);
   return normalized.status !== "dismissed"
+    && normalized.status !== "read"
+    && !normalized.resolvedAt
     && normalized.reminderMirrorStatus !== "mirrored"
     && normalized.reminderMirrorAttempts < 3;
 }

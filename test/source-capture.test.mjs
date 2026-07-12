@@ -17,9 +17,11 @@ import {
   purgeExpiredResources,
   readSourceCaptureSettings,
   resourceInbox,
+  resourceInboxPath,
   stageResourcesForIngest,
   updateSourceCaptureSettings
 } from "../src/source-capture.mjs";
+import { queueResourceInboxForIngestAsync } from "../src/source-capture-ingest.mjs";
 import { ensureLearningScaffold, learningPaths } from "../src/learning-store.mjs";
 
 function makeVault() {
@@ -167,6 +169,52 @@ test("captured resources can be staged for ingest and marked as ingested", () =>
   assert.equal(resource.processingStatus, "ingested");
   assert.equal(resource.sourcePage, "wiki/sources/2026-07-01--retrieval-practice-article.md");
   assert.equal(resource.learning.cardsCreated, 2);
+});
+
+test("recent ResourceInbox queue failures are skipped during automatic retry backoff", async () => {
+  const { root, vault } = makeVault();
+  const blockedFile = path.join(root, "blocked.md");
+  const readyFile = path.join(root, "ready.md");
+  fs.writeFileSync(blockedFile, "# Blocked\n\nReadable but currently blocked.");
+  fs.writeFileSync(readyFile, "# Ready\n\nReadable text.");
+  const now = new Date("2026-07-12T18:00:00.000Z");
+
+  captureResource(vault, {
+    sourceType: "manual_import",
+    title: "Blocked image",
+    file: blockedFile,
+    processingStatus: "ready_for_ingest",
+    userApproved: true
+  });
+  captureResource(vault, {
+    sourceType: "manual_import",
+    title: "Ready note",
+    file: readyFile,
+    processingStatus: "ready_for_ingest",
+    userApproved: true
+  });
+
+  const current = resourceInbox(vault);
+  current[0] = {
+    ...current[0],
+    ingest: {
+      ...(current[0].ingest || {}),
+      lastQueueError: "Could not queue resource file: Timed out while queueing blocked.png.",
+      lastQueueAttemptAt: "2026-07-12T17:45:00.000Z"
+    }
+  };
+  fs.writeFileSync(resourceInboxPath(vault), current.map((item) => JSON.stringify(item)).join("\n") + "\n");
+
+  const staged = await queueResourceInboxForIngestAsync(vault, {
+    limit: 1,
+    maxQueueAttempts: 1,
+    retryBackoffMs: 30 * 60 * 1000,
+    now
+  });
+
+  assert.equal(staged.staged.length, 1);
+  assert.match(staged.staged[0].title, /Ready note/);
+  assert.equal(staged.skipped.some((item) => /Waiting 15 minutes/.test(item.reason)), true);
 });
 
 test("screenshots collector requires enabled screenshot capture or manual approval", () => {

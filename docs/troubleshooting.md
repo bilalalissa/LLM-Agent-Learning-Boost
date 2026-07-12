@@ -20,7 +20,9 @@ If a Local sidebar topic opens with a cached summary instead of full page conten
 
 ## Learning Says Autopilot Timed Out Or Is Retrying
 
-Learning Autopilot uses a bounded background worker so one slow provider call or one iCloud file cannot freeze the UI. A timeout is now reported as `retrying`, not as a user pause. Pending work stays in place, and the next bounded run continues after the retry time.
+Learning Autopilot uses a bounded background worker so one slow provider call or one iCloud file cannot freeze the UI. A timeout is now reported as `retrying`, not as a user pause. Pending work stays in place, the timed-out worker is terminated, and the next bounded run continues after the retry time.
+
+By default, both scheduled Autopilot and manual `Process pending now` use the same one-pass worker budget. The app derives the worker limit from the selected provider timeout, then caps it at 180 seconds unless you set `LLM_WIKI_AUTO_INGEST_WORKER_TIMEOUT_MS` yourself. This keeps Learning, Files, Archive, and Topics responsive even when a provider or file operation stalls.
 
 For subscription providers, keep `AI_PROVIDER_TIMEOUT_MS` at least as high as the provider command timeout. The default is:
 
@@ -29,7 +31,7 @@ AI_PROVIDER_TIMEOUT_MS=180000
 OPENAI_CODEX_TIMEOUT_MS=180000
 ```
 
-If the warning repeats with pending files still listed, open Provider and confirm the selected provider can answer a short readiness probe. If it only happens for broad watch folders or iCloud files, narrow the watch folder or move pending files to a readable local folder.
+If the warning repeats with pending files still listed, open Provider and confirm the selected provider can answer a short readiness probe. If it only happens for broad watch folders or iCloud files, narrow the watch folder or move pending files to a readable local folder. ResourceInbox duplicate checks use stored path and dedupe metadata instead of probing every old queued file on disk, and files that just hit a queue/copy error use a retry backoff instead of being retried every Autopilot pass.
 
 ## Time Or Date Looks Wrong
 

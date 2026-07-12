@@ -54,6 +54,8 @@ In the native macOS app, Learning Boost uses `UserNotifications`. A notification
 
 For other Apple devices, enable `Sync alerts to Apple devices via Reminders` in Learning Autopilot. Learning Boost creates privacy-safe reminder items in the `Learning Boost` Reminders list on this Mac; iCloud/Reminders can then sync those items to iPhone, iPad, or other Macs if your Apple ID and Focus/notification settings allow it. Reminders mirroring has its own status: mirrored, pending, or failed.
 
+Provider-blocked alerts are resolved automatically when the selected provider answers again. Resolved alerts display as `Learning provider recovered`, stay as read history, and are no longer retried through macOS notifications or Apple Reminders.
+
 ## Alert Rules
 
 Each alert offers at most three actions. Example actions include:
