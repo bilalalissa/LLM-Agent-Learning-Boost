@@ -75,7 +75,7 @@ export function learningAutomationStatus(vaultPath, runtime = {}) {
     settings,
     vault: vaultName(vaultPath),
     running: runtime.running === true,
-    blocked: effectiveStatus === "blocked" || effectiveStatus === "retrying",
+    blocked: effectiveStatus === "blocked",
     status: effectiveStatus,
     detail: effectiveDetail,
     recoveredFromStaleRuntime: staleRuntimePause,

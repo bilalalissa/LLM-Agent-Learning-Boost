@@ -20,7 +20,7 @@ If a Local sidebar topic opens with a cached summary instead of full page conten
 
 ## Learning Says Autopilot Timed Out Or Is Retrying
 
-Learning Autopilot uses a bounded background worker so one slow provider call or one iCloud file cannot freeze the UI. A timeout is now reported as `retrying`, not as a user pause. Pending files stay in `raw/`, `raw/input/`, or `raw/inbox`, and the next bounded run continues after the retry time.
+Learning Autopilot uses a bounded background worker so one slow provider call or one iCloud file cannot freeze the UI. A timeout is now reported as `retrying`, not as a user pause. Pending work stays in place, and the next bounded run continues after the retry time.
 
 For subscription providers, keep `AI_PROVIDER_TIMEOUT_MS` at least as high as the provider command timeout. The default is:
 

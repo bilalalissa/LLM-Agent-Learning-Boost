@@ -482,16 +482,16 @@ const server = http.createServer(async (request, response) => {
       const timeout = error.code === "AUTO_INGEST_TIMEOUT" || /timed out|time limit/i.test(summary);
       const partialDetail = error.partialResult?.detail ? ` Last worker state: ${error.partialResult.detail}` : "";
       const detail = timeout
-        ? `Learning automation paused after the worker time limit. Pending files were left in place and the next bounded run will continue.${partialDetail}`
+        ? `Learning automation is retrying after the worker time limit. Pending work was left in place and the next bounded run will continue.${partialDetail}`
         : summary;
       if (vaultPath) setAutomationRuntime(vaultPath, timeout
-        ? { running: false, status: "paused", detail, lastPausedAt: new Date().toISOString() }
+        ? { running: false, status: "retrying", detail, lastBlockedAt: new Date().toISOString() }
         : { running: false, status: "blocked", detail, lastBlockedAt: new Date().toISOString() });
       lastIngestMessage = reportStatus(timeout ? detail : `Learning automation blocked: ${summary}`);
       console.error(`[learning-automation] ${error.stack || error.message}`);
       response.writeHead(timeout ? 200 : 500, { "content-type": "application/json" });
       response.end(JSON.stringify(timeout && vaultPath
-        ? { vault: vaultName(vaultPath), status: "paused", detail, processed: 0, automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)) }
+        ? { vault: vaultName(vaultPath), status: "retrying", detail, processed: 0, automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)) }
         : { error: error.message }));
     } finally {
       ingestRunning = false;
@@ -2237,7 +2237,7 @@ function fastLearningAutomationStatusForVault(vaultPath) {
     settings,
     vault,
     running: runtime.running === true,
-    blocked: effectiveStatus === "blocked" || effectiveStatus === "retrying",
+    blocked: effectiveStatus === "blocked",
     status: effectiveStatus,
     detail: effectiveDetail || "Learning Autopilot status snapshot loaded.",
     recoveredFromStaleRuntime: staleRuntimePause,
@@ -3926,7 +3926,7 @@ async function runAutoIngest() {
     const retryAt = formatLocal(new Date(autoIngestBackoffUntil));
     if (timedOut) {
       const partialDetail = error.partialResult?.detail ? ` Last worker state: ${error.partialResult.detail}` : "";
-      const detail = `Learning Autopilot is retrying ${vaultName(pendingVault.vaultPath)} after a bounded background worker exceeded the time limit. Pending files were left in place; the next bounded run will continue after ${retryAt}.${partialDetail}`;
+      const detail = `Learning Autopilot is retrying ${vaultName(pendingVault.vaultPath)} after a bounded background worker exceeded the time limit. Pending work was left in place; the next bounded run will continue after ${retryAt}.${partialDetail}`;
       setAutomationRuntime(pendingVault.vaultPath, {
         running: false,
         status: "retrying",
@@ -10478,7 +10478,9 @@ function renderHtml() {
         const general = data.generalCompletion || {};
         const generalPercent = Number.isFinite(general.percent) ? general.percent : 99;
         const percent = Number.isFinite(progress.percent) ? progress.percent : (data.ingestRunning ? 0 : 100);
-        const detail = data.lastIngestMessage || progress.detail || "Auto-ingest is running.";
+        const detail = data.ingestRunning
+          ? (progress.detail || data.lastIngestMessage || "Auto-ingest is running.")
+          : (data.lastIngestMessage || progress.detail || "Auto-ingest is idle.");
         const message = detail.includes("General completion:")
           ? detail
           : "General completion: " + generalPercent + "%. Operation progress: " + percent + "%. " + detail;

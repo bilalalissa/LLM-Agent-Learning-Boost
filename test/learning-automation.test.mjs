@@ -75,6 +75,21 @@ test("stale runtime pause clears from status when no pending learning work remai
   assert.match(status.detail, /No pending learning sources/);
 });
 
+test("runtime retry remains automatic and not blocked while pending work exists", () => {
+  const { vault } = makeVault();
+  fs.mkdirSync(path.join(vault, "raw", "input"), { recursive: true });
+  fs.writeFileSync(path.join(vault, "raw", "input", "slow-source.md"), "# Slow source\n\nQueued for retry.");
+  const status = learningAutomationStatus(vault, {
+    status: "retrying",
+    detail: "Learning Autopilot is retrying after a bounded worker timed out."
+  });
+
+  assert.equal(status.status, "retrying");
+  assert.equal(status.blocked, false);
+  assert.equal(status.pendingRawCount, 1);
+  assert.equal(status.recoveredFromStaleRuntime, false);
+});
+
 test("automation settings support pause snooze resume and stop controls", async () => {
   const { vault } = makeVault();
   updateAutomationSettings(vault, { automationControl: "paused" });
