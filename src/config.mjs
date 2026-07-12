@@ -75,7 +75,7 @@ const PROVIDER_DEFAULTS = {
   LEARNING_BOOST_MOBILE_STUDY: "true",
   LEARNING_BOOST_MOBILE_TOKEN: "",
   LEARNING_BOOST_MOBILE_BASE_URL: "",
-  AI_PROVIDER_TIMEOUT_MS: "60000",
+  AI_PROVIDER_TIMEOUT_MS: "180000",
   AI_ACCESS_METHOD: "local_first",
   DEFAULT_AI_PROVIDER: "local_auto",
   DEFAULT_AI_MODEL: "qwen3:8b",
@@ -196,7 +196,7 @@ export function getConfig() {
     watchIntervalMs: Number(env.WATCH_INTERVAL_MS || 5000),
     timeZone: resolveLocalTimeZone(env.LEARNING_BOOST_TIME_ZONE || env.LLM_WIKI_TIME_ZONE || env.TZ),
     autoIngestOnStart: env.AUTO_INGEST_ON_START !== "false",
-    providerTimeoutMs: Number(env.AI_PROVIDER_TIMEOUT_MS || 60000),
+    providerTimeoutMs: Number(env.AI_PROVIDER_TIMEOUT_MS || 180000),
     ingestMaxChars: Number(env.INGEST_MAX_CHARS || 60000),
     chatMaxFiles: Number(env.CHAT_MAX_FILES || 24),
     chatPort: Number(env.CHAT_PORT || 8789),
@@ -230,7 +230,7 @@ export function getConfig() {
       model: env.OLLAMA_MODEL || "qwen3:8b",
       embedModel: env.OLLAMA_EMBED_MODEL || "all-minilm",
       openAiCompat: env.OLLAMA_OPENAI_COMPAT !== "false",
-      timeoutMs: Number(env.AI_PROVIDER_TIMEOUT_MS || 60000)
+      timeoutMs: Number(env.AI_PROVIDER_TIMEOUT_MS || 180000)
     },
     mlxLmServer: {
       baseUrl: env.MLX_LM_SERVER_BASE_URL || "http://127.0.0.1:8080",
@@ -251,7 +251,7 @@ export function getConfig() {
       subscriptionClient: env.OPENAI_SUBSCRIPTION_CLIENT || "codex",
       codexCommand: env.OPENAI_CODEX_COMMAND || "codex",
       codexTimeoutMs: Number(env.OPENAI_CODEX_TIMEOUT_MS || 180000),
-      timeoutMs: Number(env.AI_PROVIDER_TIMEOUT_MS || 60000)
+      timeoutMs: Number(env.AI_PROVIDER_TIMEOUT_MS || 180000)
     },
     anthropic: {
       authMethod: env.ANTHROPIC_AUTH_METHOD || "api_key",
@@ -263,7 +263,7 @@ export function getConfig() {
       apiKey: env.OPENAI_COMPAT_API_KEY || "",
       bearerToken: env.OPENAI_COMPAT_BEARER_TOKEN || "",
       baseUrl: env.OPENAI_COMPAT_BASE_URL || "http://localhost:1234/v1",
-      timeoutMs: Number(env.AI_PROVIDER_TIMEOUT_MS || 60000)
+      timeoutMs: Number(env.AI_PROVIDER_TIMEOUT_MS || 180000)
     },
     gemini: {
       authMethod: env.GEMINI_AUTH_METHOD || "api_key",

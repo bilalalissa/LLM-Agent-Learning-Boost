@@ -187,7 +187,7 @@ Routine background auto-ingest is bounded so it does not monopolize the app. Eac
 
 ResourceInbox staging is bounded too. Each automatic pass attempts only a small number of captured-resource queue operations, and file copies are killed after a short timeout. If a watch-folder file is cloud-only, locked, or blocked by macOS permissions, that one ResourceInbox item records the blocker and the rest of the app stays usable. The Learning tab shows the blocker in Source Capture status, and you can `Pause`, `Snooze`, or `Stop` Autopilot while you fix the file or move it to a readable local folder.
 
-If a worker exceeds the background time limit, Learning Boost pauses that vault, leaves pending files in place, and records the last worker state instead of marking the source as successfully processed. The next bounded run retries after a short backoff. If the queue is empty by the next status check, the stale pause clears and the vault returns to watching. Use the Provider tab first if the pause repeats because the selected provider is not answering.
+If a worker exceeds the background time limit, Learning Boost marks that vault as `retrying`, leaves pending files in place, and records the last worker state instead of marking the source as successfully processed. The next bounded run retries after a short backoff. If the queue is empty by the next status check, the stale retry clears and the vault returns to watching. Use the Provider tab first if the retry repeats because the selected provider is not answering. `Pause`, `Snooze`, and `Stop` remain explicit user controls.
 
 Autopilot also retries older media source pages marked `pending_provider_analysis` once the selected provider is ready. The retry is bounded to a small number of pages per run, so the app stays responsive while old image, audio, or video captures gradually become real learning bits and cards. Pages marked `pending_content` still need readable OCR text, transcript text, local ASR, keyframe OCR, or a manual description before provider analysis can run.
 
@@ -254,6 +254,8 @@ Plans begin as `proposed`. Approval and activation require explicit confirmation
 - `Process pending now`: runs the same safe processing loop immediately.
 - `Send test notification`: queues a test alert and asks macOS to deliver it.
 - `Sync alerts to Reminders`: retries Apple Reminders mirroring for pending alerts.
+
+If a bounded background worker times out, Learning Boost shows `retrying` rather than changing your control state to paused. Pending files remain in place and the next bounded run continues after the retry time. This is different from `Pause`, `Snooze`, or `Stop`, which are user-controlled states.
 
 ### Source Capture
 

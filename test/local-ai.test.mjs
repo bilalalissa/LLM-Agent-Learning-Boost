@@ -125,7 +125,7 @@ test("loadEnv and getConfig default to local_auto with local provider settings",
     assert.equal(config.mlxLmServer.baseUrl, "http://127.0.0.1:8080");
     assert.equal(config.autoIngestOnStart, true);
     assert.equal(config.watchIntervalMs, 5000);
-    assert.equal(config.providerTimeoutMs, 60000);
+    assert.equal(config.providerTimeoutMs, 180000);
   } finally {
     if (previous === undefined) delete process.env.LLM_WIKI_ENV_FILE;
     else process.env.LLM_WIKI_ENV_FILE = previous;

@@ -66,7 +66,7 @@ export function learningAutomationStatus(vaultPath, runtime = {}) {
   const runtimeStatus = runtime.status || settingsStatus;
   const pendingWorkCount = rawCandidates.length + pendingMediaCount + pendingResources.length;
   const userPaused = ["paused", "snoozed", "stopped"].includes(settingsStatus);
-  const staleRuntimePause = ["paused", "blocked"].includes(runtimeStatus) && pendingWorkCount === 0 && !userPaused;
+  const staleRuntimePause = ["paused", "blocked", "retrying"].includes(runtimeStatus) && pendingWorkCount === 0 && !userPaused;
   const effectiveStatus = staleRuntimePause ? settingsStatus : runtimeStatus;
   const effectiveDetail = staleRuntimePause
     ? "No pending learning sources. Learning Autopilot is watching for safe work."
@@ -75,7 +75,7 @@ export function learningAutomationStatus(vaultPath, runtime = {}) {
     settings,
     vault: vaultName(vaultPath),
     running: runtime.running === true,
-    blocked: effectiveStatus === "blocked",
+    blocked: effectiveStatus === "blocked" || effectiveStatus === "retrying",
     status: effectiveStatus,
     detail: effectiveDetail,
     recoveredFromStaleRuntime: staleRuntimePause,

@@ -2228,7 +2228,7 @@ function fastLearningAutomationStatusForVault(vaultPath) {
   const runtimeStatus = runtime.status || settingsState.status;
   const pendingWorkCount = pendingRaw.length + resourceStats.pending;
   const userPaused = ["paused", "snoozed", "stopped"].includes(settingsState.status);
-  const staleRuntimePause = ["paused", "blocked"].includes(runtimeStatus) && pendingWorkCount === 0 && !userPaused;
+  const staleRuntimePause = ["paused", "blocked", "retrying"].includes(runtimeStatus) && pendingWorkCount === 0 && !userPaused;
   const effectiveStatus = staleRuntimePause ? settingsState.status : runtimeStatus;
   const effectiveDetail = staleRuntimePause
     ? "No pending learning sources. Learning Autopilot is watching for safe work."
@@ -2237,7 +2237,7 @@ function fastLearningAutomationStatusForVault(vaultPath) {
     settings,
     vault,
     running: runtime.running === true,
-    blocked: effectiveStatus === "blocked",
+    blocked: effectiveStatus === "blocked" || effectiveStatus === "retrying",
     status: effectiveStatus,
     detail: effectiveDetail || "Learning Autopilot status snapshot loaded.",
     recoveredFromStaleRuntime: staleRuntimePause,
@@ -2935,7 +2935,7 @@ function isTabCacheStale(state) {
 }
 
 function tabPayloadStatus(state, stale) {
-  if (state.error && state.items.length) return "stale_refreshing";
+  if (state.error && state.items.length) return stale || state.loading ? "stale_refreshing" : "ready";
   if (state.error) return "error";
   if (state.items.length && state.loading) return "stale_refreshing";
   if (state.items.length && stale) return "stale_refreshing";
@@ -3890,7 +3890,7 @@ async function runAutoIngest() {
         copyTimeoutMs: 5000,
         pendingMediaScanLimit: 120
       },
-      timeoutMs: Math.min(Math.max((config.providerTimeoutMs || 60000) * 2, 120000), 180000)
+      timeoutMs: autoIngestWorkerTimeoutMs()
     });
     let count = 0;
     const completedVaults = workerResult.vaults || [];
@@ -3926,12 +3926,12 @@ async function runAutoIngest() {
     const retryAt = formatLocal(new Date(autoIngestBackoffUntil));
     if (timedOut) {
       const partialDetail = error.partialResult?.detail ? ` Last worker state: ${error.partialResult.detail}` : "";
-      const detail = `Learning Autopilot paused for ${vaultName(pendingVault.vaultPath)} after a bounded background worker exceeded the time limit. Pending files, if any, were left in place; the next bounded run will retry after ${retryAt}.${partialDetail}`;
+      const detail = `Learning Autopilot is retrying ${vaultName(pendingVault.vaultPath)} after a bounded background worker exceeded the time limit. Pending files were left in place; the next bounded run will continue after ${retryAt}.${partialDetail}`;
       setAutomationRuntime(pendingVault.vaultPath, {
         running: false,
-        status: "paused",
+        status: "retrying",
         detail,
-        lastPausedAt: new Date().toISOString()
+        lastBlockedAt: new Date().toISOString()
       });
       lastIngestMessage = reportStatus(`Operation progress: ${ingestProgress.percent || 0}%. ${detail}`);
       ingestProgress = {
@@ -3950,6 +3950,21 @@ async function runAutoIngest() {
     ingestRunning = false;
     refreshChangedTabsAfterIngest();
   }
+}
+
+function autoIngestWorkerTimeoutMs() {
+  const configured = positiveEnvNumber("LLM_WIKI_AUTO_INGEST_WORKER_TIMEOUT_MS", 0);
+  if (configured) return Math.max(15000, configured);
+  const providerTimeouts = [
+    config.providerTimeoutMs,
+    config.openai?.codexTimeoutMs,
+    config.mlxLmCli?.timeoutMs,
+    config.ollama?.timeoutMs,
+    config.openaiCompat?.timeoutMs,
+    config.openai?.timeoutMs
+  ].map((value) => Number(value || 0)).filter((value) => Number.isFinite(value) && value > 0);
+  const providerBudget = Math.max(60000, ...providerTimeouts);
+  return Math.min(Math.max(providerBudget + 120000, 240000), 600000);
 }
 
 function nextAutoIngestVault() {
@@ -5042,11 +5057,11 @@ function renderHtml() {
     .learning-button-row { display: flex; flex-wrap: wrap; gap: 6px; }
     .learning-plan-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; align-items: end; }
     .learning-plan-row input { width: 100%; min-width: 0; box-sizing: border-box; }
-    .learning-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px; margin: 12px 0 0; }
+    .learning-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px; margin: 12px 0 0; align-items: start; }
     .learning-form input, .learning-form select { width: 100%; min-width: 0; box-sizing: border-box; }
     .learning-field { display: grid; gap: 5px; min-width: 0; }
     .learning-field > span { color: var(--muted); font-size: 12px; font-weight: 700; }
-    .learning-field.full { grid-column: 1 / -1; }
+    .learning-field.full, .learning-form > .full { grid-column: 1 / -1; }
     .learning-toggle-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); gap: 8px; }
     .learning-toggle-grid .inline-toggle { align-items: flex-start; white-space: normal; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); color: var(--text); line-height: 1.25; }
     .learning-form .inline-toggle { min-width: 0; white-space: normal; }
@@ -5076,7 +5091,7 @@ function renderHtml() {
     .learning-type-legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
     .learning-type-legend span::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--kind, var(--accent)); border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 60%, var(--line)); }
     .learning-action-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; min-width: 0; }
-    .learning-action-row button, .learning-button-row button { flex: 0 1 auto; min-width: min(180px, 100%); max-width: 100%; white-space: normal; overflow-wrap: break-word; word-break: keep-all; text-align: center; }
+    .learning-action-row button, .learning-button-row button { flex: 0 1 auto; min-width: min(180px, 100%); max-width: 100%; white-space: normal; overflow-wrap: break-word; word-break: normal; text-align: center; }
     .learning-card.danger { border-color: color-mix(in srgb, #dc2626 45%, var(--line)); }
     .learning-card.warning { border-color: color-mix(in srgb, #f59e0b 55%, var(--line)); }
     .learning-flowchart { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(128px, 100%), 1fr)); gap: 8px; align-items: stretch; margin: 10px 0 14px; }
@@ -5120,7 +5135,7 @@ function renderHtml() {
     .learning-autopilot-meter span { color: var(--muted); font-size: 12px; align-self: center; }
     .learning-stepper { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 8px; list-style: none; margin: 2px 0 0; padding: 0; }
     .learning-stepper li { position: relative; display: block; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); transition: transform .18s ease, border-color .18s ease, background .18s ease; }
-    .learning-stepper button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 7px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: break-word; align-items: start; line-height: 1.25; }
+    .learning-stepper button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 7px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: anywhere; align-items: start; line-height: 1.25; }
     .learning-stepper button > div { min-width: 0; display: grid; gap: 2px; }
     .learning-stepper li span { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--soft); color: var(--muted); font-weight: 800; }
     .learning-stepper li strong { min-width: 0; font-size: 13px; overflow-wrap: break-word; }
@@ -5136,7 +5151,7 @@ function renderHtml() {
     .learning-daily-sessions li { display: grid; gap: 8px; min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel); }
     .learning-daily-sessions li.high { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); background: color-mix(in srgb, var(--mark) 28%, var(--panel)); }
     .learning-daily-sessions li.blocked { opacity: .84; }
-    .learning-daily-sessions button.learning-target-button { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 9px; width: 100%; min-width: 0; text-align: start; white-space: normal; word-break: normal; overflow-wrap: break-word; }
+    .learning-daily-sessions button.learning-target-button { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 9px; width: 100%; min-width: 0; text-align: start; white-space: normal; word-break: normal; overflow-wrap: anywhere; }
     .learning-daily-sessions button.learning-target-button > span { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 800; }
     .learning-daily-sessions div { min-width: 0; display: grid; gap: 3px; }
     .learning-daily-sessions em { color: var(--muted); font-style: normal; }
@@ -5206,17 +5221,17 @@ function renderHtml() {
     .learning-bit-explorer details:first-of-type { border-top: 0; }
     .learning-empty-state { border: 1px dashed var(--line); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--soft); }
     .learning-flow-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 10px; margin: 12px 0; }
-    .learning-flow-lane { border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 32%, var(--line)); border-radius: 8px; padding: 12px; background: var(--kind-soft, var(--panel)); }
+    .learning-flow-lane { border: 1px solid color-mix(in srgb, var(--kind, var(--accent)) 32%, var(--line)); border-radius: 8px; padding: 12px; background: var(--kind-soft, var(--panel)); min-width: 0; }
     .learning-flow-lane h4 { margin: 0 0 8px; font-size: 15px; }
     .learning-flow-lane ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; }
     .learning-flow-lane li { display: block; min-width: 0; }
-    .learning-flow-lane .learning-flow-step-button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: keep-all; overflow-wrap: break-word; align-items: start; line-height: 1.25; }
+    .learning-flow-lane .learning-flow-step-button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: anywhere; align-items: start; line-height: 1.25; }
     .learning-flow-lane .learning-flow-step-button > span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--kind, var(--accent)) 78%, #fff); color: #fff; font-weight: 800; font-size: 12px; }
     .learning-flow-lane .learning-flow-step-button > div { min-width: 0; display: grid; gap: 2px; }
     .learning-flow-lane strong { display: block; font-size: 13px; }
     .learning-flow-lane em { display: block; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: break-word; }
     .learning-flow-lane .learning-action-row { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; }
-    .learning-flow-lane .learning-action-row button { width: 100%; min-width: 0; overflow-wrap: normal; word-break: keep-all; }
+    .learning-flow-lane .learning-action-row button { width: 100%; min-width: 0; overflow-wrap: anywhere; word-break: normal; }
     .learning-plan-summary { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
     .learning-plan-summary strong { font-size: 16px; }
     .learning-plan-summary span:not(.learning-chip) { color: var(--muted); }
@@ -5527,7 +5542,7 @@ function renderHtml() {
           <div class="provider-grid">
             <label class="inline-toggle"><input data-config-key="AUTO_INGEST_ON_START" type="checkbox"> Auto-process raw/inbox and raw/input in every vault</label>
             <label class="learning-field"><span>Raw scan interval ms</span><input data-config-key="WATCH_INTERVAL_MS" type="number" min="1000" step="1000" placeholder="5000"></label>
-            <label class="learning-field"><span>Provider timeout ms</span><input data-config-key="AI_PROVIDER_TIMEOUT_MS" type="number" min="5000" step="5000" placeholder="60000"></label>
+            <label class="learning-field"><span>Provider timeout ms</span><input data-config-key="AI_PROVIDER_TIMEOUT_MS" type="number" min="5000" step="5000" placeholder="180000"></label>
           </div>
           <p class="muted">When enabled, Learning Boost watches each vault for new files under <code>raw/inbox</code> and <code>raw/input</code>. Processed files and vault media assets are skipped.</p>
         </section>
@@ -7120,7 +7135,7 @@ function renderHtml() {
       if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Loading vault files...", "files");
       try {
         const data = await fetchJsonWithTimeout("/api/files" + (options.refresh ? "?refresh=1" : ""));
-        const nextFiles = data.files || [];
+        const nextFiles = data.files || data.items || [];
         if (data.error && !nextFiles.length) throw new Error(data.error);
         if (nextFiles.length) {
           filesLoadPolls = 0;
@@ -7441,7 +7456,7 @@ function renderHtml() {
       if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Loading archive history...", "archives");
       try {
         const data = await fetchJsonWithTimeout("/api/archives" + (options.refresh ? "?refresh=1" : ""));
-        const nextArchives = data.archives || [];
+        const nextArchives = data.archives || data.items || [];
         if (data.error && !nextArchives.length) throw new Error(data.error);
         if (nextArchives.length) {
           archivesLoadPolls = 0;
@@ -7719,7 +7734,7 @@ function renderHtml() {
       if (!topicsCache.length) topicsBody.innerHTML = tabStatusRow(7, "Loading topics...", "topics");
       try {
         const data = await fetchJsonWithTimeout("/api/topics" + (options.refresh ? "?refresh=1" : ""));
-        const nextTopics = data.topics || [];
+        const nextTopics = data.topics || data.items || [];
         if (data.error && !nextTopics.length) throw new Error(data.error);
         if (nextTopics.length) {
           topicsLoadPolls = 0;
@@ -8371,7 +8386,7 @@ function renderHtml() {
           '<strong>' + escapeHtml(String(automation.notificationsUnread || 0)) + '</strong><span>alerts unread</span>' +
         '</div>' +
         '<ol class="learning-stepper" style="--active-step:' + activeIndex + '">' + steps.map((step, index) =>
-          '<li class="' + (step.active ? "active" : "") + '"><button class="learning-target-button" type="button" data-learning-target="learning-section" data-section="' + escapeHtml(step.target || "learning-autopilot-surface") + '"><span>' + escapeHtml(String(index + 1)) + '</span><strong>' + escapeHtml(step.label) + '</strong><em>' + escapeHtml(step.detail) + '</em></button></li>'
+          '<li class="' + (step.active ? "active" : "") + '"><button class="learning-target-button" type="button" data-learning-target="learning-section" data-section="' + escapeHtml(step.target || "learning-autopilot-surface") + '"><span>' + escapeHtml(String(index + 1)) + '</span><div><strong>' + escapeHtml(step.label) + '</strong><em>' + escapeHtml(step.detail) + '</em></div></button></li>'
         ).join("") + '</ol>' +
       '</section>';
     }
@@ -8391,7 +8406,8 @@ function renderHtml() {
 
     function automationTitle(automation = {}) {
       if (automation.running) return "Learning is processing in the background";
-      if (automation.blocked || automation.status === "blocked") return "Learning is paused until the provider answers";
+      if (automation.status === "retrying") return "Learning is retrying a slow background run";
+      if (automation.blocked || automation.status === "blocked") return "Learning is waiting for a ready provider";
       if (automation.settings?.learningAutopilot === false || automation.status === "paused") return "Learning Autopilot is paused";
       return "Learning is automatic for safe local work";
     }
@@ -9487,8 +9503,9 @@ function renderHtml() {
 
     function friendlyCaptureSkipReason(reason) {
       const text = String(reason || "Skipped");
-      if (/unsupported file type/i.test(text)) return "This extension is not yet supported by the local extractor. It was left out instead of creating a misleading metadata-only source.";
+      if (/unsupported file type/i.test(text)) return "This extension is not queued yet. Convert it to PDF/text/image/audio/video, or add it manually with a description so Learning Boost has useful content to analyze.";
       if (/already captured/i.test(text)) return "Already captured earlier; duplicate was not queued again.";
+      if (/stopped after|scan limit|increase the scan limit|narrow this folder/i.test(text)) return "The folder is broad. Narrow the watch folder, turn off recursive scanning, or scan a smaller folder so new source files are not buried among unrelated downloads.";
       if (/permission|eperm|eacces|operation not permitted/i.test(text)) return "macOS or iCloud blocked file access. Move the file to a readable local folder or grant file access, then scan again.";
       if (/directory|folder/i.test(text)) return text;
       return text;

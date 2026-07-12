@@ -18,9 +18,18 @@ Historical Learning backfill is now opt-in maintenance. It may repair older sour
 
 If a Local sidebar topic opens with a cached summary instead of full page content, the app process could not read that live vault file quickly enough. The fallback uses the cached topic title, path, summary, type, and updated date so navigation still works. The app now reads vault pages directly from the Node process instead of shelling out through a short `cat` timeout, which improves iCloud-backed vault reads. If it still happens, grant `/Applications/LLM Agent Learning Boost.app` access to the vault/iCloud folder in macOS Privacy settings and make sure the file is downloaded locally. The sidebar will refresh automatically on the next bounded topic read.
 
-## Learning Says Provider Paused But No Files Are Pending
+## Learning Says Autopilot Timed Out Or Is Retrying
 
-Learning Autopilot records a pause when a background worker exceeds its time limit. If the pending queue is empty by the next status check, the app clears that stale pause and returns the vault to watching. If the warning repeats with pending files still listed, open Provider and confirm the selected provider can answer a short readiness probe.
+Learning Autopilot uses a bounded background worker so one slow provider call or one iCloud file cannot freeze the UI. A timeout is now reported as `retrying`, not as a user pause. Pending files stay in `raw/`, `raw/input/`, or `raw/inbox`, and the next bounded run continues after the retry time.
+
+For subscription providers, keep `AI_PROVIDER_TIMEOUT_MS` at least as high as the provider command timeout. The default is:
+
+```bash
+AI_PROVIDER_TIMEOUT_MS=180000
+OPENAI_CODEX_TIMEOUT_MS=180000
+```
+
+If the warning repeats with pending files still listed, open Provider and confirm the selected provider can answer a short readiness probe. If it only happens for broad watch folders or iCloud files, narrow the watch folder or move pending files to a readable local folder.
 
 ## Time Or Date Looks Wrong
 
