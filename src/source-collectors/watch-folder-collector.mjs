@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { captureResource, readSourceCaptureSettings, resourceInbox } from "../source-capture.mjs";
+import { captureResource, hashFileForDedupe, readSourceCaptureSettings, resourceInbox } from "../source-capture.mjs";
 import { isIngestibleRawFile } from "../vaults.mjs";
 
 const DEFAULT_MAX_SCAN_FILES = 600;
@@ -45,7 +45,7 @@ export function collectWatchFolderResources(vaultPath, options = {}) {
       const stat = fs.statSync(checked.path);
       const dedupeKey = fileDedupeKey(checked.path, stat);
       if (resourceInbox(vaultPath).some((item) => item.dedupeKey === dedupeKey || item.ingest?.dedupeKey === dedupeKey)) {
-        skip(summary, file, "Already captured with the same path, size, and mtime.");
+        skip(summary, file, "Already captured with the same file content.");
         continue;
       }
       const readyForIngest = settings.watchFolderIngestMode !== "needs_review";
@@ -54,6 +54,7 @@ export function collectWatchFolderResources(vaultPath, options = {}) {
         title: path.basename(file),
         file: checked.path,
         dedupeKey,
+        contentHash: dedupeKey.startsWith("file-sha256:") ? dedupeKey.split(":").pop() : "",
         userApproved: true,
         contentApproved: readyForIngest,
         processingStatus: readyForIngest ? "ready_for_ingest" : "needs_review",
@@ -63,7 +64,7 @@ export function collectWatchFolderResources(vaultPath, options = {}) {
       }, { ...options, settings });
       results.push(result);
       if (result.captured && readyForIngest) summary.filesQueued += 1;
-      if (result.duplicate) skip(summary, file, "Already captured with the same path, size, and mtime.");
+      if (result.duplicate) skip(summary, file, "Already captured with the same file content.");
       else if (!result.captured) skip(summary, file, result.reason || "Capture blocked.");
     }
   }
@@ -163,6 +164,13 @@ function validateCandidateFile(vaultPath, file) {
 }
 
 function fileDedupeKey(file, stat) {
+  try {
+    const digest = hashFileForDedupe(file);
+    const ext = path.extname(file).toLowerCase() || "noext";
+    if (digest) return `file-sha256:${ext}:${digest}`;
+  } catch {
+    // Fall back to path metadata when the file cannot be hashed.
+  }
   return `watch-folder:${path.resolve(file)}:${stat.size}:${Math.round(stat.mtimeMs)}`;
 }
 

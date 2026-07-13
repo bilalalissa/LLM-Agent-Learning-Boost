@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import { resourceInbox, resourceInboxPath, writeResourcesPage } from "./source-capture.mjs";
+import { hashFileForDedupe, resourceInbox, resourceInboxPath, writeResourcesPage } from "./source-capture.mjs";
 import { ensureDir, isIngestibleRawFile, slugify } from "./vaults.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -335,6 +335,10 @@ function queuedItem(item, details = {}) {
   return {
     ...item,
     rawInput: details.rawInput,
+    dedupeKey: details.dedupeKey || item.dedupeKey || "",
+    contentHash: String(details.dedupeKey || item.dedupeKey || "").startsWith("file-sha256:")
+      ? String(details.dedupeKey || item.dedupeKey || "").split(":").pop()
+      : (item.contentHash || ""),
     processingStatus: "queued_for_ingest",
     recommendedNextAction: "Processing is queued. Run Learning Autopilot or ingest to create a source page.",
     ingest: {
@@ -391,7 +395,7 @@ function existingRawInputRel(vaultPath, file) {
 function existingQueuedResources(vaultPath, items) {
   const result = new Map();
   for (const item of items) {
-    const key = item.ingest?.dedupeKey || "";
+    const key = item.ingest?.dedupeKey || item.dedupeKey || "";
     const rawInput = normalizeRel(item.rawInput || item.ingest?.rawInput || "");
     if (!key || !rawInput || !isInsidePath(path.join(vaultPath, rawInput), vaultPath)) continue;
     result.set(key, { id: item.id, rawInput });
@@ -431,6 +435,13 @@ function uniqueRawInputRel(vaultPath, item, ext, dedupeKey, now) {
 }
 
 function fileDedupeKey(file, stat) {
+  try {
+    const digest = hashFileForDedupe(file);
+    const ext = path.extname(file).toLowerCase() || "noext";
+    if (digest) return `file-sha256:${ext}:${digest}`;
+  } catch {
+    // Fall back to path metadata when hashing is unavailable.
+  }
   return `file:${path.resolve(file)}:${stat.size}:${Math.round(stat.mtimeMs)}`;
 }
 

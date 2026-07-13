@@ -270,6 +270,12 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
     "Mobile Study",
     "Learning Boost Mobile Study",
     "Short Quiz/Test",
+    "Card and bit types",
+    "Clear focus",
+    "another trusted local device",
+    "Remote access should use a private VPN or tunnel",
+    "capture/source",
+    "understanding/bit",
     "Mark tested",
     "Reviewed from mobile study.",
     "recent study activity",
@@ -286,12 +292,32 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /activeHours/);
   assert.match(serverSource, /renderMobileStudyHtml/);
   assert.match(serverSource, /mobileStudyPayload/);
+  assert.match(serverSource, /mobileStudyAccessSummary/);
+  assert.match(serverSource, /localLanAddresses/);
+  assert.match(serverSource, /recommendedUrl/);
+  assert.match(serverSource, /lanUrls/);
+  assert.match(serverSource, /data-mobile-jump/);
+  assert.match(serverSource, /focus-active/);
+  assert.match(serverSource, /unicode-bidi: plaintext/);
+  assert.match(serverSource, /dir="auto"/);
+  assert.match(serverSource, /MOBILE_CACHE_KEY/);
+  assert.match(serverSource, /readCachedMobileStudy/);
+  assert.match(serverSource, /Offline cached study data/);
   assert.match(serverSource, /buildMobileQuizItems/);
   assert.match(serverSource, /quizzes/);
   assert.match(serverSource, /authorizedMobileStudyRequest/);
   assert.match(serverSource, /api\/mobile\/study/);
   assert.match(serverSource, /api\/learning\/mobile-study/);
   assert.match(serverSource, /api\/mobile\/review/);
+  assert.match(serverSource, /api\/reprocess-sources/);
+  assert.match(serverSource, /api\/reprocess-history/);
+  assert.match(serverSource, /api\/reprocess-history-restore/);
+  assert.match(serverSource, /reprocess-history/);
+  assert.match(serverSource, /Reprocess history/);
+  assert.match(serverSource, /restoreReprocessHistory/);
+  assert.match(serverSource, /skipRawCandidates: true/);
+  assert.match(serverSource, /Reprocess selected source/);
+  assert.match(serverSource, /Reprocess selected source page/);
   assert.match(serverSource, /Unknown learning \(card\|bit\)/);
   assert.match(serverSource, /LEARNING_BOOST_MOBILE_TOKEN/);
   assert.match(serverSource, /learning-daily-plan/);
@@ -330,6 +356,7 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /filesLoadPolls <= 2 \? 1400 : 5000/);
   assert.match(serverSource, /filesBody\.innerHTML = tabStatusRow\(7, "Loading vault files/);
   assert.match(serverSource, /archivesBody\.innerHTML = tabStatusRow\(7, "Loading archive history/);
+  assert.match(serverSource, /Use Retry to force a refresh/);
   assert.match(serverSource, /class="secondary table-retry"/);
   assert.match(serverSource, /data-retry-tab/);
   assert.match(serverSource, /loadFiles\(\{ refresh: true \}\)/);
@@ -337,6 +364,7 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /loadTopics\(\{ refresh: true \}\)/);
   assert.doesNotMatch(serverSource, /filesLoadPolls <= 18/);
   assert.doesNotMatch(serverSource, /archivesLoadPolls <= 18/);
+  assert.doesNotMatch(serverSource, /Retrying automatically/);
   assert.match(serverSource, /if \(data\.error && !\(data\.vaults \|\| \[\]\)\.length\) throw new Error\(data\.error\);/);
   assert.match(serverSource, /if \(data\.error && !\(data\.topics \|\| \[\]\)\.length\) throw new Error\(data\.error\);/);
   assert.match(serverSource, /api\/learning\/card-review/);

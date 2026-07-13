@@ -191,7 +191,7 @@ test("watch folder recursive setting includes nested supported files", () => {
   assert.equal(collected.filter((item) => item.captured).length, 2);
 });
 
-test("watch folder collector dedupes by path, size, and mtime", () => {
+test("watch folder collector dedupes by content hash across renamed files", () => {
   const { root, vault } = makeVault();
   const folder = path.join(root, "watched");
   fs.mkdirSync(folder);
@@ -199,13 +199,15 @@ test("watch folder collector dedupes by path, size, and mtime", () => {
   const settings = updateSourceCaptureSettings(vault, { enabled: true, watchFolders: [folder] });
 
   const first = collectWatchFolderResources(vault, { settings, previewApproved: true });
-  const second = collectWatchFolderResources(vault, { settings, previewApproved: true });
   const queuedFirst = queueResourceInboxForIngest(vault);
+  fs.renameSync(path.join(folder, "note.md"), path.join(folder, "renamed-note.md"));
+  const second = collectWatchFolderResources(vault, { settings, previewApproved: true });
   const queuedSecond = queueResourceInboxForIngest(vault);
 
   assert.equal(first.filter((item) => item.captured).length, 1);
   assert.equal(second.filter((item) => item.captured).length, 0);
   assert.match(second.summary.skipped[0].reason, /Already captured/);
+  assert.match(resourceInbox(vault)[0].dedupeKey, /^file-sha256:/);
   assert.equal(queuedFirst.queued.length, 1);
   assert.equal(queuedSecond.queued[0].reused, true);
   assert.equal(listRawCandidates(vault).length, 1);

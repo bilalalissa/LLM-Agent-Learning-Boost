@@ -82,7 +82,7 @@ The session cards include `Spaced review`, `Concept practice`, `Short quiz/test`
 
 ## Mobile Study
 
-Open `/mobile` on the Mac to use the same study queue in a phone-sized interface. It shows Today's Study Plan, due cards, due bits, short quiz/test items derived from due cards, unread items, and recent alerts. `Mark reviewed`, `Mark tested`, and `Mark read` write the same validated review events used by the desktop Learning tab, so spaced repetition stays in sync without accepting unknown card or bit IDs.
+Open `/mobile` on the Mac to use the same study queue in a phone-sized interface. It shows Today's Study Plan, due cards, due bits, the full available card/bit deck, short quiz/test items derived from due cards, unread items, and recent alerts. `Mark reviewed`, `Mark tested`, and `Mark read` write the same validated review events used by the desktop Learning tab, so spaced repetition stays in sync without accepting unknown card or bit IDs.
 
 For iPhone or iPad access, configure the Mac app on a trusted LAN:
 
@@ -93,6 +93,12 @@ LEARNING_BOOST_MOBILE_STUDY=true
 ```
 
 Then open `http://<your-mac-lan-ip>:8789/mobile?token=choose-a-long-local-token` from Safari, Arc, or another browser on the device. The mobile page is for study, quiz/test, and review only; it does not expose Provider settings or file/export controls.
+
+The mobile page includes jump buttons for Today, Quiz/Test, Cards, Bits, and Alerts. Tapping a card, bit, quiz, session, or alert enters focus mode: the selected item stays clear while surrounding content is visually de-emphasized. Use Clear focus or Escape to return to the full page. Mixed Arabic/English prompts and answers use automatic direction and plaintext bidi handling so RTL/LTR text wraps naturally.
+
+The Help/notice area reports the local Mac URL and, when configured, the trusted-LAN mobile URL. Non-local devices must use the tokenized URL. If the page opens on the Mac but not on another device, confirm `MAC_BRIDGE_HOST=0.0.0.0`, `CHAT_HOST=0.0.0.0`, a long `LEARNING_BOOST_MOBILE_TOKEN`, and the correct Mac LAN address such as `http://172.16.1.117:8789/mobile?token=...`.
+
+The mobile page also stores the last successfully loaded study queue in that device browser. If the Mac server or LAN connection drops, it shows an `Offline cached study data` notice and keeps the cached sessions, cards, bits, quiz/test items, and alerts navigable. Reading cached material works offline; review actions that write back to the vault need the Mac server connection again.
 
 ## Flexible Layout
 
@@ -151,6 +157,14 @@ The Autopilot controls also support explicit runtime state:
 - `Pause`: pause background work without clearing pending files or settings.
 - `Snooze 1 hour`: pause temporarily and resume after the snooze expires.
 - `Stop`: stop automatic learning for that vault until the user resumes it.
+
+## Reprocess Source
+
+Files has a `Reprocess selected source` button for preserved source pages that are still pending provider analysis. Select one or more source rows, then reprocess. Learning Boost saves the current source page under `.llm-wiki/learning/reprocess-history/<source>/<timestamp>.md` before rewriting the source page with the new provider result. This keeps prior ingestion attempts available for inspection while letting the latest successful analysis update cards, bits, topics, and source-to-plan links.
+
+Reprocess is targeted: it retries the selected source pages only and does not scan unrelated raw files. It is intended for cases where OCR/transcripts/extracted text exist but the selected provider was previously unavailable or timed out.
+
+Use `Reprocess history` to pick a favorite previous ingestion. Select exactly one source row, open the history chooser, pick a numbered snapshot, and confirm restore. The app backs up the current source page before restoring the chosen snapshot, so restore actions remain reversible.
 
 ## Capture Scan Status
 

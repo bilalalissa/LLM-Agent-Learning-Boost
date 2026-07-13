@@ -257,6 +257,88 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "POST" && url.pathname === "/api/reprocess-sources") {
+    try {
+      if (ingestRunning) throw new Error("Ingest is already running. Try again after the current pass finishes.");
+      const body = await readBody(request);
+      const { sources } = JSON.parse(body || "{}");
+      const selected = Array.isArray(sources) ? sources : [];
+      if (!selected.length) throw new Error("Select at least one source to reprocess.");
+      const byVault = new Map();
+      for (const item of selected) {
+        const sourcePage = String(item?.sourcePage || "").trim();
+        if (!sourcePage) continue;
+        const vault = vaultName(resolveLearningVaultPath(item?.vault));
+        if (!byVault.has(vault)) byVault.set(vault, []);
+        byVault.get(vault).push(sourcePage);
+      }
+      if (!byVault.size) throw new Error("Selected rows do not have source pages to reprocess.");
+      const results = [];
+      ingestRunning = true;
+      try {
+        for (const [vault, sourcePages] of byVault) {
+          const vaultPath = resolveLearningVaultPath(vault);
+          const vaultResults = await ingestVault(vaultPath, config, provider, {
+            skipRawCandidates: true,
+            reprocessPendingMedia: true,
+            pendingMediaLimit: sourcePages.length,
+            pendingMediaSourcePages: sourcePages,
+            preserveReprocessHistory: true
+          });
+          results.push({ vault, sourcePages, results: vaultResults });
+        }
+      } finally {
+        ingestRunning = false;
+      }
+      const reprocessed = results.reduce((sum, item) => sum + (item.results || []).length, 0);
+      lastIngestMessage = reprocessed
+        ? `Reprocessed ${reprocessed} selected source${reprocessed === 1 ? "" : "s"}.`
+        : "No selected pending media source was ready for reprocessing.";
+      refreshTabData("files", { force: true });
+      refreshTabData("topics", { force: true });
+      refreshTabData("learning", { force: true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ reprocessed, results }));
+    } catch (error) {
+      ingestRunning = false;
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/reprocess-history") {
+    try {
+      const vaultPath = resolveLearningVaultPath(url.searchParams.get("vault") || "");
+      const sourcePage = url.searchParams.get("sourcePage") || "";
+      const result = listReprocessHistory(vaultPath, sourcePage);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(result));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/reprocess-history-restore") {
+    try {
+      const body = await readBody(request);
+      const payload = JSON.parse(body || "{}");
+      const vaultPath = resolveLearningVaultPath(payload.vault || "");
+      const result = restoreReprocessHistory(vaultPath, payload);
+      refreshTabData("files", { force: true });
+      refreshTabData("topics", { force: true });
+      refreshTabData("learning", { force: true });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(result));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/api/export-files") {
     try {
       const body = await readBody(request);
@@ -1943,13 +2025,13 @@ function mobileStudyPayload(url = new URL("http://127.0.0.1/mobile")) {
     ...(stats.studyQueueCards || []),
     ...(stats.recentCards || []),
     ...(stats.allCards || [])
-  ], (item) => fastCardKey(item)).slice(0, 18);
+  ], (item) => fastCardKey(item));
   const bitSource = uniqueMobileStudyItems([
     ...(stats.dueBits || []),
     ...(stats.studyQueueBits || []),
     ...(stats.recentBits || []),
     ...(stats.allBits || [])
-  ], (item) => fastBitKey(item)).slice(0, 18);
+  ], (item) => fastBitKey(item));
   return {
     app: "LLM Agent Learning Boost Mobile Study",
     generatedAt: new Date().toISOString(),
@@ -1989,7 +2071,7 @@ function mobileStudyPayload(url = new URL("http://127.0.0.1/mobile")) {
     cards: cardSource.map(mobileStudyCard),
     quizzes: buildMobileQuizItems(cardSource, plan).slice(0, 6),
     bits: bitSource.map(mobileStudyBit),
-    notifications: (vault.notifications || []).slice(0, 6).map((item) => ({
+    notifications: (vault.notifications || []).slice(0, 50).map((item) => ({
       id: item.id || "",
       title: item.title || item.type || "Learning alert",
       body: item.body || item.detail || "",
@@ -2073,28 +2155,44 @@ function compactSourceLabel(value) {
 function mobileStudyAccessSummary() {
   const host = String(config.bridgeHost || "127.0.0.1");
   const localUrl = `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${config.chatPort}/mobile`;
+  const lanUrls = localLanAddresses().map((address) => `http://${address}:${config.chatPort}/mobile`);
+  const recommendedUrl = config.mobileStudy?.publicBaseUrl || (host === "0.0.0.0" && lanUrls.length ? lanUrls[0] : localUrl);
   return {
     enabled: config.mobileStudy?.enabled !== false,
     host,
     port: config.chatPort,
     localUrl,
+    lanUrls,
+    recommendedUrl,
     publicBaseUrl: config.mobileStudy?.publicBaseUrl || "",
     tokenRequiredForLan: true,
     tokenConfigured: Boolean(config.mobileStudy?.token)
   };
 }
 
+function localLanAddresses() {
+  const addresses = [];
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries || []) {
+      if (entry.family !== "IPv4" || entry.internal) continue;
+      if (!/^(10\.|172\.(1[6-9]|2\d|3[0-1])\.|192\.168\.)/.test(entry.address)) continue;
+      addresses.push(entry.address);
+    }
+  }
+  return [...new Set(addresses)];
+}
+
 function renderMobileStudyHtml(url) {
   const initialVault = url.searchParams.get("vault") || "";
   const token = url.searchParams.get("token") || "";
   return `<!doctype html>
-<html lang="en">
+<html lang="en" dir="auto">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Learning Boost Mobile Study</title>
   <style>
-    :root { color-scheme: light; --bg: #f4ead8; --panel: #fffaf0; --ink: #302820; --muted: #766852; --line: #d9c49b; --accent: #98620f; --practice: #7c3aed; --bit: #2563eb; }
+    :root { color-scheme: light; --bg: #f4ead8; --panel: #fffaf0; --ink: #302820; --muted: #766852; --line: #d9c49b; --accent: #98620f; --capture: #0f766e; --practice: #7c3aed; --bit: #2563eb; --alert: #be123c; }
     * { box-sizing: border-box; }
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); line-height: 1.45; }
     header { position: sticky; top: 0; z-index: 2; background: color-mix(in srgb, var(--bg) 94%, white); border-bottom: 1px solid var(--line); padding: 14px 16px; }
@@ -2103,7 +2201,9 @@ function renderMobileStudyHtml(url) {
     button, select { font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel); color: var(--ink); min-height: 42px; }
     button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 750; }
     main { padding: 14px; display: grid; gap: 14px; max-width: 980px; margin: 0 auto; }
-    .toolbar, .summary, .session, .study-card, .quiz-card, .bit-card, .alert { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px; }
+    .mobile-nav { position: sticky; top: 76px; z-index: 1; display: flex; gap: 8px; overflow-x: auto; padding: 8px 0; background: color-mix(in srgb, var(--bg) 92%, white); }
+    .mobile-nav button { white-space: nowrap; min-height: 36px; padding: 7px 10px; }
+    .toolbar, .summary, .legend, .session, .study-card, .quiz-card, .bit-card, .alert { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px; }
     .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .toolbar select { flex: 1 1 180px; min-width: 0; }
     .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; }
@@ -2112,12 +2212,25 @@ function renderMobileStudyHtml(url) {
     .sessions, .cards, .quizzes, .bits, .alerts { display: grid; gap: 10px; }
     .session { display: grid; gap: 4px; }
     .session strong { font-size: 17px; }
-    .study-card, .quiz-card, .bit-card { display: grid; gap: 10px; overflow-wrap: anywhere; }
+    .study-card, .quiz-card, .bit-card { display: grid; gap: 10px; overflow-wrap: anywhere; min-width: 0; transition: opacity .16s ease, filter .16s ease, transform .16s ease, box-shadow .16s ease; }
+    .text-run, .study-card strong, .quiz-card strong, .bit-card strong, .answer p, .muted { unicode-bidi: plaintext; text-align: start; overflow-wrap: break-word; }
     .study-card { border-color: color-mix(in srgb, var(--practice) 35%, var(--line)); background: color-mix(in srgb, var(--practice) 8%, var(--panel)); }
     .quiz-card { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
     .bit-card { border-color: color-mix(in srgb, var(--bit) 30%, var(--line)); background: color-mix(in srgb, var(--bit) 7%, var(--panel)); }
     .chips { display: flex; flex-wrap: wrap; gap: 6px; }
     .chip { border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; color: var(--muted); background: #f8f0df; font-size: 13px; }
+    .chip.capture { border-color: color-mix(in srgb, var(--capture) 45%, var(--line)); color: var(--capture); }
+    .chip.practice { border-color: color-mix(in srgb, var(--practice) 45%, var(--line)); color: var(--practice); }
+    .chip.bit { border-color: color-mix(in srgb, var(--bit) 45%, var(--line)); color: var(--bit); }
+    .chip.alert { border-color: color-mix(in srgb, var(--alert) 45%, var(--line)); color: var(--alert); }
+    .legend { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .legend strong { flex-basis: 100%; }
+    body.focus-active .study-card:not(.is-focused),
+    body.focus-active .quiz-card:not(.is-focused),
+    body.focus-active .bit-card:not(.is-focused),
+    body.focus-active .session:not(.is-focused),
+    body.focus-active .alert:not(.is-focused) { opacity: .32; filter: blur(1.5px); }
+    .is-focused { transform: translateY(-1px); box-shadow: 0 8px 24px rgb(48 40 32 / 18%); outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); }
     .answer[hidden] { display: none; }
     .answer { border-top: 1px solid var(--line); padding-top: 10px; }
     .muted { color: var(--muted); }
@@ -2133,18 +2246,28 @@ function renderMobileStudyHtml(url) {
     <section class="toolbar">
       <select id="vault"></select>
       <button id="refresh" type="button">Refresh</button>
+      <button id="clear-focus" type="button">Clear focus</button>
     </section>
+    <nav class="mobile-nav" aria-label="Mobile study sections">
+      <button type="button" data-mobile-jump="today-section">Today</button>
+      <button type="button" data-mobile-jump="quiz-section">Quiz/Test</button>
+      <button type="button" data-mobile-jump="cards-section">Cards</button>
+      <button type="button" data-mobile-jump="bits-section">Bits</button>
+      <button type="button" data-mobile-jump="alerts-section">Alerts</button>
+    </nav>
     <section id="notice" class="alert" hidden></section>
     <section id="summary" class="summary"></section>
-    <section><h2>Today</h2><div id="sessions" class="sessions"></div></section>
-    <section><h2>Short Quiz/Test</h2><div id="quizzes" class="quizzes"></div></section>
-    <section><h2>Cards</h2><div id="cards" class="cards"></div></section>
-    <section><h2>Bits</h2><div id="bits" class="bits"></div></section>
-    <section><h2>Alerts</h2><div id="alerts" class="alerts"></div></section>
+    <section class="legend"><strong>Card and bit types</strong><span class="chip capture">capture/source</span><span class="chip bit">understanding/bit</span><span class="chip practice">practice/card</span><span class="chip alert">alert/provider</span></section>
+    <section id="today-section"><h2>Today</h2><div id="sessions" class="sessions"></div></section>
+    <section id="quiz-section"><h2>Short Quiz/Test</h2><div id="quizzes" class="quizzes"></div></section>
+    <section id="cards-section"><h2>Cards</h2><div id="cards" class="cards"></div></section>
+    <section id="bits-section"><h2>Bits</h2><div id="bits" class="bits"></div></section>
+    <section id="alerts-section"><h2>Alerts</h2><div id="alerts" class="alerts"></div></section>
   </main>
   <script>
     const MOBILE_TOKEN = ${JSON.stringify(token)};
     const INITIAL_VAULT = ${JSON.stringify(initialVault)};
+    const MOBILE_CACHE_KEY = "learning-boost-mobile-study-cache-v1";
     const vaultSelect = document.querySelector("#vault");
     const generated = document.querySelector("#generated");
     const notice = document.querySelector("#notice");
@@ -2155,8 +2278,16 @@ function renderMobileStudyHtml(url) {
     const bits = document.querySelector("#bits");
     const alerts = document.querySelector("#alerts");
     document.querySelector("#refresh").addEventListener("click", () => loadStudy(vaultSelect.value));
+    document.querySelector("#clear-focus").addEventListener("click", clearFocus);
     vaultSelect.addEventListener("change", () => loadStudy(vaultSelect.value));
     document.addEventListener("click", async (event) => {
+      const jump = event.target.closest("[data-mobile-jump]");
+      if (jump) {
+        document.getElementById(jump.dataset.mobileJump)?.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      const focusable = event.target.closest("[data-study-kind], .session, .alert");
+      if (focusable && !event.target.closest("[data-mobile-jump]")) setFocus(focusable);
       const button = event.target.closest("[data-action]");
       if (!button) return;
       const card = button.closest("[data-study-kind]");
@@ -2185,6 +2316,9 @@ function renderMobileStudyHtml(url) {
         await loadStudy(vaultSelect.value);
       }
     });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") clearFocus();
+    });
     loadStudy(INITIAL_VAULT);
     setInterval(() => {
       if (document.hidden) return;
@@ -2192,17 +2326,42 @@ function renderMobileStudyHtml(url) {
     }, 60000);
     async function loadStudy(vault) {
       const query = vault ? "?vault=" + encodeURIComponent(vault) : "";
-      const response = await fetch(withToken("/api/mobile/study" + query));
-      if (!response.ok) {
+      try {
+        const response = await fetch(withToken("/api/mobile/study" + query), { cache: "no-store" });
+        if (!response.ok) throw new Error(await response.text());
+        const data = await response.json();
+        localStorage.setItem(MOBILE_CACHE_KEY, JSON.stringify({ savedAt: new Date().toISOString(), data }));
+        renderStudy(data, { cached: false });
+      } catch (error) {
+        const cached = readCachedMobileStudy(vault);
+        if (cached) {
+          renderStudy(cached.data, { cached: true, savedAt: cached.savedAt, error: error.message });
+          return;
+        }
         notice.hidden = false;
-        notice.innerHTML = '<span class="error">Mobile study unavailable: ' + escapeHtml(await response.text()) + '</span>';
-        return;
+        notice.innerHTML = '<span class="error">Mobile study unavailable and no cached study data is stored on this device: ' + escapeHtml(error.message) + '</span>';
       }
-      const data = await response.json();
+    }
+    function readCachedMobileStudy(vault) {
+      try {
+        const cached = JSON.parse(localStorage.getItem(MOBILE_CACHE_KEY) || "null");
+        if (!cached?.data) return null;
+        if (vault && cached.data.vault && cached.data.vault !== vault) return null;
+        return cached;
+      } catch {
+        return null;
+      }
+    }
+    function renderStudy(data, options = {}) {
       generated.textContent = data.generatedAtLocal + " · " + data.timeZone + " · refreshes alerts every minute while open";
       vaultSelect.innerHTML = (data.vaults || []).map((name) => '<option value="' + escapeHtml(name) + '"' + (name === data.vault ? " selected" : "") + '>' + escapeHtml(name) + '</option>').join("");
-      notice.hidden = data.mobileAccess.tokenConfigured || data.mobileAccess.host === "127.0.0.1";
-      notice.textContent = "For iPhone/iPad LAN access, set MAC_BRIDGE_HOST=0.0.0.0 and LEARNING_BOOST_MOBILE_TOKEN in config.env, then open /mobile?token=... from the device.";
+      const lanHint = (data.mobileAccess.lanUrls || []).length ? data.mobileAccess.lanUrls[0] : data.mobileAccess.localUrl;
+      notice.hidden = !options.cached && data.mobileAccess.tokenConfigured && data.mobileAccess.host === "0.0.0.0";
+      notice.textContent = options.cached
+        ? "Offline cached study data from " + formatCachedTime(options.savedAt) + ". Review loaded cards/bits; new reviews need the Mac server connection."
+        : (data.mobileAccess.tokenConfigured
+          ? "Open " + lanHint + "?token=YOUR_TOKEN on another trusted local device. Remote access should use a private VPN or tunnel."
+          : "LAN access needs MAC_BRIDGE_HOST=0.0.0.0 and LEARNING_BOOST_MOBILE_TOKEN in config.env.");
       summary.innerHTML = metric("Due", data.counts.dueCards + data.counts.dueBits) + metric("Ready", data.plan.readyCount) + metric("Cards", data.counts.cards) + metric("Bits", data.counts.bits) + metric("Timing", data.plan.timingBasis || "default spacing");
       sessions.innerHTML = (data.plan.sessions || []).map(renderSession).join("") || '<p class="muted">No study sessions yet.</p>';
       quizzes.innerHTML = (data.quizzes || []).map(renderQuiz).join("") || '<p class="muted">No quiz/test items yet. Review cards will appear here when available.</p>';
@@ -2210,26 +2369,38 @@ function renderMobileStudyHtml(url) {
       bits.innerHTML = (data.bits || []).map(renderBit).join("") || '<p class="muted">No bits yet. Process one source first.</p>';
       alerts.innerHTML = (data.notifications || []).map(renderAlert).join("") || '<p class="muted">No active learning alerts.</p>';
     }
+    function formatCachedTime(value) {
+      try { return new Date(value).toLocaleString(); } catch { return "the last successful load"; }
+    }
     function withToken(path) {
       if (!MOBILE_TOKEN) return path;
       const glue = path.includes("?") ? "&" : "?";
       return path + glue + "token=" + encodeURIComponent(MOBILE_TOKEN);
     }
     function metric(label, value) { return '<div class="metric"><strong>' + escapeHtml(String(value || 0)) + '</strong><span>' + escapeHtml(label) + '</span></div>'; }
+    function setFocus(element) {
+      document.querySelectorAll(".is-focused").forEach((item) => item.classList.remove("is-focused"));
+      document.body.classList.add("focus-active");
+      element.classList.add("is-focused");
+    }
+    function clearFocus() {
+      document.body.classList.remove("focus-active");
+      document.querySelectorAll(".is-focused").forEach((item) => item.classList.remove("is-focused"));
+    }
     function renderSession(item) {
-      return '<article class="session"><strong>' + escapeHtml(item.label + " · " + item.title) + '</strong><span class="muted">' + escapeHtml(item.localTime || "") + " · " + escapeHtml(String(item.durationMinutes || 10)) + ' min</span><p>' + escapeHtml(item.detail || "") + '</p></article>';
+      return '<article class="session" tabindex="0"><strong dir="auto" class="text-run">' + escapeHtml(item.label + " · " + item.title) + '</strong><span class="muted" dir="auto">' + escapeHtml(item.localTime || "") + " · " + escapeHtml(String(item.durationMinutes || 10)) + ' min</span><p dir="auto" class="text-run">' + escapeHtml(item.detail || "") + '</p></article>';
     }
     function renderCard(item) {
-      return '<article class="study-card" data-study-kind="card" data-study-id="' + escapeHtml(item.id) + '" data-prompt="' + escapeHtml(item.prompt) + '" data-topic="' + escapeHtml(item.topic) + '" data-source-page="' + escapeHtml(item.sourcePage) + '"><div class="chips"><span class="chip">' + escapeHtml(item.type) + '</span><span class="chip">' + escapeHtml(item.topic) + '</span>' + (item.due ? '<span class="chip">due</span>' : '') + (item.read ? '<span class="chip">read</span>' : '') + '</div><strong>' + escapeHtml(item.prompt) + '</strong>' + (item.hint ? '<p class="muted">' + escapeHtml(item.hint) + '</p>' : '') + '<div class="answer" hidden><strong>Answer</strong><p>' + escapeHtml(item.answer || "No answer text recorded.") + '</p><p class="muted">' + escapeHtml(item.sourceLabel || "") + '</p></div><button type="button" data-action="toggle-answer">Show answer</button><button class="primary" type="button" data-action="review" data-grade="good">Mark reviewed</button></article>';
+      return '<article class="study-card" tabindex="0" data-study-kind="card" data-study-id="' + escapeHtml(item.id) + '" data-prompt="' + escapeHtml(item.prompt) + '" data-topic="' + escapeHtml(item.topic) + '" data-source-page="' + escapeHtml(item.sourcePage) + '"><div class="chips"><span class="chip practice">' + escapeHtml(item.type) + '</span><span class="chip">' + escapeHtml(item.topic) + '</span>' + (item.due ? '<span class="chip alert">due</span>' : '') + (item.read ? '<span class="chip bit">read</span>' : '') + '</div><strong dir="auto" class="text-run">' + escapeHtml(item.prompt) + '</strong>' + (item.hint ? '<p class="muted" dir="auto">' + escapeHtml(item.hint) + '</p>' : '') + '<div class="answer" hidden><strong>Answer</strong><p dir="auto" class="text-run">' + escapeHtml(item.answer || "No answer text recorded.") + '</p><p class="muted" dir="auto">' + escapeHtml(item.sourceLabel || "") + '</p></div><button type="button" data-action="toggle-answer">Show answer</button><button class="primary" type="button" data-action="review" data-grade="good">Mark reviewed</button></article>';
     }
     function renderQuiz(item) {
-      return '<article class="quiz-card" data-study-kind="card" data-study-id="' + escapeHtml(item.cardId) + '" data-prompt="' + escapeHtml(item.prompt) + '" data-topic="' + escapeHtml(item.topic) + '" data-source-page="' + escapeHtml(item.sourcePage) + '"><div class="chips"><span class="chip">quiz/test</span><span class="chip">' + escapeHtml(item.topic) + '</span>' + (item.suggestedLocalTime ? '<span class="chip">' + escapeHtml(item.suggestedLocalTime) + '</span>' : '') + '</div><strong>' + escapeHtml(item.prompt) + '</strong>' + (item.hint ? '<p class="muted">' + escapeHtml(item.hint) + '</p>' : '') + '<div class="answer" hidden><strong>Check answer</strong><p>' + escapeHtml(item.answer || "No answer text recorded.") + '</p><p class="muted">' + escapeHtml(item.sourceLabel || "") + '</p></div><button type="button" data-action="toggle-answer">Check answer</button><button class="primary" type="button" data-action="review" data-grade="good">Mark tested</button></article>';
+      return '<article class="quiz-card" tabindex="0" data-study-kind="card" data-study-id="' + escapeHtml(item.cardId) + '" data-prompt="' + escapeHtml(item.prompt) + '" data-topic="' + escapeHtml(item.topic) + '" data-source-page="' + escapeHtml(item.sourcePage) + '"><div class="chips"><span class="chip practice">quiz/test</span><span class="chip">' + escapeHtml(item.topic) + '</span>' + (item.suggestedLocalTime ? '<span class="chip">' + escapeHtml(item.suggestedLocalTime) + '</span>' : '') + '</div><strong dir="auto" class="text-run">' + escapeHtml(item.prompt) + '</strong>' + (item.hint ? '<p class="muted" dir="auto">' + escapeHtml(item.hint) + '</p>' : '') + '<div class="answer" hidden><strong>Check answer</strong><p dir="auto" class="text-run">' + escapeHtml(item.answer || "No answer text recorded.") + '</p><p class="muted" dir="auto">' + escapeHtml(item.sourceLabel || "") + '</p></div><button type="button" data-action="toggle-answer">Check answer</button><button class="primary" type="button" data-action="review" data-grade="good">Mark tested</button></article>';
     }
     function renderBit(item) {
-      return '<article class="bit-card" data-study-kind="bit" data-study-id="' + escapeHtml(item.id) + '" data-title="' + escapeHtml(item.title) + '" data-topic="' + escapeHtml(item.topic) + '" data-source-page="' + escapeHtml(item.sourcePage) + '"><div class="chips"><span class="chip">bit</span><span class="chip">' + escapeHtml(item.topic) + '</span>' + (item.due ? '<span class="chip">due</span>' : '') + (item.read ? '<span class="chip">read</span>' : '') + '</div><strong>' + escapeHtml(item.title) + '</strong><p>' + escapeHtml(item.detail || "") + '</p><p class="muted">' + escapeHtml(item.sourceLabel || "") + '</p><button class="primary" type="button" data-action="review" data-grade="read">Mark read</button></article>';
+      return '<article class="bit-card" tabindex="0" data-study-kind="bit" data-study-id="' + escapeHtml(item.id) + '" data-title="' + escapeHtml(item.title) + '" data-topic="' + escapeHtml(item.topic) + '" data-source-page="' + escapeHtml(item.sourcePage) + '"><div class="chips"><span class="chip bit">bit</span><span class="chip">' + escapeHtml(item.topic) + '</span>' + (item.due ? '<span class="chip alert">due</span>' : '') + (item.read ? '<span class="chip bit">read</span>' : '') + '</div><strong dir="auto" class="text-run">' + escapeHtml(item.title) + '</strong><p dir="auto" class="text-run">' + escapeHtml(item.detail || "") + '</p><p class="muted" dir="auto">' + escapeHtml(item.sourceLabel || "") + '</p><button class="primary" type="button" data-action="review" data-grade="read">Mark read</button></article>';
     }
     function renderAlert(item) {
-      return '<article class="alert"><strong>' + escapeHtml(item.title) + '</strong><p>' + escapeHtml(item.body || "") + '</p><span class="muted">' + escapeHtml(item.status || "") + " · " + escapeHtml(item.createdLocal || "") + '</span></article>';
+      return '<article class="alert" tabindex="0"><strong dir="auto" class="text-run">' + escapeHtml(item.title) + '</strong><p dir="auto" class="text-run">' + escapeHtml(item.body || "") + '</p><span class="muted" dir="auto">' + escapeHtml(item.status || "") + " · " + escapeHtml(item.createdLocal || "") + '</span></article>';
     }
     function escapeHtml(value) {
       return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
@@ -3610,6 +3781,60 @@ function safeVaultPath(vaultPath, input) {
   const full = path.resolve(root, normalized);
   if (full !== root && !full.startsWith(root + path.sep)) throw new Error("Invalid selected file path.");
   return { full, relative: normalized };
+}
+
+function listReprocessHistory(vaultPath, sourcePage) {
+  const source = safeVaultPath(vaultPath, sourcePage);
+  const sourceBase = sourceHistorySlug(path.basename(source.relative, ".md") || "source");
+  const historyRelDir = `.llm-wiki/learning/reprocess-history/${sourceBase}`;
+  const historyDir = safeVaultPath(vaultPath, historyRelDir);
+  const entries = fs.existsSync(historyDir.full)
+    ? fs.readdirSync(historyDir.full, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+      .map((entry) => {
+        const rel = `${historyRelDir}/${entry.name}`;
+        const stat = fs.statSync(path.join(historyDir.full, entry.name));
+        return {
+          path: rel,
+          name: entry.name,
+          createdAt: stat.mtime.toISOString(),
+          createdAtLocal: formatLocal(stat.mtime),
+          size: stat.size
+        };
+      })
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    : [];
+  return { vault: vaultName(vaultPath), sourcePage: source.relative, historyDir: historyRelDir, entries };
+}
+
+function restoreReprocessHistory(vaultPath, payload = {}) {
+  const source = safeVaultPath(vaultPath, payload.sourcePage || "");
+  const history = safeVaultPath(vaultPath, payload.historyPath || payload.path || "");
+  const allowedPrefix = path.resolve(vaultPath, ".llm-wiki", "learning", "reprocess-history") + path.sep;
+  if (!history.full.startsWith(allowedPrefix)) throw new Error("History snapshot is outside the reprocess history folder.");
+  if (!fs.existsSync(history.full)) throw new Error("History snapshot was not found.");
+  if (!fs.existsSync(source.full)) throw new Error("Current source page was not found.");
+  const backupRel = `.llm-wiki/learning/reprocess-history/restore-backups/${sourceHistorySlug(path.basename(source.relative, ".md") || "source")}-${new Date().toISOString().replace(/[:.]/g, "-")}.md`;
+  const backup = safeVaultPath(vaultPath, backupRel);
+  ensureDir(path.dirname(backup.full));
+  fs.copyFileSync(source.full, backup.full);
+  fs.copyFileSync(history.full, source.full);
+  return {
+    status: "restored",
+    vault: vaultName(vaultPath),
+    sourcePage: source.relative,
+    restoredFrom: history.relative,
+    backup: backup.relative
+  };
+}
+
+function sourceHistorySlug(value) {
+  return String(value || "source")
+    .normalize("NFKD")
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase()
+    .slice(0, 96) || "source";
 }
 
 function renderFilesExportMarkdown(entries) {
@@ -5567,6 +5792,8 @@ function renderHtml() {
       <div class="sticky-controls">
         <div class="result-tools">
           <button id="rename-source" class="secondary" type="button">Rename selected source</button>
+          <button id="reprocess-source" class="secondary" type="button">Reprocess selected source</button>
+          <button id="reprocess-history" class="secondary" type="button">Reprocess history</button>
           <button id="merge-sources" class="secondary" type="button">Merge selected sources</button>
           <button id="delete-sources" class="secondary" type="button">Archive selected sources</button>
           <select id="files-export-format" aria-label="Selected files export format">
@@ -5579,6 +5806,8 @@ function renderHtml() {
             <input id="files-sticky-sections" type="checkbox"> Sticky local titles
           </label>
           <span id="rename-source-feedback" class="copy-feedback"></span>
+          <span id="reprocess-source-feedback" class="copy-feedback"></span>
+          <span id="reprocess-history-feedback" class="copy-feedback"></span>
           <span id="merge-sources-feedback" class="copy-feedback"></span>
           <span id="delete-sources-feedback" class="copy-feedback"></span>
           <span id="files-export-feedback" class="copy-feedback"></span>
@@ -6250,6 +6479,10 @@ function renderHtml() {
     const archivesClearFilter = document.querySelector("#archives-clear-filter");
     const renameSourceButton = document.querySelector("#rename-source");
     const renameSourceFeedback = document.querySelector("#rename-source-feedback");
+    const reprocessSourceButton = document.querySelector("#reprocess-source");
+    const reprocessSourceFeedback = document.querySelector("#reprocess-source-feedback");
+    const reprocessHistoryButton = document.querySelector("#reprocess-history");
+    const reprocessHistoryFeedback = document.querySelector("#reprocess-history-feedback");
     const mergeSourcesButton = document.querySelector("#merge-sources");
     const mergeSourcesFeedback = document.querySelector("#merge-sources-feedback");
     const deleteSourcesButton = document.querySelector("#delete-sources");
@@ -6627,6 +6860,8 @@ function renderHtml() {
     clearChat.addEventListener("click", () => clearChatResult());
     clearLocal.addEventListener("click", () => clearLocalResult());
     renameSourceButton.addEventListener("click", renameSelectedSource);
+    reprocessSourceButton.addEventListener("click", reprocessSelectedSources);
+    reprocessHistoryButton.addEventListener("click", chooseReprocessHistory);
     mergeSourcesButton.addEventListener("click", mergeSelectedSources);
     deleteSourcesButton.addEventListener("click", deleteSelectedSources);
     exportSelectedFilesButton.addEventListener("click", () => exportSelectedFiles("download", filesExportFormat.value));
@@ -7342,8 +7577,7 @@ function renderHtml() {
           }
           if (filesLoadPolls <= 4) setTimeout(() => loadFiles(), filesLoadPolls <= 2 ? 1400 : 5000);
           else {
-            if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Vault files are still indexing in the background. Retrying automatically; use Retry to force a refresh.", "files");
-            setTimeout(() => loadFiles(), 15000);
+            if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Vault files are still indexing or the scan timed out. Use Retry to force a refresh.", "files");
           }
           return;
         }
@@ -7462,6 +7696,99 @@ function renderHtml() {
       } finally {
         renameSourceButton.disabled = false;
         setTimeout(() => { renameSourceFeedback.textContent = ""; }, 3600);
+      }
+    }
+
+    async function reprocessSelectedSources() {
+      const selected = selectedSourceItems().filter((item) => item.sourcePage);
+      if (!selected.length) {
+        reprocessSourceFeedback.textContent = "Select a source page first";
+        setTimeout(() => { reprocessSourceFeedback.textContent = ""; }, 2200);
+        return;
+      }
+      const confirmed = window.confirm(
+        "Reprocess selected source page" + (selected.length === 1 ? "" : "s") + "?\\n\\n" +
+        "The current source page is saved under .llm-wiki/learning/reprocess-history before provider analysis is retried."
+      );
+      if (!confirmed) return;
+      reprocessSourceButton.disabled = true;
+      reprocessSourceFeedback.textContent = "Reprocessing...";
+      try {
+        const response = await fetch("/api/reprocess-sources", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sources: selected })
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        const historyCount = (data.results || []).reduce((sum, group) => sum + (group.results || []).filter((item) => item.history).length, 0);
+        reprocessSourceFeedback.textContent = data.reprocessed
+          ? "Reprocessed " + data.reprocessed + "; saved " + historyCount + " history snapshot" + (historyCount === 1 ? "" : "s")
+          : "No selected pending media source was ready";
+        await loadFiles({ refresh: true });
+        loadTopics({ refresh: true });
+        loadLearning();
+        loadStatus();
+      } catch (error) {
+        reprocessSourceFeedback.textContent = error.message;
+      } finally {
+        reprocessSourceButton.disabled = false;
+        setTimeout(() => { reprocessSourceFeedback.textContent = ""; }, 5200);
+      }
+    }
+
+    async function chooseReprocessHistory() {
+      const selected = selectedSourceItems().filter((item) => item.sourcePage);
+      if (selected.length !== 1) {
+        reprocessHistoryFeedback.textContent = "Select exactly one source page";
+        setTimeout(() => { reprocessHistoryFeedback.textContent = ""; }, 2400);
+        return;
+      }
+      reprocessHistoryButton.disabled = true;
+      reprocessHistoryFeedback.textContent = "Loading history...";
+      try {
+        const source = selected[0];
+        const params = new URLSearchParams({ vault: source.vault || "", sourcePage: source.sourcePage || "" });
+        const response = await fetch("/api/reprocess-history?" + params.toString());
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        const entries = data.entries || [];
+        if (!entries.length) {
+          reprocessHistoryFeedback.textContent = "No history snapshots for this source yet";
+          return;
+        }
+        const menu = entries.slice(0, 12).map((entry, index) => {
+          const sizeKb = Math.max(1, Math.round((entry.size || 0) / 1024));
+          return (index + 1) + ". " + entry.createdAtLocal + " · " + sizeKb + " KB";
+        }).join("\\n");
+        const choice = window.prompt("Choose a reprocess history snapshot to restore. Current source page will be backed up first.\\n\\n" + menu, "1");
+        if (!choice) {
+          reprocessHistoryFeedback.textContent = "History restore cancelled";
+          return;
+        }
+        const index = Number(choice) - 1;
+        if (!Number.isInteger(index) || !entries[index]) throw new Error("Choose a valid snapshot number.");
+        const confirmed = window.confirm("Restore this source page from history? The current version will be backed up first.");
+        if (!confirmed) {
+          reprocessHistoryFeedback.textContent = "History restore cancelled";
+          return;
+        }
+        const restore = await fetch("/api/reprocess-history-restore", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ vault: source.vault || "", sourcePage: source.sourcePage || "", historyPath: entries[index].path })
+        });
+        const result = await restore.json();
+        if (result.error) throw new Error(result.error);
+        reprocessHistoryFeedback.textContent = "Restored snapshot; previous current version backed up";
+        await loadFiles({ refresh: true });
+        loadTopics({ refresh: true });
+        loadLearning();
+      } catch (error) {
+        reprocessHistoryFeedback.textContent = error.message;
+      } finally {
+        reprocessHistoryButton.disabled = false;
+        setTimeout(() => { reprocessHistoryFeedback.textContent = ""; }, 6200);
       }
     }
 
@@ -7666,8 +7993,7 @@ function renderHtml() {
           }
           if (archivesLoadPolls <= 4) setTimeout(() => loadArchives(), archivesLoadPolls <= 2 ? 1400 : 5000);
           else {
-            if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Archive history is still indexing in the background. Retrying automatically; use Retry to force a refresh.", "archives");
-            setTimeout(() => loadArchives(), 15000);
+            if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Archive history is still indexing or the scan timed out. Use Retry to force a refresh.", "archives");
           }
           return;
         }
@@ -7948,8 +8274,7 @@ function renderHtml() {
           }
           if (topicsLoadPolls <= 4) setTimeout(() => loadTopics(), topicsLoadPolls <= 2 ? 1400 : 5000);
           else {
-            if (!topicsCache.length) topicsBody.innerHTML = tabStatusRow(7, "Topics are still indexing in the background. Retrying automatically; use Retry to force a refresh.", "topics");
-            setTimeout(() => loadTopics(), 15000);
+            if (!topicsCache.length) topicsBody.innerHTML = tabStatusRow(7, "Topics are still indexing or the scan timed out. Use Retry to force a refresh.", "topics");
           }
           return;
         }

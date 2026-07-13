@@ -140,6 +140,33 @@ test("duplicate captures are reported without appending another ResourceInbox ro
   assert.equal(resourceInbox(vault).length, 1);
 });
 
+test("duplicate captures use explicit dedupe keys across renamed files", () => {
+  const { vault } = makeVault();
+  const first = captureResource(vault, {
+    sourceType: "manual_import",
+    title: "Downloaded paper",
+    file: "/tmp/download-a.pdf",
+    dedupeKey: "file-sha256:same-content",
+    contentHash: "same-content",
+    userApproved: true
+  });
+  const second = captureResource(vault, {
+    sourceType: "manual_import",
+    title: "Renamed downloaded paper",
+    file: "/tmp/download-b.pdf",
+    dedupeKey: "file-sha256:same-content",
+    contentHash: "same-content",
+    userApproved: true
+  });
+
+  assert.equal(first.captured, true);
+  assert.equal(second.captured, false);
+  assert.equal(second.duplicate, true);
+  assert.equal(resourceInbox(vault).length, 1);
+  assert.equal(resourceInbox(vault)[0].dedupeKey, "file-sha256:same-content");
+  assert.equal(resourceInbox(vault)[0].contentHash, "same-content");
+});
+
 test("captured resources can be staged for ingest and marked as ingested", () => {
   const { vault } = makeVault();
   const captured = captureResource(vault, {

@@ -543,7 +543,7 @@ test("openai_subscription Codex pipe failures reject without crashing the provid
   await assert.rejects(
     provider.complete([{ role: "user", content: "hello" }]),
     (error) => error instanceof ProviderError
-      && /Codex CLI exited/.test(error.message)
+      && /Codex CLI (exited|timed out)/.test(error.message)
       && !/Failed to send prompt to Codex CLI/.test(error.message)
   );
 });

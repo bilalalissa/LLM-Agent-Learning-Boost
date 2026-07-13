@@ -26,9 +26,10 @@ import {
 export async function ingestVault(vaultPath, config, provider = createProvider(config), options = {}) {
   const requestedLimit = Number(options.limit || options.resourceLimit || 0);
   const limit = Number.isFinite(requestedLimit) && requestedLimit > 0 ? Math.floor(requestedLimit) : 0;
+  const rawCandidates = options.skipRawCandidates === true ? [] : listRawCandidates(vaultPath);
   const candidates = limit > 0
-    ? listRawCandidates(vaultPath).slice(0, limit)
-    : listRawCandidates(vaultPath);
+    ? rawCandidates.slice(0, limit)
+    : rawCandidates;
   const results = [];
   for (const sourcePath of candidates) {
     await yieldToEventLoop();
@@ -42,6 +43,8 @@ export async function ingestVault(vaultPath, config, provider = createProvider(c
     results.push(...await reprocessPendingMediaPages(vaultPath, provider, {
       limit: pendingMediaLimit,
       maxScanned: options.pendingMediaScanLimit,
+      sourcePages: options.pendingMediaSourcePages,
+      preserveHistory: options.preserveReprocessHistory === true,
       ingestMaxChars: config.ingestMaxChars,
       config
     }));
@@ -266,7 +269,8 @@ async function reprocessPendingMediaPages(vaultPath, provider, options = {}) {
   for (const sourcePagePath of pendingMediaPagePaths(vaultPath, {
     limit,
     maxScanned: options.maxScanned,
-    providerReadyOnly: options.providerReadyOnly
+    providerReadyOnly: options.providerReadyOnly,
+    sourcePages: options.sourcePages
   })) {
     await yieldToEventLoop();
     const text = fs.readFileSync(sourcePagePath, "utf8");
@@ -286,6 +290,7 @@ async function reprocessPendingMediaPages(vaultPath, provider, options = {}) {
       : await analyzeMediaSource(provider, { sourceTitle, media, assetPath, processedSource, vault: vaultName(vaultPath) });
     const userNotes = text.match(/\n## User Notes[\s\S]*$/m)?.[0] || "";
     const sourceRel = path.relative(vaultPath, sourcePagePath).replace(/\\/g, "/");
+    const historyRel = options.preserveHistory ? preserveReprocessHistory(vaultPath, sourceRel, text) : "";
 
     fs.writeFileSync(sourcePagePath, renderMediaSourcePage({
       date,
@@ -330,6 +335,7 @@ async function reprocessPendingMediaPages(vaultPath, provider, options = {}) {
       conceptPages,
       learning: learningResult,
       reprocessed: true,
+      history: historyRel,
       pendingContent: analysis.status === "pending_content",
       pendingProviderAnalysis: analysis.status === "pending_provider_analysis"
     });
@@ -344,6 +350,9 @@ function pendingMediaPagePaths(vaultPath, options = {}) {
   const limit = Math.max(0, Number(options.limit || 0));
   const maxScanned = Math.max(0, Number(options.maxScanned || 0));
   const providerReadyOnly = options.providerReadyOnly !== false;
+  const selected = new Set((Array.isArray(options.sourcePages) ? options.sourcePages : [])
+    .map((item) => normalizeSourcePageRel(item))
+    .filter(Boolean));
   const result = [];
   const files = [];
   if (!fs.existsSync(sourceDir)) return result;
@@ -351,6 +360,8 @@ function pendingMediaPagePaths(vaultPath, options = {}) {
 
   let scanned = 0;
   for (const sourcePagePath of files.filter((file) => file.endsWith(".md"))) {
+    const rel = path.relative(vaultPath, sourcePagePath).replace(/\\/g, "/");
+    if (selected.size && !selected.has(normalizeSourcePageRel(rel))) continue;
     scanned += 1;
     if (maxScanned > 0 && scanned > maxScanned) break;
     const text = fs.readFileSync(sourcePagePath, "utf8");
@@ -363,6 +374,22 @@ function pendingMediaPagePaths(vaultPath, options = {}) {
     if (limit > 0 && result.length >= limit) break;
   }
   return result;
+}
+
+function normalizeSourcePageRel(value) {
+  const rel = String(value || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!rel) return "";
+  return rel.endsWith(".md") ? rel : `${rel}.md`;
+}
+
+function preserveReprocessHistory(vaultPath, sourceRel, text) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const sourceBase = slugify(path.basename(sourceRel, ".md") || "source");
+  const rel = `.llm-wiki/learning/reprocess-history/${sourceBase}/${stamp}.md`;
+  const file = path.join(vaultPath, rel);
+  ensureDir(path.dirname(file));
+  fs.writeFileSync(file, text);
+  return rel;
 }
 
 function mediaPageReadyForProviderRetry(text) {

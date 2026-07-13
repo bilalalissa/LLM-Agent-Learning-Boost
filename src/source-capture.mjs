@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -167,6 +168,8 @@ export function captureResource(vaultPath, input = {}, options = {}) {
 }
 
 function resourceIdentity(resource = {}) {
+  const dedupeKey = String(resource.dedupeKey || resource.ingest?.dedupeKey || "").trim();
+  if (dedupeKey) return `${normalizeSourceType(resource.sourceType || "manual_import")}|${dedupeKey}`;
   return [
     normalizeSourceType(resource.sourceType || "manual_import"),
     String(resource.file || resource.url || resource.title || "").trim().toLowerCase()
@@ -311,6 +314,8 @@ function normalizeResource(input, { sourceType, now, vaultPath, settings }) {
     title,
     sourceType,
     topic: stringOr(input.topic, inferTopic(input)),
+    dedupeKey: stringOr(input.dedupeKey, ""),
+    contentHash: stringOr(input.contentHash || input.sha256, ""),
     targetLanguageRelevance: normalizeList(input.targetLanguageRelevance || input.targetLanguages),
     urgency: choice(input.urgency, ["none", "low", "medium", "high"], "none"),
     deadline: stringOr(input.deadline, ""),
@@ -330,6 +335,10 @@ function normalizeResource(input, { sourceType, now, vaultPath, settings }) {
       userApproved: input.userApproved === true || sourceType === "manual_import" || sourceType === "browser_clip",
       contentApproved: input.contentApproved === true,
       sourceCollector: sourceType
+    },
+    provenance: {
+      dedupeKey: stringOr(input.dedupeKey, ""),
+      contentHash: stringOr(input.contentHash || input.sha256, "")
     }
   };
   resource.sensitivity = classifySourceSensitivity({ ...resource, text: input.text || "" });
@@ -368,6 +377,8 @@ function renderResourceInputMarkdown(item = {}) {
     `sensitivity: ${yamlString(item.sensitivity || "unknown")}`,
     `source_url: ${yamlString(item.url || "")}`,
     `source_file: ${yamlString(item.file || "")}`,
+    `source_dedupe_key: ${yamlString(item.dedupeKey || item.ingest?.dedupeKey || "")}`,
+    `source_content_sha256: ${yamlString(item.contentHash || item.provenance?.contentHash || "")}`,
     "---",
     "",
     `# ${item.title || "Captured resource"}`,
@@ -387,6 +398,27 @@ function renderResourceInputMarkdown(item = {}) {
     "- If the source content is not available in this staged note, say that the generated insight is based on metadata only."
   ];
   return lines.filter((line, index) => line || lines[index - 1] === "").join("\n") + "\n";
+}
+
+export function hashFileForDedupe(file, options = {}) {
+  const maxBytes = Math.max(0, Number(options.maxBytes || 128 * 1024 * 1024));
+  const stat = fs.statSync(file);
+  if (maxBytes && stat.size > maxBytes) return "";
+  const hash = crypto.createHash("sha256");
+  const fd = fs.openSync(file, "r");
+  try {
+    const buffer = Buffer.alloc(1024 * 1024);
+    let position = 0;
+    while (position < stat.size) {
+      const bytes = fs.readSync(fd, buffer, 0, Math.min(buffer.length, stat.size - position), position);
+      if (!bytes) break;
+      hash.update(buffer.subarray(0, bytes));
+      position += bytes;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest("hex");
 }
 
 function yamlString(value) {

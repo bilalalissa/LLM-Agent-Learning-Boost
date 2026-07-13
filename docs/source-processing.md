@@ -40,6 +40,10 @@ If the selected provider itself is unavailable, fix the Provider tab status firs
 
 Learning Autopilot retries `pending_provider_analysis` media pages in small bounded batches when the selected provider becomes ready. These retries use the preserved asset path plus extracted OCR/transcript/metadata; you do not need to clip or copy the source again. If the page is still `pending_content`, it is not counted as provider-ready work. Add readable text, OCR support, a transcript sidecar, local ASR, or a manual description before retrying.
 
+You can also retry a source manually from Files with `Reprocess selected source`. The app only retries the selected source pages, preserves the previous version under `.llm-wiki/learning/reprocess-history/`, and then refreshes Files, Topics, and Learning. Use this when a source was captured correctly but provider analysis was blocked, timed out, or produced a pending provider page.
+
+After several attempts, use `Reprocess history` in Files to choose which ingestion you want to keep. Select one source row, choose a timestamped snapshot, and confirm restore. Learning Boost first backs up the current source page under the same history area, then restores the selected snapshot so the favorite ingestion becomes the active source page.
+
 ## Learning Output
 
 Every processed source asks the provider for a `learning_boost` object. The app normalizes that object into:
