@@ -400,7 +400,8 @@ const server = http.createServer(async (request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ vault: payload.vault, kind, ...result }));
     } catch (error) {
-      response.writeHead(500, { "content-type": "application/json" });
+      const status = /^Unknown learning (card|bit):/.test(error.message || "") ? 400 : 500;
+      response.writeHead(status, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: error.message }));
     }
     return;
@@ -412,7 +413,8 @@ const server = http.createServer(async (request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(cachedLearningAutomationStatus(vaultParam)));
     } catch (error) {
-      response.writeHead(500, { "content-type": "application/json" });
+      const status = /^Unknown learning card:/.test(error.message || "") ? 400 : 500;
+      response.writeHead(status, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: error.message }));
     }
     return;
@@ -434,7 +436,8 @@ const server = http.createServer(async (request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ vault: vaultName(vaultPath), settings, reminderMirror, automation: learningAutomationStatus(vaultPath, automationRuntimeFor(vaultPath)) }));
     } catch (error) {
-      response.writeHead(500, { "content-type": "application/json" });
+      const status = /^Unknown learning bit:/.test(error.message || "") ? 400 : 500;
+      response.writeHead(status, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: error.message }));
     }
     return;
@@ -1984,6 +1987,7 @@ function mobileStudyPayload(url = new URL("http://127.0.0.1/mobile")) {
       reviewedBits: stats.reviewedBits || 0
     },
     cards: cardSource.map(mobileStudyCard),
+    quizzes: buildMobileQuizItems(cardSource, plan).slice(0, 6),
     bits: bitSource.map(mobileStudyBit),
     notifications: (vault.notifications || []).slice(0, 6).map((item) => ({
       id: item.id || "",
@@ -1994,6 +1998,29 @@ function mobileStudyPayload(url = new URL("http://127.0.0.1/mobile")) {
       createdLocal: item.created ? formatLocal(item.created) : ""
     }))
   };
+}
+
+function buildMobileQuizItems(cards = [], plan = {}) {
+  const quizSession = (plan.sessions || []).find((session) => /quiz|test/i.test(session.title || session.id || "")) || {};
+  return (cards || [])
+    .filter((card) => card && (card.displayReviewDue || card.due || card.displayPrompt || card.front || card.cloze))
+    .slice(0, 8)
+    .map((card, index) => {
+      const studyCard = mobileStudyCard(card);
+      return {
+        id: `quiz-${studyCard.id || index}`,
+        cardId: studyCard.id,
+        topic: studyCard.topic,
+        prompt: studyCard.prompt,
+        answer: studyCard.answer,
+        hint: studyCard.hint,
+        sourcePage: studyCard.sourcePage,
+        sourceLabel: studyCard.sourceLabel,
+        suggestedLocalTime: quizSession.time ? formatLocal(quizSession.time) : "",
+        durationMinutes: Math.max(2, Math.min(8, Math.ceil(String(studyCard.answer || studyCard.prompt || "").length / 160))),
+        type: "Short quiz/test"
+      };
+    });
 }
 
 function uniqueMobileStudyItems(items, keyFn) {
@@ -2076,17 +2103,18 @@ function renderMobileStudyHtml(url) {
     button, select { font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel); color: var(--ink); min-height: 42px; }
     button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 750; }
     main { padding: 14px; display: grid; gap: 14px; max-width: 980px; margin: 0 auto; }
-    .toolbar, .summary, .session, .study-card, .bit-card, .alert { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px; }
+    .toolbar, .summary, .session, .study-card, .quiz-card, .bit-card, .alert { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px; }
     .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .toolbar select { flex: 1 1 180px; min-width: 0; }
     .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; }
     .metric { display: grid; gap: 2px; padding: 8px; border-radius: 8px; background: #efe2ca; }
     .metric strong { font-size: 22px; color: var(--accent); }
-    .sessions, .cards, .bits, .alerts { display: grid; gap: 10px; }
+    .sessions, .cards, .quizzes, .bits, .alerts { display: grid; gap: 10px; }
     .session { display: grid; gap: 4px; }
     .session strong { font-size: 17px; }
-    .study-card, .bit-card { display: grid; gap: 10px; overflow-wrap: anywhere; }
+    .study-card, .quiz-card, .bit-card { display: grid; gap: 10px; overflow-wrap: anywhere; }
     .study-card { border-color: color-mix(in srgb, var(--practice) 35%, var(--line)); background: color-mix(in srgb, var(--practice) 8%, var(--panel)); }
+    .quiz-card { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
     .bit-card { border-color: color-mix(in srgb, var(--bit) 30%, var(--line)); background: color-mix(in srgb, var(--bit) 7%, var(--panel)); }
     .chips { display: flex; flex-wrap: wrap; gap: 6px; }
     .chip { border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; color: var(--muted); background: #f8f0df; font-size: 13px; }
@@ -2109,6 +2137,7 @@ function renderMobileStudyHtml(url) {
     <section id="notice" class="alert" hidden></section>
     <section id="summary" class="summary"></section>
     <section><h2>Today</h2><div id="sessions" class="sessions"></div></section>
+    <section><h2>Short Quiz/Test</h2><div id="quizzes" class="quizzes"></div></section>
     <section><h2>Cards</h2><div id="cards" class="cards"></div></section>
     <section><h2>Bits</h2><div id="bits" class="bits"></div></section>
     <section><h2>Alerts</h2><div id="alerts" class="alerts"></div></section>
@@ -2121,6 +2150,7 @@ function renderMobileStudyHtml(url) {
     const notice = document.querySelector("#notice");
     const summary = document.querySelector("#summary");
     const sessions = document.querySelector("#sessions");
+    const quizzes = document.querySelector("#quizzes");
     const cards = document.querySelector("#cards");
     const bits = document.querySelector("#bits");
     const alerts = document.querySelector("#alerts");
@@ -2175,6 +2205,7 @@ function renderMobileStudyHtml(url) {
       notice.textContent = "For iPhone/iPad LAN access, set MAC_BRIDGE_HOST=0.0.0.0 and LEARNING_BOOST_MOBILE_TOKEN in config.env, then open /mobile?token=... from the device.";
       summary.innerHTML = metric("Due", data.counts.dueCards + data.counts.dueBits) + metric("Ready", data.plan.readyCount) + metric("Cards", data.counts.cards) + metric("Bits", data.counts.bits) + metric("Timing", data.plan.timingBasis || "default spacing");
       sessions.innerHTML = (data.plan.sessions || []).map(renderSession).join("") || '<p class="muted">No study sessions yet.</p>';
+      quizzes.innerHTML = (data.quizzes || []).map(renderQuiz).join("") || '<p class="muted">No quiz/test items yet. Review cards will appear here when available.</p>';
       cards.innerHTML = (data.cards || []).map(renderCard).join("") || '<p class="muted">No cards yet. Process one source first.</p>';
       bits.innerHTML = (data.bits || []).map(renderBit).join("") || '<p class="muted">No bits yet. Process one source first.</p>';
       alerts.innerHTML = (data.notifications || []).map(renderAlert).join("") || '<p class="muted">No active learning alerts.</p>';
@@ -2190,6 +2221,9 @@ function renderMobileStudyHtml(url) {
     }
     function renderCard(item) {
       return '<article class="study-card" data-study-kind="card" data-study-id="' + escapeHtml(item.id) + '" data-prompt="' + escapeHtml(item.prompt) + '" data-topic="' + escapeHtml(item.topic) + '" data-source-page="' + escapeHtml(item.sourcePage) + '"><div class="chips"><span class="chip">' + escapeHtml(item.type) + '</span><span class="chip">' + escapeHtml(item.topic) + '</span>' + (item.due ? '<span class="chip">due</span>' : '') + (item.read ? '<span class="chip">read</span>' : '') + '</div><strong>' + escapeHtml(item.prompt) + '</strong>' + (item.hint ? '<p class="muted">' + escapeHtml(item.hint) + '</p>' : '') + '<div class="answer" hidden><strong>Answer</strong><p>' + escapeHtml(item.answer || "No answer text recorded.") + '</p><p class="muted">' + escapeHtml(item.sourceLabel || "") + '</p></div><button type="button" data-action="toggle-answer">Show answer</button><button class="primary" type="button" data-action="review" data-grade="good">Mark reviewed</button></article>';
+    }
+    function renderQuiz(item) {
+      return '<article class="quiz-card" data-study-kind="card" data-study-id="' + escapeHtml(item.cardId) + '" data-prompt="' + escapeHtml(item.prompt) + '" data-topic="' + escapeHtml(item.topic) + '" data-source-page="' + escapeHtml(item.sourcePage) + '"><div class="chips"><span class="chip">quiz/test</span><span class="chip">' + escapeHtml(item.topic) + '</span>' + (item.suggestedLocalTime ? '<span class="chip">' + escapeHtml(item.suggestedLocalTime) + '</span>' : '') + '</div><strong>' + escapeHtml(item.prompt) + '</strong>' + (item.hint ? '<p class="muted">' + escapeHtml(item.hint) + '</p>' : '') + '<div class="answer" hidden><strong>Check answer</strong><p>' + escapeHtml(item.answer || "No answer text recorded.") + '</p><p class="muted">' + escapeHtml(item.sourceLabel || "") + '</p></div><button type="button" data-action="toggle-answer">Check answer</button><button class="primary" type="button" data-action="review" data-grade="good">Mark tested</button></article>';
     }
     function renderBit(item) {
       return '<article class="bit-card" data-study-kind="bit" data-study-id="' + escapeHtml(item.id) + '" data-title="' + escapeHtml(item.title) + '" data-topic="' + escapeHtml(item.topic) + '" data-source-page="' + escapeHtml(item.sourcePage) + '"><div class="chips"><span class="chip">bit</span><span class="chip">' + escapeHtml(item.topic) + '</span>' + (item.due ? '<span class="chip">due</span>' : '') + (item.read ? '<span class="chip">read</span>' : '') + '</div><strong>' + escapeHtml(item.title) + '</strong><p>' + escapeHtml(item.detail || "") + '</p><p class="muted">' + escapeHtml(item.sourceLabel || "") + '</p><button class="primary" type="button" data-action="review" data-grade="read">Mark read</button></article>';

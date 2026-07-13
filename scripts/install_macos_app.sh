@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 "$ROOT/scripts/build_macos_app.sh"
 
 APP="$ROOT/build/macos/LLM Agent Learning Boost.app"
+find "$ROOT/build/macos" -maxdepth 1 -type d -name 'LLM Agent Learning Boost [0-9]*.app' -exec rm -rf {} + 2>/dev/null || true
 TARGET_DIR="${LEARNING_BOOST_INSTALL_DIR:-$HOME/Applications}"
 TARGET="$TARGET_DIR/LLM Agent Learning Boost.app"
 APPLICATIONS_ALIAS="/Applications/LLM Agent Learning Boost.app"
@@ -79,6 +80,7 @@ tell application "System Events"
 end tell
 APPLESCRIPT
 fi
+find "$ROOT/build/macos" -maxdepth 1 -type d -name 'LLM Agent Learning Boost [0-9]*.app' -exec rm -rf {} + 2>/dev/null || true
 
 echo "Installed: $TARGET"
 if [[ -L "$APPLICATIONS_ALIAS" ]]; then

@@ -104,7 +104,7 @@ Learning Boost also serves a lightweight mobile study page at:
 http://127.0.0.1:8789/mobile
 ```
 
-On the Mac, that page works immediately. The same study payload is also available at `/api/mobile/study` and `/api/learning/mobile-study` for local tools that need a JSON queue. It shows the same best-plan study queue used by the Learning tab: due cards, due bits, unread items, short quiz/test sessions, and recent privacy-safe alerts. Marking a card or bit reviewed from the mobile page writes the same local review event as the desktop Learning tab. When the page is open on an iPhone or iPad, it refreshes the study queue and alerts every minute, so it can act as a live local learning-alert surface without a simulator.
+On the Mac, that page works immediately. The same study payload is also available at `/api/mobile/study` and `/api/learning/mobile-study` for local tools that need a JSON queue. It shows the same best-plan study queue used by the Learning tab: due cards, due bits, unread items, short quiz/test items derived from due cards, suggested quiz times, and recent privacy-safe alerts. Marking a card, quiz/test item, or bit reviewed from the mobile page writes the same local review event as the desktop Learning tab, and the server rejects unknown card or bit IDs instead of writing vague review history. When the page is open on an iPhone or iPad, it refreshes the study queue and alerts every minute, so it can act as a live local learning-alert surface without a simulator.
 
 To reach it from an iPhone or iPad without a Mac simulator, intentionally expose only this local server on a trusted LAN:
 
@@ -122,7 +122,7 @@ http://<your-mac-lan-ip>:8789/mobile?token=choose-a-long-local-token
 
 Keep this on a trusted private network. Non-local mobile requests require the token. The mobile page is intentionally narrow: it can load study queues and record card/bit review state, but it does not expose Provider settings, vault file operations, or export writes.
 
-This is separate from background system notifications. Use the mobile page for studying cards/bits/quizzes and for live alert polling while the page is open. Use Apple Reminders mirroring for alerts you want to sync through iCloud when the mobile page is not open.
+This is separate from background system notifications. Use the mobile page for studying cards/bits/quizzes, taking short tests, and live alert polling while the page is open. Use Apple Reminders mirroring for alerts you want to sync through iCloud when the mobile page is not open.
 
 ## Dated Learning Timeline
 

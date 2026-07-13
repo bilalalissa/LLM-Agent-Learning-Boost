@@ -77,6 +77,7 @@ copy_file() {
 
 rm -rf "$STAGING_ROOT"
 mkdir -p "$MACOS" "$RESOURCES" "$AGENT"
+find "$BUILD" -maxdepth 1 -type d -name 'LLM Agent Learning Boost [0-9]*.app' -exec rm -rf {} + 2>/dev/null || true
 
 if [ ! -f "$APP_ICON" ]; then
   "$ROOT/scripts/generate_app_icon.sh"
@@ -144,5 +145,6 @@ if [ -d "$APP" ]; then
 fi
 mv "$NEW_APP" "$APP"
 rm -rf "$APP.previous"
+find "$BUILD" -maxdepth 1 -type d -name 'LLM Agent Learning Boost [0-9]*.app' -exec rm -rf {} + 2>/dev/null || true
 
 echo "Built: $APP"

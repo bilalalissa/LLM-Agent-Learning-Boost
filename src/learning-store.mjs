@@ -166,6 +166,9 @@ export function recordLearningCardReview(config, vault, input = {}) {
   const prompt = String(input.prompt || "").trim();
   const card = cards.find((item) => cardKey(item) === requestedKey || item.id === requestedKey) ||
     cards.find((item) => prompt && [item.front, item.cloze].filter(Boolean).some((value) => String(value) === prompt));
+  if (!card) {
+    throw new Error(`Unknown learning card: ${requestedKey || prompt || "(missing id)"}`);
+  }
   const event = {
     id: stableId("review", `${requestedKey || prompt}-${input.action || "read"}-${new Date().toISOString()}`),
     type: "card_reviewed",
@@ -194,6 +197,9 @@ export function recordLearningBitReview(config, vault, input = {}) {
   const title = String(input.title || "").trim();
   const bit = bits.find((item) => bitKey(item) === requestedKey || item.id === requestedKey) ||
     bits.find((item) => title && String(item.title || "") === title);
+  if (!bit) {
+    throw new Error(`Unknown learning bit: ${requestedKey || title || "(missing id)"}`);
+  }
   const event = {
     id: stableId("review", `${requestedKey || title}-${input.action || "read"}-${new Date().toISOString()}`),
     type: "bit_reviewed",

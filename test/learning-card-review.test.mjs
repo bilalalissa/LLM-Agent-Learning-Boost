@@ -49,6 +49,24 @@ test("recording a card review marks the display card as read without rewriting c
   assert.match(fs.readFileSync(path.join(paths.dir, "review-log.jsonl"), "utf8"), /card_reviewed/);
 });
 
+test("review actions reject unknown learning cards and bits", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "learning-review-invalid-"));
+  process.env.LEARNING_BOOST_APP_SUPPORT = path.join(root, "app-support");
+  const vault = path.join(root, "Research-vault");
+  fs.mkdirSync(path.join(vault, ".obsidian"), { recursive: true });
+  const config = { vaultsRoot: root, configFile: path.join(root, "config.env") };
+  ensureLearningScaffold(vault, config);
+
+  assert.throws(
+    () => recordLearningCardReview(config, "Research-vault", { cardId: "missing-card" }),
+    /Unknown learning card: missing-card/
+  );
+  assert.throws(
+    () => recordLearningBitReview(config, "Research-vault", { bitId: "missing-bit" }),
+    /Unknown learning bit: missing-bit/
+  );
+});
+
 test("study queue replaces read cards and bits with unread items", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "learning-study-queue-"));
   process.env.LEARNING_BOOST_APP_SUPPORT = path.join(root, "app-support");

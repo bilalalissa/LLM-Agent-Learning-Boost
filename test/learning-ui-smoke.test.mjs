@@ -269,6 +269,8 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
     "Learning Profile Summary",
     "Mobile Study",
     "Learning Boost Mobile Study",
+    "Short Quiz/Test",
+    "Mark tested",
     "Reviewed from mobile study.",
     "recent study activity",
     "default spacing"
@@ -284,10 +286,13 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /activeHours/);
   assert.match(serverSource, /renderMobileStudyHtml/);
   assert.match(serverSource, /mobileStudyPayload/);
+  assert.match(serverSource, /buildMobileQuizItems/);
+  assert.match(serverSource, /quizzes/);
   assert.match(serverSource, /authorizedMobileStudyRequest/);
   assert.match(serverSource, /api\/mobile\/study/);
   assert.match(serverSource, /api\/learning\/mobile-study/);
   assert.match(serverSource, /api\/mobile\/review/);
+  assert.match(serverSource, /Unknown learning \(card\|bit\)/);
   assert.match(serverSource, /LEARNING_BOOST_MOBILE_TOKEN/);
   assert.match(serverSource, /learning-daily-plan/);
   assert.match(serverSource, /learning-daily-sessions/);

@@ -82,7 +82,7 @@ The session cards include `Spaced review`, `Concept practice`, `Short quiz/test`
 
 ## Mobile Study
 
-Open `/mobile` on the Mac to use the same study queue in a phone-sized interface. It shows Today's Study Plan, due cards, due bits, unread items, and recent alerts. `Mark reviewed` and `Mark read` write the same review events used by the desktop Learning tab, so spaced repetition stays in sync.
+Open `/mobile` on the Mac to use the same study queue in a phone-sized interface. It shows Today's Study Plan, due cards, due bits, short quiz/test items derived from due cards, unread items, and recent alerts. `Mark reviewed`, `Mark tested`, and `Mark read` write the same validated review events used by the desktop Learning tab, so spaced repetition stays in sync without accepting unknown card or bit IDs.
 
 For iPhone or iPad access, configure the Mac app on a trusted LAN:
 
@@ -92,7 +92,7 @@ LEARNING_BOOST_MOBILE_TOKEN=choose-a-long-local-token
 LEARNING_BOOST_MOBILE_STUDY=true
 ```
 
-Then open `http://<your-mac-lan-ip>:8789/mobile?token=choose-a-long-local-token` from Safari, Arc, or another browser on the device. The mobile page is for study/review only; it does not expose Provider settings or file/export controls.
+Then open `http://<your-mac-lan-ip>:8789/mobile?token=choose-a-long-local-token` from Safari, Arc, or another browser on the device. The mobile page is for study, quiz/test, and review only; it does not expose Provider settings or file/export controls.
 
 ## Flexible Layout
 
