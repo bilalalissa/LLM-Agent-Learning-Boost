@@ -1553,7 +1553,7 @@ server.listen(config.chatPort, config.bridgeHost, () => {
     void localAiRouterSupervisor.start();
   }, 1000);
   scheduleStartupLearningBackfill();
-  if (process.env.LLM_WIKI_ENABLE_STARTUP_TAB_REFRESH === "1") {
+  if (process.env.LLM_WIKI_ENABLE_STARTUP_TAB_REFRESH !== "0") {
     ["files", "archives", "topics"].forEach((kind, index) => {
       setTimeout(() => scheduleTabDataRefresh(kind), startupTabRefreshDelayMs + (index * 2500));
     });
@@ -2210,13 +2210,13 @@ function renderMobileStudyHtml(url) {
     :root { color-scheme: light; --bg: #f4ead8; --panel: #fffaf0; --ink: #302820; --muted: #766852; --line: #d9c49b; --accent: #98620f; --capture: #0f766e; --practice: #7c3aed; --bit: #2563eb; --alert: #be123c; }
     * { box-sizing: border-box; }
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); line-height: 1.45; }
-    header { position: sticky; top: 0; z-index: 2; background: color-mix(in srgb, var(--bg) 94%, white); border-bottom: 1px solid var(--line); padding: 14px 16px; }
+    header { position: static; background: color-mix(in srgb, var(--bg) 94%, white); border-bottom: 1px solid var(--line); padding: 14px 16px; }
     h1 { margin: 0 0 4px; font-size: clamp(24px, 8vw, 34px); }
     h2 { margin: 20px 0 8px; font-size: 21px; }
     button, select { font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel); color: var(--ink); min-height: 42px; }
     button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 750; }
     main { padding: 14px; display: grid; gap: 14px; max-width: 980px; margin: 0 auto; }
-    .mobile-nav { position: sticky; top: 76px; z-index: 1; display: flex; gap: 8px; overflow-x: auto; padding: 8px 0; background: color-mix(in srgb, var(--bg) 92%, white); }
+    .mobile-nav { position: sticky; top: 0; z-index: 20; display: flex; gap: 8px; overflow-x: auto; padding: 8px 0; background: color-mix(in srgb, var(--bg) 96%, white); border-bottom: 1px solid var(--line); }
     .mobile-nav button { white-space: nowrap; min-height: 36px; padding: 7px 10px; }
     .toolbar, .summary, .legend, .session, .study-card, .quiz-card, .bit-card, .alert { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px; }
     .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -2302,7 +2302,11 @@ function renderMobileStudyHtml(url) {
         return;
       }
       const focusable = event.target.closest("[data-study-kind], .session, .alert");
-      if (focusable && !event.target.closest("[data-mobile-jump]")) setFocus(focusable);
+      if (focusable && !event.target.closest("[data-mobile-jump]")) {
+        setFocus(focusable);
+      } else if (!event.target.closest("button, select, input, textarea, a")) {
+        clearFocus();
+      }
       const button = event.target.closest("[data-action]");
       if (!button) return;
       const card = button.closest("[data-study-kind]");
@@ -5441,6 +5445,9 @@ function renderHtml() {
     button:disabled { opacity: 0.55; cursor: default; }
     .table-controls { display: grid; grid-template-columns: minmax(180px, 1fr) repeat(3, minmax(120px, auto)); gap: 8px; align-items: center; margin: 12px 0; }
     .table-controls input, .table-controls select { min-width: 0; width: 100%; box-sizing: border-box; }
+    .table-summary { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 10px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+    .table-summary strong { color: var(--text); }
+    .table-summary .summary-pill { display: inline-flex; align-items: center; max-width: 100%; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; background: var(--soft); overflow-wrap: anywhere; }
     th.sortable { cursor: pointer; user-select: none; }
     th.sortable::after { content: " ↕"; color: var(--muted); font-weight: 400; }
     th.sortable.sort-asc::after { content: " ↑"; color: var(--accent); }
@@ -5573,7 +5580,8 @@ function renderHtml() {
     .side-topic-group-row select { min-width: 0; flex: 1 1 auto; box-sizing: border-box; padding: 7px; font-size: 13px; }
     .side-topic-group-heading { display: flex; align-items: center; gap: 8px; margin: 11px 0 5px; color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0; }
     .side-topic-group-heading::before, .side-topic-group-heading::after { content: ""; height: 1px; flex: 1 1 auto; background: color-mix(in srgb, var(--line) 58%, transparent); }
-    .side-topic-meta { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .side-topic-meta { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
+    .side-topic-match-count { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 1px 6px; margin-inline-start: 4px; color: var(--accent); background: var(--soft); font-size: 11px; white-space: nowrap; }
     .side-topic-title-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
     .side-topic-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
     .annotation-badges { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; }
@@ -5763,11 +5771,11 @@ function renderHtml() {
     .learning-autopilot-meter { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; align-content: center; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
     .learning-autopilot-meter strong { font-size: 24px; line-height: 1; color: var(--accent); }
     .learning-autopilot-meter span { color: var(--muted); font-size: 12px; align-self: center; }
-    .learning-stepper { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 8px; list-style: none; margin: 2px 0 0; padding: 0; }
+    .learning-stepper { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 8px; list-style: none; margin: 2px 0 0; padding: 0; }
     .learning-stepper li { position: relative; display: block; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); transition: transform .18s ease, border-color .18s ease, background .18s ease; }
-    .learning-stepper button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 7px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: anywhere; align-items: start; line-height: 1.25; }
-    .learning-stepper button > div { min-width: 0; display: grid; gap: 2px; }
-    .learning-stepper li span { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--soft); color: var(--muted); font-weight: 800; }
+    .learning-stepper button { display: flex; gap: 8px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: break-word; align-items: flex-start; line-height: 1.25; text-align: start; }
+    .learning-stepper button > div { flex: 1 1 auto; min-width: 0; display: grid; gap: 2px; }
+    .learning-stepper li span { flex: 0 0 26px; display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--soft); color: var(--muted); font-weight: 800; }
     .learning-stepper li strong { min-width: 0; font-size: 13px; overflow-wrap: break-word; }
     .learning-stepper li em { grid-column: 2; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: break-word; }
     .learning-stepper li.active { border-color: var(--accent); background: color-mix(in srgb, var(--mark) 36%, var(--panel)); transform: translateY(-2px); }
@@ -5781,8 +5789,8 @@ function renderHtml() {
     .learning-daily-sessions li { display: grid; gap: 8px; min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel); }
     .learning-daily-sessions li.high { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); background: color-mix(in srgb, var(--mark) 28%, var(--panel)); }
     .learning-daily-sessions li.blocked { opacity: .84; }
-    .learning-daily-sessions button.learning-target-button { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 9px; width: 100%; min-width: 0; text-align: start; white-space: normal; word-break: normal; overflow-wrap: anywhere; }
-    .learning-daily-sessions button.learning-target-button > span { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 800; }
+    .learning-daily-sessions button.learning-target-button { display: flex; gap: 9px; width: 100%; min-width: 0; text-align: start; white-space: normal; word-break: normal; overflow-wrap: break-word; align-items: flex-start; }
+    .learning-daily-sessions button.learning-target-button > span { flex: 0 0 28px; display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 800; }
     .learning-daily-sessions div { min-width: 0; display: grid; gap: 3px; }
     .learning-daily-sessions em { color: var(--muted); font-style: normal; }
     .learning-daily-sessions p { margin: 0; color: var(--muted); overflow-wrap: break-word; }
@@ -5815,7 +5823,7 @@ function renderHtml() {
     .learning-export-files { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
     .learning-export-files button { max-width: 100%; overflow-wrap: break-word; text-align: start; }
     .learning-form .learning-button-row { grid-column: 1 / -1; align-items: center; justify-content: flex-start; }
-    .learning-form button, .learning-form .primary, .learning-form .secondary { align-self: end; min-height: 38px; white-space: normal; overflow-wrap: break-word; word-break: normal; }
+    .learning-form button, .learning-form .primary, .learning-form .secondary { align-self: start; min-height: 38px; white-space: normal; overflow-wrap: break-word; word-break: normal; }
     .learning-form select, .learning-form input, .learning-form textarea { min-width: 0; }
     .learning-capture-status { align-self: start; max-width: 100%; max-height: none; overflow: visible; line-height: 1.35; }
     .learning-capture-status strong { display: block; color: var(--text); margin-bottom: 4px; }
@@ -5823,6 +5831,11 @@ function renderHtml() {
     .learning-capture-status li { margin-bottom: 4px; }
     .learning-capture-status code { font-size: 12px; }
     .capture-status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 6px; margin: 8px 0; }
+    #source-capture-form { align-items: start; }
+    #source-capture-form .learning-field { align-self: start; }
+    #source-capture-form .learning-field select, #source-capture-form .learning-field input { min-height: 38px; }
+    #source-capture-form .learning-button-row { align-self: start; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    #source-capture-form .learning-button-row button { flex: 0 1 auto; min-width: min(220px, 100%); }
     .learning-practice-overlay { position: fixed; inset: 0; z-index: 72; display: none; align-items: center; justify-content: center; padding: 18px; background: color-mix(in srgb, #000 34%, transparent); }
     .learning-practice-overlay.active { display: flex; }
     .learning-practice-window { width: min(820px, 100%); max-height: min(88vh, 860px); overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 18px 60px var(--shadow); padding: 18px; }
@@ -5855,9 +5868,9 @@ function renderHtml() {
     .learning-flow-lane h4 { margin: 0 0 8px; font-size: 15px; }
     .learning-flow-lane ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; }
     .learning-flow-lane li { display: block; min-width: 0; }
-    .learning-flow-lane .learning-flow-step-button { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: anywhere; align-items: start; line-height: 1.25; }
-    .learning-flow-lane .learning-flow-step-button > span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--kind, var(--accent)) 78%, #fff); color: #fff; font-weight: 800; font-size: 12px; }
-    .learning-flow-lane .learning-flow-step-button > div { min-width: 0; display: grid; gap: 2px; }
+    .learning-flow-lane .learning-flow-step-button { display: flex; gap: 8px; width: 100%; min-width: 0; color: inherit; text-decoration: none; white-space: normal; word-break: normal; overflow-wrap: break-word; align-items: flex-start; line-height: 1.25; text-align: start; }
+    .learning-flow-lane .learning-flow-step-button > span { flex: 0 0 24px; display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--kind, var(--accent)) 78%, #fff); color: #fff; font-weight: 800; font-size: 12px; }
+    .learning-flow-lane .learning-flow-step-button > div { flex: 1 1 auto; min-width: 0; display: grid; gap: 2px; }
     .learning-flow-lane strong { display: block; font-size: 13px; }
     .learning-flow-lane em { display: block; color: var(--muted); font-style: normal; font-size: 12px; overflow-wrap: break-word; }
     .learning-flow-lane .learning-action-row { display: flex; flex-wrap: wrap; align-items: stretch; }
@@ -5901,7 +5914,7 @@ function renderHtml() {
       .learning-map-grid { grid-template-columns: 1fr; }
       .learning-event-feed li { grid-template-columns: 1fr; }
       .learning-autopilot-hero, .learning-study-surface { grid-template-columns: 1fr; }
-      .learning-stepper { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+      .learning-stepper { grid-template-columns: repeat(2, minmax(220px, 1fr)); }
       .learning-flow-lanes { grid-template-columns: 1fr; }
       .learning-notification-center li { grid-template-columns: 1fr; }
       .learning-plan-row { grid-template-columns: 1fr; }
@@ -6049,6 +6062,7 @@ function renderHtml() {
         </div>
       </div>
       <div id="source-duplicate-report" class="source-duplicate-report" hidden></div>
+      <div id="files-summary" class="table-summary" aria-live="polite">Loading file totals...</div>
       <table>
         <thead>
           <tr>
@@ -6082,6 +6096,7 @@ function renderHtml() {
           <button id="archives-clear-filter" class="secondary" type="button">Clear</button>
         </div>
       </div>
+      <div id="archives-summary" class="table-summary" aria-live="polite">Loading archive totals...</div>
       <table>
         <thead>
           <tr>
@@ -6107,6 +6122,7 @@ function renderHtml() {
         <select id="topics-type-filter"><option value="">All types</option></select>
         <button id="topics-clear-filter" class="secondary" type="button">Clear</button>
       </div>
+      <div id="topics-summary" class="table-summary" aria-live="polite">Loading topic totals...</div>
       <table>
         <thead>
           <tr>
@@ -6698,11 +6714,13 @@ function renderHtml() {
     const localStickyTitle = document.querySelector("#local-sticky-title");
     const tabs = document.querySelectorAll(".tab");
     const filesBody = document.querySelector("#files-body");
+    const filesSummary = document.querySelector("#files-summary");
     const filesFilter = document.querySelector("#files-filter");
     const filesVaultFilter = document.querySelector("#files-vault-filter");
     const filesStatusFilter = document.querySelector("#files-status-filter");
     const filesClearFilter = document.querySelector("#files-clear-filter");
     const archivesBody = document.querySelector("#archives-body");
+    const archivesSummary = document.querySelector("#archives-summary");
     const archivesFilter = document.querySelector("#archives-filter");
     const archivesVaultFilter = document.querySelector("#archives-vault-filter");
     const archivesKindFilter = document.querySelector("#archives-kind-filter");
@@ -6729,6 +6747,7 @@ function renderHtml() {
     const restoreArchivesButton = document.querySelector("#restore-archives");
     const restoreArchivesFeedback = document.querySelector("#restore-archives-feedback");
     const topicsBody = document.querySelector("#topics-body");
+    const topicsSummary = document.querySelector("#topics-summary");
     const topicsFilter = document.querySelector("#topics-filter");
     const topicsVaultFilter = document.querySelector("#topics-vault-filter");
     const topicsTypeFilter = document.querySelector("#topics-type-filter");
@@ -6910,6 +6929,9 @@ function renderHtml() {
     let filesLoadPolls = 0;
     let archivesLoadPolls = 0;
     let topicsLoadPolls = 0;
+    let filesTableState = { status: "loading", detail: "" };
+    let archivesTableState = { status: "loading", detail: "" };
+    let topicsTableState = { status: "loading", detail: "" };
     let sideTopicsLoadPolls = 0;
     let learningCache = null;
     let learningCardsFilter = null;
@@ -7796,6 +7818,7 @@ function renderHtml() {
         if (data.error && !nextFiles.length) throw new Error(data.error);
         if (nextFiles.length) {
           filesLoadPolls = 0;
+          setTableState("files", data.status || "ready", data.stale ? "Showing cached rows while refreshing." : "");
           filesCache = nextFiles;
           populateSelect(filesVaultFilter, filesCache.map((file) => file.vault), "All vaults");
           populateSelect(filesStatusFilter, filesCache.map((file) => file.status), "All statuses");
@@ -7804,24 +7827,32 @@ function renderHtml() {
         }
         if (data.loading || data.status === "loading" || data.status === "stale_refreshing") {
           filesLoadPolls += 1;
+          setTableState("files", data.status || "loading", tabStatusMessage(data, "Vault files are still being indexed."));
           if (filesCache.length) {
             renderFilesTable();
           } else {
+            renderTableSummary(filesSummary, "Files", filesCache, filesCache, filesTableState);
             filesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Vault files are still being indexed."));
           }
           if (filesLoadPolls <= 4) setTimeout(() => loadFiles(), filesLoadPolls <= 2 ? 1400 : 5000);
           else {
-            if (!filesCache.length) filesBody.innerHTML = tabStatusRow(7, "Vault files are still indexing or the scan timed out. Use Retry to force a refresh.", "files");
+            setTableState("files", "error", "Vault files are still indexing or the scan timed out. Use Retry to force a refresh.");
+            if (!filesCache.length) {
+              renderTableSummary(filesSummary, "Files", filesCache, filesCache, filesTableState);
+              filesBody.innerHTML = tabStatusRow(7, filesTableState.detail, "files");
+            }
           }
           return;
         }
         filesLoadPolls = 0;
+        setTableState("files", data.status || (nextFiles.length ? "ready" : "ready_empty"), data.error || "");
         filesCache = nextFiles;
         populateSelect(filesVaultFilter, filesCache.map((file) => file.vault), "All vaults");
         populateSelect(filesStatusFilter, filesCache.map((file) => file.status), "All statuses");
         renderFilesTable();
       } catch (error) {
         filesLoadPolls = 9;
+        setTableState("files", "error", error.message);
         if (filesCache.length) {
           renderFilesTable();
           filesBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached files. Automatic refresh failed: " + error.message));
@@ -7836,6 +7867,7 @@ function renderHtml() {
       const files = sortRows(filterRows(filesCache, filesFilter.value, ["number", "vault", "file", "sourcePage", "receivedAt", "processedAt", "status"])
         .filter((file) => !filesVaultFilter.value || file.vault === filesVaultFilter.value)
         .filter((file) => !filesStatusFilter.value || file.status === filesStatusFilter.value), "files");
+      renderTableSummary(filesSummary, "Files", filesCache, files, filesTableState);
       if (!filesCache.length) {
         tableSelection.files.visibleKeys = [];
         filesBody.innerHTML = '<tr><td colspan="7" class="muted">No processed files yet.</td></tr>';
@@ -8299,6 +8331,54 @@ function renderHtml() {
       return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
     }
 
+    function setTableState(table, status, detail = "") {
+      if (table === "files") filesTableState = { status, detail };
+      else if (table === "archives") archivesTableState = { status, detail };
+      else if (table === "topics") topicsTableState = { status, detail };
+    }
+
+    function renderTableSummary(element, label, allRows, visibleRows, state = {}) {
+      if (!element) return;
+      const rows = Array.isArray(allRows) ? allRows : [];
+      const visible = Array.isArray(visibleRows) ? visibleRows : rows;
+      const status = state.status || "ready";
+      const detail = state.detail || tableStatusSummaryText(status);
+      const vaults = vaultCountPills(rows);
+      element.innerHTML =
+        '<strong>' + escapeHtml(label) + '</strong>' +
+        '<span class="summary-pill">' + escapeHtml(statusLabel(status)) + '</span>' +
+        '<span>' + escapeHtml("Showing " + visible.length + " of " + rows.length) + '</span>' +
+        (detail ? '<span>' + escapeHtml(detail) + '</span>' : "") +
+        vaults;
+    }
+
+    function tableStatusSummaryText(status) {
+      if (status === "loading") return "Indexing in the background.";
+      if (status === "stale_refreshing") return "Showing cached rows while refreshing.";
+      if (status === "error") return "Refresh failed; use Retry.";
+      if (status === "ready_empty") return "No rows are available.";
+      return "";
+    }
+
+    function statusLabel(status) {
+      if (status === "stale_refreshing") return "Refreshing";
+      if (status === "ready_empty") return "Ready empty";
+      return String(status || "ready").replace(/_/g, " ");
+    }
+
+    function vaultCountPills(rows) {
+      const counts = new Map();
+      for (const row of rows || []) {
+        const vault = row.vault || "No vault";
+        counts.set(vault, (counts.get(vault) || 0) + 1);
+      }
+      return Array.from(counts.entries())
+        .sort(([a], [b]) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" }))
+        .slice(0, 8)
+        .map(([vault, count]) => '<span class="summary-pill">' + escapeHtml(vault + ": " + count) + '</span>')
+        .join("");
+    }
+
     function updateSortHeaders(table) {
       document.querySelectorAll('th.sortable[data-table="' + table + '"]').forEach((header) => {
         header.classList.toggle("sort-asc", header.dataset.sort === tableSort[table].key && tableSort[table].dir === "asc");
@@ -8314,6 +8394,7 @@ function renderHtml() {
         if (data.error && !nextArchives.length) throw new Error(data.error);
         if (nextArchives.length) {
           archivesLoadPolls = 0;
+          setTableState("archives", data.status || "ready", data.stale ? "Showing cached rows while refreshing." : "");
           archivesCache = nextArchives;
           populateSelect(archivesVaultFilter, archivesCache.map((item) => item.vault), "All vaults");
           populateSelect(archivesKindFilter, archivesCache.map((item) => item.kind), "All types");
@@ -8322,24 +8403,32 @@ function renderHtml() {
         }
         if (data.loading || data.status === "loading" || data.status === "stale_refreshing") {
           archivesLoadPolls += 1;
+          setTableState("archives", data.status || "loading", tabStatusMessage(data, "Archive history is still being indexed."));
           if (archivesCache.length) {
             renderArchivesTable();
           } else {
+            renderTableSummary(archivesSummary, "Archives", archivesCache, archivesCache, archivesTableState);
             archivesBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Archive history is still being indexed."));
           }
           if (archivesLoadPolls <= 4) setTimeout(() => loadArchives(), archivesLoadPolls <= 2 ? 1400 : 5000);
           else {
-            if (!archivesCache.length) archivesBody.innerHTML = tabStatusRow(7, "Archive history is still indexing or the scan timed out. Use Retry to force a refresh.", "archives");
+            setTableState("archives", "error", "Archive history is still indexing or the scan timed out. Use Retry to force a refresh.");
+            if (!archivesCache.length) {
+              renderTableSummary(archivesSummary, "Archives", archivesCache, archivesCache, archivesTableState);
+              archivesBody.innerHTML = tabStatusRow(7, archivesTableState.detail, "archives");
+            }
           }
           return;
         }
         archivesLoadPolls = 0;
+        setTableState("archives", data.status || (nextArchives.length ? "ready" : "ready_empty"), data.error || "");
         archivesCache = nextArchives;
         populateSelect(archivesVaultFilter, archivesCache.map((item) => item.vault), "All vaults");
         populateSelect(archivesKindFilter, archivesCache.map((item) => item.kind), "All types");
         renderArchivesTable();
       } catch (error) {
         archivesLoadPolls = 9;
+        setTableState("archives", "error", error.message);
         if (archivesCache.length) {
           renderArchivesTable();
           archivesBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached archives. Automatic refresh failed: " + error.message));
@@ -8354,6 +8443,7 @@ function renderHtml() {
       const archives = sortRows(filterRows(archivesCache, archivesFilter.value, ["number", "vault", "kind", "relation", "file", "archivedAt"])
         .filter((item) => !archivesVaultFilter.value || item.vault === archivesVaultFilter.value)
         .filter((item) => !archivesKindFilter.value || item.kind === archivesKindFilter.value), "archives");
+      renderTableSummary(archivesSummary, "Archives", archivesCache, archives, archivesTableState);
       if (!archivesCache.length) {
         tableSelection.archives.visibleKeys = [];
         archivesBody.innerHTML = '<tr><td colspan="7" class="muted">No archived sources yet.</td></tr>';
@@ -8594,6 +8684,7 @@ function renderHtml() {
         if (data.error && !nextTopics.length) throw new Error(data.error);
         if (nextTopics.length) {
           topicsLoadPolls = 0;
+          setTableState("topics", data.status || "ready", data.stale ? "Showing cached rows while refreshing." : "");
           topicsCache = nextTopics.map((topic, index) => ({ ...topic, number: index + 1, tagsText: (topic.tags || []).join(", ") }));
           populateSelect(topicsVaultFilter, topicsCache.map((topic) => topic.vault), "All vaults");
           populateSelect(topicsTypeFilter, topicsCache.map((topic) => topic.type), "All types");
@@ -8603,18 +8694,25 @@ function renderHtml() {
         }
         if (data.loading || data.status === "loading" || data.status === "stale_refreshing") {
           topicsLoadPolls += 1;
+          setTableState("topics", data.status || "loading", tabStatusMessage(data, "Topics are still being indexed."));
           if (topicsCache.length) {
             renderTopicsTable();
           } else {
+            renderTableSummary(topicsSummary, "Topics", topicsCache, topicsCache, topicsTableState);
             topicsBody.innerHTML = tabStatusRow(7, tabStatusMessage(data, "Topics are still being indexed."));
           }
           if (topicsLoadPolls <= 4) setTimeout(() => loadTopics(), topicsLoadPolls <= 2 ? 1400 : 5000);
           else {
-            if (!topicsCache.length) topicsBody.innerHTML = tabStatusRow(7, "Topics are still indexing or the scan timed out. Use Retry to force a refresh.", "topics");
+            setTableState("topics", "error", "Topics are still indexing or the scan timed out. Use Retry to force a refresh.");
+            if (!topicsCache.length) {
+              renderTableSummary(topicsSummary, "Topics", topicsCache, topicsCache, topicsTableState);
+              topicsBody.innerHTML = tabStatusRow(7, topicsTableState.detail, "topics");
+            }
           }
           return;
         }
         topicsLoadPolls = 0;
+        setTableState("topics", data.status || (nextTopics.length ? "ready" : "ready_empty"), data.error || "");
         topicsCache = nextTopics.map((topic, index) => ({ ...topic, number: index + 1, tagsText: (topic.tags || []).join(", ") }));
         populateSelect(topicsVaultFilter, topicsCache.map((topic) => topic.vault), "All vaults");
         populateSelect(topicsTypeFilter, topicsCache.map((topic) => topic.type), "All types");
@@ -8624,6 +8722,7 @@ function renderHtml() {
         }
       } catch (error) {
         topicsLoadPolls = 9;
+        setTableState("topics", "error", error.message);
         if (topicsCache.length) {
           renderTopicsTable();
           topicsBody.insertAdjacentHTML("afterbegin", tabStatusRow(7, "Showing cached topics. Automatic refresh failed: " + error.message));
@@ -8649,6 +8748,7 @@ function renderHtml() {
       const topics = sortRows(filterRows(topicsCache, topicsFilter.value, ["number", "title", "summary", "type", "vault", "path", "tagsText", "updated"])
         .filter((topic) => !topicsVaultFilter.value || topic.vault === topicsVaultFilter.value)
         .filter((topic) => !topicsTypeFilter.value || topic.type === topicsTypeFilter.value), "topics");
+      renderTableSummary(topicsSummary, "Topics", topicsCache, topics, topicsTableState);
       if (!topicsCache.length) {
         topicsBody.innerHTML = '<tr><td colspan="7" class="muted">No topics yet.</td></tr>';
         return;
@@ -10342,6 +10442,9 @@ function renderHtml() {
         ? scan.skippedGroups
         : groupSkippedForDisplay(scan.skipped || []);
       const supported = "Documents, images, audio/video, subtitles, web/text files, local URL files, and common data/text files are queued when readable.";
+      const skippedHelp = (Number(scan.skippedCount || 0) > 0 || groups.length)
+        ? "Skipped items are grouped by reason and extension so temporary downloads, app metadata, iCloud placeholders, duplicates, and truly unsupported files are separate."
+        : "No skipped files were reported.";
       captureScanStatus.innerHTML =
         '<strong>' + escapeHtml(scan.status || "scan") + '</strong>' +
         '<div class="capture-status-grid">' +
@@ -10354,6 +10457,7 @@ function renderHtml() {
         '</div>' +
         '<div><strong>Collectors:</strong> ' + escapeHtml((scan.collectors || []).join(", ") || "none") + '</div>' +
         '<div><strong>Best effort:</strong> ' + escapeHtml(supported) + '</div>' +
+        '<div><strong>Skipped summary:</strong> ' + escapeHtml(skippedHelp) + '</div>' +
         (groups.length ? '<details><summary>Skipped files by reason and extension</summary><div class="capture-skip-list">' + groups.slice(0, 12).map((item) => {
           const samples = Array.isArray(item.samples) && item.samples.length ? '<div><small>Examples: ' + escapeHtml(item.samples.join(", ")) + '</small></div>' : "";
           return '<div class="capture-skip-item"><strong>' + escapeHtml(String(item.count || 0)) + ' ' + escapeHtml(item.extension || "file") + '</strong><div>' + escapeHtml(item.collector || "capture") + ': ' + escapeHtml(friendlyCaptureSkipReason(item.reason || "Skipped")) + '</div>' + samples + '</div>';
@@ -10364,6 +10468,11 @@ function renderHtml() {
     function friendlyCaptureSkipReason(reason) {
       const text = String(reason || "Skipped");
       if (/unsupported file type/i.test(text)) return "This extension is not queued yet. Convert it to PDF/text/image/audio/video, or add it manually with a description so Learning Boost has useful content to analyze.";
+      if (/temporary download/i.test(text)) return "Temporary or partial download file. Scan again after the download finishes.";
+      if (/macos metadata/i.test(text)) return "macOS metadata file; not useful learning content.";
+      if (/application database/i.test(text)) return "Application database file skipped by safe capture.";
+      if (/installer|application bundle/i.test(text)) return "Installer or application package skipped by safe capture.";
+      if (/icloud placeholder/i.test(text)) return "iCloud placeholder file. Download it locally first, then scan again.";
       if (/already captured/i.test(text)) return "Already captured earlier; duplicate was not queued again.";
       if (/stopped after|scan limit|increase the scan limit|narrow this folder/i.test(text)) return "The folder is broad. Narrow the watch folder, turn off recursive scanning, or scan a smaller folder so new source files are not buried among unrelated downloads.";
       if (/permission|eperm|eacces|operation not permitted/i.test(text)) return "macOS or iCloud blocked file access. Move the file to a readable local folder or grant file access, then scan again.";
@@ -10866,6 +10975,18 @@ function renderHtml() {
       providerTabDot.title = [label || "Unknown", detail || ""].filter(Boolean).join(": ");
     }
 
+    async function refreshProviderTabDot() {
+      try {
+        const response = await fetch("/api/provider-status");
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        providerStatusCache = data;
+        updateProviderTabStatus(data.statusColor, data.status, data.statusDetail);
+      } catch (error) {
+        updateProviderTabStatus("orange", "Provider status unknown", error.message);
+      }
+    }
+
     function sanitizeStatusColor(color) {
       return ["green", "orange", "red", "grey"].includes(color) ? color : "grey";
     }
@@ -11026,8 +11147,9 @@ function renderHtml() {
         const annotations = annotationSummaryForPath(group.topic.vault, group.topic.path);
         const active = activeContentKeys().has(annotationKey(group.topic.vault, group.topic.path));
         const recentClass = recentTopicClass(group.topic);
+        const duplicateBadge = group.count > 1 ? '<span class="side-topic-match-count">' + escapeHtml(group.count + " similar") + '</span>' : "";
         return '<button class="' + recentClass + '" type="button" data-title="' + escapeHtml(group.topic.title) + '" data-vault="' + escapeHtml(group.topic.vault) + '" data-path="' + escapeHtml(group.topic.path) + '" data-type="' + escapeHtml(group.topic.type || "") + '" data-updated="' + escapeHtml(group.updated || group.topic.updated || "") + '" data-tags="' + escapeHtml((group.tags || []).join(", ")) + '" title="' + escapeHtml(group.title) + '">' +
-          '<span class="side-topic-title-row"><span class="side-topic-title-text">' + escapeHtml(group.topic.title) + '</span>' + renderAnnotationBadges({ ...annotations, active }) + '</span>' +
+          '<span class="side-topic-title-row"><span class="side-topic-title-text">' + escapeHtml(group.topic.title) + '</span>' + duplicateBadge + renderAnnotationBadges({ ...annotations, active }) + '</span>' +
           '<span class="side-topic-meta">' + escapeHtml(group.meta) + '</span></button>';
     }
 
@@ -11069,7 +11191,7 @@ function renderHtml() {
     function groupSideTopics(topics) {
       const groups = new Map();
       for (const topic of topics) {
-        const key = normalizeTopicTitle(topic.title);
+        const key = sideTopicGroupKey(topic);
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(topic);
       }
@@ -11086,6 +11208,7 @@ function renderHtml() {
         const vaultText = vaults.length > 1 ? " | " + vaults.length + " vaults" : vaults[0] ? " | " + vaults[0] : "";
         return {
           topic,
+          count: items.length,
           updated,
           dateAdded,
           vault: vaults.length > 1 ? "Multiple vaults" : vaults[0] || "",
@@ -11203,6 +11326,31 @@ function renderHtml() {
 
     function sideTopicVisitKey(vault, path) {
       return [String(vault || "").trim(), normalizeAnnotationPath(path)].filter(Boolean).join("|");
+    }
+
+    function sideTopicGroupKey(topic) {
+      const title = normalizeTopicTitle(topic.title);
+      const compactTitle = compactSideTopicText(title);
+      const pathKey = compactSideTopicText(String(topic.path || "")
+        .replace(/^wiki\\/sources\\//i, "")
+        .replace(/\\.md$/i, "")
+        .replace(/^\\d{4}-\\d{2}-\\d{2}--/i, "")
+        .replace(/\\d{4}-\\d{2}-\\d{2}t\\d{2}-\\d{2}-\\d{2}--/ig, ""));
+      const combined = normalizeTopicTitle(compactTitle + " " + pathKey)
+        .replace(/\\b\\d+\\b/g, " ")
+        .replace(/\\s+/g, " ")
+        .trim();
+      if (/^(media from|browser clip|pasted image|transcript)/i.test(title) && pathKey) return "capture:" + pathKey.slice(0, 160);
+      return combined.slice(0, 180) || compactTitle || pathKey || title || "topic";
+    }
+
+    function compactSideTopicText(value) {
+      return normalizeTopicTitle(String(value || "")
+        .replace(/[a-f0-9]{8,}/gi, " ")
+        .replace(/\\d{4}-\\d{2}-\\d{2}(?:t\\d{2}-\\d{2}-\\d{2})?/gi, " ")
+        .replace(/\\b(captured|downloaded?|browser|clip|media|image|screenshot|pasted|transcript|raw|input|processed|source|sources|wiki)\\b/gi, " ")
+        .replace(/[\\/_-]+/g, " ")
+        .replace(/\\b\\d+\\b/g, " "));
     }
 
     function normalizeTopicTitle(title) {
@@ -12990,10 +13138,12 @@ function renderHtml() {
     loadChatVaults();
     loadAnnotations({ annotateResults: false });
     loadStatus();
+    refreshProviderTabDot();
     loadProviderStatus();
     loadLearning();
     setInterval(loadChatVaults, 10000);
     setInterval(loadStatus, 5000);
+    setInterval(refreshProviderTabDot, 15000);
   </script>
 </body>
 </html>`;

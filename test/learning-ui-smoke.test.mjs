@@ -92,10 +92,15 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /\.learning-flow-lane \.learning-flow-step-button \{[^}]*overflow-wrap: (break-word|anywhere)/);
   assert.match(serverSource, /writing-mode: horizontal-tb/);
   assert.match(serverSource, /#source-capture-form button/);
+  assert.match(serverSource, /#source-capture-form \{ align-items: start/);
   assert.match(serverSource, /learning-flow-step-button/);
+  assert.match(serverSource, /LLM_WIKI_ENABLE_STARTUP_TAB_REFRESH !== "0"/);
+  assert.match(serverSource, /compactSideTopicText/);
+  assert.match(serverSource, /Skipped files by reason and extension/);
   assert.doesNotMatch(serverSource, /\.learning-jump, \.learning-target-button \{[^}]*overflow-wrap: anywhere/);
   assert.ok(!serverSource.includes(".learning-stepper li { position: relative; display: grid; grid-template-columns: 28px"));
   assert.ok(!serverSource.includes(".learning-flow-lane li { display: grid; grid-template-columns: 28px"));
+  assert.ok(!serverSource.includes(".learning-flow-lane .learning-flow-step-button { display: grid; grid-template-columns: 28px"));
   assert.match(serverSource, /Review due cards/);
   assert.match(serverSource, /Finish pending sources/);
   assert.match(serverSource, /Read the gist/);
@@ -407,6 +412,8 @@ test("macOS wrapper logs server output and installer refreshes app registration"
   assert.match(macosWrapperSource, /serverHealthFailures/);
   assert.match(macosWrapperSource, /scheduleServerHealthWatchdog/);
   assert.match(macosWrapperSource, /checkServerHealthAndRestartIfNeeded/);
+  assert.match(macosWrapperSource, /removeLegacyLoginItems/);
+  assert.match(macosWrapperSource, /LLMWikiAgent/);
   assert.match(macosInstallScript, /LaunchServices\.framework\/Support\/lsregister/);
   assert.match(macosInstallScript, /\$LSREGISTER" -f "\$TARGET"/);
   assert.match(macosInstallScript, /\$LSREGISTER" -f "\$APPLICATIONS_ALIAS"/);

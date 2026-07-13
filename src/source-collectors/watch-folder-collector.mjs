@@ -5,6 +5,29 @@ import { captureResource, hashFileForDedupe, readSourceCaptureSettings, resource
 import { isIngestibleRawFile } from "../vaults.mjs";
 
 const DEFAULT_MAX_SCAN_FILES = 600;
+const SAFE_SKIP_EXTENSIONS = new Map([
+  [".crdownload", "Temporary download file; wait until the browser finishes downloading."],
+  [".download", "Temporary download file; wait until the browser finishes downloading."],
+  [".part", "Temporary download file; wait until the download finishes."],
+  [".tmp", "Temporary file; not useful learning content."],
+  [".temp", "Temporary file; not useful learning content."],
+  [".ds_store", "macOS metadata file; not useful learning content."],
+  [".localized", "macOS metadata file; not useful learning content."],
+  [".icloud", "iCloud placeholder file; download it locally first."],
+  [".sqlite", "Application database file skipped by safe capture."],
+  [".sqlite3", "Application database file skipped by safe capture."],
+  [".db", "Application database file skipped by safe capture."],
+  [".db-wal", "Application database file skipped by safe capture."],
+  [".db-shm", "Application database file skipped by safe capture."],
+  [".lock", "Application lock file skipped by safe capture."],
+  [".dmg", "Installer image skipped by safe capture."],
+  [".pkg", "Installer package skipped by safe capture."],
+  [".app", "Application bundle skipped by safe capture."]
+]);
+const SAFE_SKIP_FILENAMES = new Map([
+  [".ds_store", "macOS metadata file; not useful learning content."],
+  [".localized", "macOS metadata file; not useful learning content."]
+]);
 
 export function collectWatchFolderResources(vaultPath, options = {}) {
   const settings = options.settings || readSourceCaptureSettings(vaultPath);
@@ -154,8 +177,15 @@ function validateCandidateFile(vaultPath, file) {
     return { ok: false, reason: "File is not readable." };
   }
   if (!stat.isFile()) return { ok: false, reason: "Not a regular file." };
+  const ext = path.extname(real).toLowerCase() || "(none)";
+  const basename = path.basename(real).toLowerCase();
+  if (SAFE_SKIP_FILENAMES.has(basename)) {
+    return { ok: false, reason: SAFE_SKIP_FILENAMES.get(basename), extension: basename };
+  }
+  if (SAFE_SKIP_EXTENSIONS.has(ext)) {
+    return { ok: false, reason: SAFE_SKIP_EXTENSIONS.get(ext), extension: ext };
+  }
   if (!isIngestibleRawFile(real)) {
-    const ext = path.extname(real).toLowerCase() || "(none)";
     return { ok: false, reason: `Unsupported file type: ${ext}.`, extension: ext };
   }
   if (isInsidePath(real, path.join(vaultPath, "raw", "processed"))) return { ok: false, reason: "Inside vault raw/processed." };

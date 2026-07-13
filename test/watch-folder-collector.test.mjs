@@ -101,6 +101,40 @@ test("watch folder collector queues common best-effort document media and text f
   assert.equal(collected.every((item) => item.captured), true);
 });
 
+test("watch folder collector groups temporary system and iCloud skips before generic unsupported files", () => {
+  const { vault, root } = makeVault();
+  const folder = path.join(root, "watched-skip-reasons");
+  fs.mkdirSync(folder);
+  for (const name of [
+    "video.mp4.crdownload",
+    ".DS_Store",
+    "cloud-file.icloud",
+    "browser.sqlite",
+    "installer.dmg",
+    "unsupported.exe"
+  ]) {
+    fs.writeFileSync(path.join(folder, name), "sample");
+  }
+
+  const settings = updateSourceCaptureSettings(vault, {
+    enabled: true,
+    watchFolders: [folder],
+    watchFolderIngestMode: "ready_for_ingest"
+  });
+  const collected = collectWatchFolderResources(vault, { settings, previewApproved: true });
+  const reasons = collected.summary.skippedGroups.map((group) => group.reason).join("\n");
+
+  assert.equal(collected.summary.filesDiscovered, 6);
+  assert.equal(collected.summary.filesQueued, 0);
+  assert.equal(collected.summary.filesSkipped, 6);
+  assert.match(reasons, /Temporary download file/);
+  assert.match(reasons, /macOS metadata file/);
+  assert.match(reasons, /iCloud placeholder file/);
+  assert.match(reasons, /Application database file/);
+  assert.match(reasons, /Installer image/);
+  assert.match(reasons, /Unsupported file type: \.exe/);
+});
+
 test("watch folder collector queues expanded code web image media and archive formats", () => {
   const { vault, root } = makeVault();
   const folder = path.join(root, "watched-expanded-formats");

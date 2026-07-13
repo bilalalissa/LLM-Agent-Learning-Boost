@@ -107,6 +107,16 @@ When full extraction is not available, the item can still become a pending docum
 
 Unsupported files, missing folders, unreadable files, files already in `raw/processed`, and files in capture output asset folders are skipped with a visible grouped reason in scan status. Instead of repeating `Unsupported file type` hundreds of times, the UI groups skipped files by collector, extension, reason, count, and sample filenames.
 
+Temporary downloads, macOS metadata, iCloud placeholders, app databases, lock files, and installers are classified before the generic unsupported-file check:
+
+- `.crdownload`, `.download`, `.part`, `.tmp`, `.temp`: wait until the download or app write finishes, then scan again.
+- `.DS_Store`, `.localized`: macOS metadata, not learning content.
+- `.icloud`: the file is only a cloud placeholder; download it locally first.
+- `.sqlite`, `.sqlite3`, `.db`, `.db-wal`, `.db-shm`, `.lock`: app database or lock files skipped by safe capture.
+- `.dmg`, `.pkg`, `.app`: installers or app bundles skipped by safe capture.
+
+Use this grouped status to decide whether to narrow a broad watch folder such as Downloads, move a specific source into a smaller folder, or convert an unsupported file into PDF/text/image/audio/video.
+
 Watch-folder dedupe uses a local content hash plus file extension when the file can be read. This means a renamed duplicate PDF, image, note, or media file is not captured again, while unrelated formats with identical small metadata text are still treated as separate sources. If hashing is blocked, Learning Boost falls back to local path, file size, and modified time. Existing ResourceInbox entries are checked by recorded path and dedupe metadata instead of probing every old queued file on disk, so cloud-only or permission-blocked historical entries do not stall the scan. In the default `ready_for_ingest` mode, supported files in an explicitly selected watch folder are approved for local queueing into `raw/input/`. In `needs_review` mode, the file is recorded in ResourceInbox but is not copied into `raw/input/` until approved later.
 
 Copy failures, including iCloud or macOS permission errors such as `EPERM`, are recorded on that one ResourceInbox item or skipped group. They do not stop the entire app or block Files, Archive, Topics, or Learning from loading. Automatic ResourceInbox staging uses a small queue-attempt budget per pass, killable copy timeouts, and a retry backoff for files that just failed, so a cloud-only or locked file becomes a visible per-file blocker instead of freezing the background worker or being retried every few seconds. When only these capture blockers remain, Learning Autopilot reports Source Capture attention, not provider failure. Fix the file permission, move the file to a readable local folder, or choose a different watch folder, then scan again.

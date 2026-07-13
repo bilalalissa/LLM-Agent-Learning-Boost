@@ -9,18 +9,15 @@ import { readPlanUpdateSuggestions } from "./plan-update-suggester.mjs";
 import { readRemoteResearchSettings } from "./remote-research.mjs";
 import { groupedResourceInbox, readSourceCaptureSettings } from "./source-capture.mjs";
 import { listVaults, readIfExists, vaultName } from "./vaults.mjs";
-import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { formatLocalDateTime } from "./time.mjs";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
 
 const config = getConfig();
 const requested = new Set((process.argv[2] || "all").split(",").map((item) => item.trim()).filter(Boolean));
 const resultFile = process.argv[3] || "";
 const includeAll = requested.has("all");
+const MAX_TAB_READ_BYTES = Number(process.env.LLM_WIKI_TAB_READ_MAX_BYTES || 48 * 1024 * 1024);
 
 try {
   const result = {};
@@ -210,17 +207,25 @@ async function listTopicsFromIndexes(config) {
   return [...topics.values()].sort((a, b) => a.title.localeCompare(b.title));
 }
 
-async function readTextWithTimeout(file, timeoutMs = 800) {
+async function readTextWithTimeout(file) {
   traceWorkerRead(file);
   try {
-    const { stdout } = await execFileAsync("/bin/cat", [file], {
-      encoding: "utf8",
-      maxBuffer: 8 * 1024 * 1024,
-      timeout: timeoutMs,
-      killSignal: "SIGKILL"
-    });
-    return stdout;
-  } catch {
+    const stat = fs.statSync(file);
+    if (!stat.isFile()) return "";
+    if (stat.size > MAX_TAB_READ_BYTES) {
+      const fd = fs.openSync(file, "r");
+      try {
+        const buffer = Buffer.allocUnsafe(MAX_TAB_READ_BYTES);
+        const position = Math.max(0, stat.size - MAX_TAB_READ_BYTES);
+        const bytesRead = fs.readSync(fd, buffer, 0, MAX_TAB_READ_BYTES, position);
+        return buffer.subarray(0, bytesRead).toString("utf8");
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
+    return fs.readFileSync(file, "utf8");
+  } catch (error) {
+    console.warn(`[tab-data-worker] failed to read ${file}: ${error.message}`);
     return "";
   }
 }

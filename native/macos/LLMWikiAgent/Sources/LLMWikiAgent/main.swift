@@ -44,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.setActivationPolicy(.regular)
         ensureConfig()
         repairDefaultConfigIfPossible()
+        removeLegacyLoginItems()
         installStatusItem()
         makeWindow()
         startServer()
@@ -53,6 +54,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         loadAppWhenReady()
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
             self?.configureNotifications()
+        }
+    }
+
+    private func removeLegacyLoginItems() {
+        DispatchQueue.global(qos: .utility).async {
+            let script = """
+            tell application "System Events"
+              repeat with itemName in {"LLMWikiAgent"}
+                repeat with loginItem in (every login item whose name is itemName)
+                  delete loginItem
+                end repeat
+              end repeat
+            end tell
+            """
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {
+                // Legacy cleanup is best-effort; the app should still launch normally.
+            }
         }
     }
 
