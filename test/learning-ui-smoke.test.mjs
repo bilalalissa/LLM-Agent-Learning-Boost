@@ -312,9 +312,17 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /api\/reprocess-sources/);
   assert.match(serverSource, /api\/reprocess-history/);
   assert.match(serverSource, /api\/reprocess-history-restore/);
+  assert.match(serverSource, /api\/source-duplicates/);
   assert.match(serverSource, /reprocess-history/);
   assert.match(serverSource, /Reprocess history/);
   assert.match(serverSource, /restoreReprocessHistory/);
+  assert.match(serverSource, /findSourceDuplicateGroups/);
+  assert.match(serverSource, /sourceDuplicateKey/);
+  assert.match(serverSource, /Audit duplicate sources/);
+  assert.match(serverSource, /source-duplicate-report/);
+  assert.match(serverSource, /source_content_sha256/);
+  assert.match(serverSource, /source_dedupe_key/);
+  assert.match(serverSource, /Baseline source page created from local extracted text/);
   assert.match(serverSource, /skipRawCandidates: true/);
   assert.match(serverSource, /Reprocess selected source/);
   assert.match(serverSource, /Reprocess selected source page/);

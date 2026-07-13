@@ -321,6 +321,21 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "GET" && url.pathname === "/api/source-duplicates") {
+    try {
+      const result = await findSourceDuplicateGroups(config, {
+        vault: url.searchParams.get("vault") || "",
+        includeArchives: url.searchParams.get("includeArchives") === "1"
+      });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(result));
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/api/reprocess-history-restore") {
     try {
       const body = await readBody(request);
@@ -3828,6 +3843,203 @@ function restoreReprocessHistory(vaultPath, payload = {}) {
   };
 }
 
+async function findSourceDuplicateGroups(currentConfig = config, options = {}) {
+  const requestedVault = String(options.vault || "").trim();
+  const includeArchives = options.includeArchives === true;
+  const vaultPaths = requestedVault
+    ? [resolveLearningVaultPath(requestedVault)]
+    : cachedVaultPaths(currentConfig, { allowScan: true });
+  const groups = new Map();
+  let scanned = 0;
+  for (const vaultPath of vaultPaths) {
+    for (const record of scanSourcePagesForDuplicates(vaultPath, { includeArchives })) {
+      scanned += 1;
+      const key = sourceDuplicateKey(record);
+      if (!key) continue;
+      if (!groups.has(key.key)) groups.set(key.key, { key: key.key, reason: key.reason, items: [] });
+      groups.get(key.key).items.push({ ...record, duplicateReason: key.reason });
+    }
+  }
+  const duplicateGroups = [...groups.values()]
+    .map((group) => ({
+      ...group,
+      baselineCount: group.items.reduce((sum, item) => sum + (item.baselineCount || 0), 0),
+      activeCount: group.items.filter((item) => !item.archived).length,
+      archivedCount: group.items.filter((item) => item.archived).length,
+      items: group.items.sort((a, b) => String(a.sourcePage).localeCompare(String(b.sourcePage)))
+    }))
+    .filter((group) => group.items.length > 1)
+    .sort((a, b) => b.items.length - a.items.length || a.key.localeCompare(b.key));
+  return {
+    generatedAt: new Date().toISOString(),
+    generatedAtLocal: formatLocal(new Date()),
+    includeArchives,
+    scanned,
+    totalGroups: duplicateGroups.length,
+    totalItems: duplicateGroups.reduce((sum, group) => sum + group.items.length, 0),
+    groups: duplicateGroups.slice(0, 80)
+  };
+}
+
+function scanSourcePagesForDuplicates(vaultPath, options = {}) {
+  const roots = [{ dir: path.join(vaultPath, "wiki", "sources"), rel: "wiki/sources", archived: false }];
+  if (options.includeArchives === true) {
+    roots.push({ dir: path.join(vaultPath, "wiki", "archive", "sources"), rel: "wiki/archive/sources", archived: true });
+  }
+  const records = [];
+  for (const root of roots) {
+    if (!fs.existsSync(root.dir)) continue;
+    for (const file of walkMarkdownFiles(root.dir)) {
+      const rel = path.relative(vaultPath, file).replace(/\\/g, "/");
+      const record = readSourcePageDuplicateRecord(vaultPath, rel, root.archived);
+      if (record) records.push(record);
+    }
+  }
+  return records;
+}
+
+function* walkMarkdownFiles(dir) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      yield* walkMarkdownFiles(full);
+    } else if (entry.isFile() && /\.md$/i.test(entry.name)) {
+      yield full;
+    }
+  }
+}
+
+function readSourcePageDuplicateRecord(vaultPath, sourcePage, archived = false) {
+  try {
+    const selected = safeVaultPath(vaultPath, sourcePage);
+    const text = fs.readFileSync(selected.full, "utf8");
+    const stat = fs.statSync(selected.full);
+    const metadata = parseSourcePageMetadata(text, selected.relative);
+    return {
+      vault: vaultName(vaultPath),
+      sourcePage: selected.relative,
+      archived,
+      title: metadata.title,
+      sourcePath: metadata.sourcePath,
+      sourceUrl: metadata.sourceUrl,
+      sourceDedupeKey: metadata.sourceDedupeKey,
+      sourceContentSha256: metadata.sourceContentSha256,
+      mediaKind: metadata.mediaKind,
+      baselineCount: metadata.baselineCount,
+      updatedAt: stat.mtime.toISOString(),
+      updatedAtLocal: formatLocal(stat.mtime)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseSourcePageMetadata(text, sourcePage) {
+  const metadata = {
+    title: "",
+    sourcePath: "",
+    sourceUrl: "",
+    sourceDedupeKey: "",
+    sourceContentSha256: "",
+    mediaKind: "",
+    baselineCount: 0
+  };
+  const titleMatch = text.match(/^#\s+(.+)$/m) || text.match(/^title:\s*["']?(.+?)["']?\s*$/m);
+  metadata.title = cleanDuplicateTitle(titleMatch?.[1] || path.basename(sourcePage, ".md"));
+  const keys = {
+    source_path: "sourcePath",
+    source_url: "sourceUrl",
+    url: "sourceUrl",
+    source_dedupe_key: "sourceDedupeKey",
+    source_content_sha256: "sourceContentSha256",
+    media_kind: "mediaKind"
+  };
+  for (const line of text.split(/\r?\n/).slice(0, 90)) {
+    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.+?)\s*$/);
+    if (!match) continue;
+    const field = keys[match[1]];
+    if (field && !metadata[field]) metadata[field] = cleanFrontmatterValue(match[2]);
+  }
+  metadata.baselineCount = (text.match(/Baseline source page created from local extracted text because the configured AI provider was unavailable\./g) || []).length;
+  return metadata;
+}
+
+function cleanFrontmatterValue(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^["']|["']$/g, "")
+    .replace(/^<|>$/g, "")
+    .trim();
+}
+
+function sourceDuplicateKey(record) {
+  if (record.sourceContentSha256) return { key: `content-sha:${record.sourceContentSha256}`, reason: "same content hash" };
+  if (record.sourceDedupeKey) return { key: `dedupe:${record.sourceDedupeKey}`, reason: "same capture dedupe key" };
+  const embedded = extractEmbeddedHash(record.sourcePath, record.sourcePage, record.title);
+  if (embedded) return { key: `embedded-hash:${embedded}`, reason: "same embedded source hash" };
+  const normalizedUrl = normalizeDuplicateUrl(record.sourceUrl);
+  if (normalizedUrl) return { key: `url:${normalizedUrl}`, reason: "same source URL" };
+  const normalizedTitle = normalizeDuplicateTitle(record.title);
+  if (normalizedTitle && normalizedTitle.length >= 12) return { key: `title:${normalizedTitle}`, reason: "same normalized title" };
+  return null;
+}
+
+function extractEmbeddedHash(...values) {
+  for (const value of values) {
+    const matches = String(value || "").match(/[a-f0-9]{10,64}/gi) || [];
+    const useful = matches
+      .map((item) => item.toLowerCase())
+      .find((item) => /[a-f]/.test(item) && /\d/.test(item));
+    if (useful) return useful;
+  }
+  return "";
+}
+
+function normalizeDuplicateUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    parsed.hash = "";
+    for (const key of ["t", "time_continue", "start", "feature", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"]) {
+      parsed.searchParams.delete(key);
+    }
+    const entries = [...parsed.searchParams.entries()].sort(([a], [b]) => a.localeCompare(b));
+    parsed.search = "";
+    for (const [key, val] of entries) parsed.searchParams.append(key, val);
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return raw.toLowerCase().replace(/[#?].*$/, "").replace(/\/$/, "");
+  }
+}
+
+function normalizeDuplicateTitle(value) {
+  return cleanDuplicateTitle(value)
+    .replace(/^\d{4}-\d{2}-\d{2}--/, "")
+    .replace(/--browser--media--/g, " ")
+    .replace(/\b(browser clip|browser media|pasted image|media from)\b/gi, " ")
+    .replace(/[-_ ]+\d{10,}(\b|$)/g, " ")
+    .replace(/[-_ ]+[a-f0-9]{10,64}(\b|$)/gi, " ")
+    .replace(/[-_ ]+\d+$/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function cleanDuplicateTitle(value) {
+  return String(value || "")
+    .replace(/^["']|["']$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function sourceHistorySlug(value) {
   return String(value || "source")
     .normalize("NFKD")
@@ -5243,6 +5455,21 @@ function renderHtml() {
     .sticky-controls .table-controls input { flex: 1 1 260px; }
     .sticky-controls .table-controls select { flex: 0 1 180px; }
     .copy-feedback { color: var(--muted); font-size: 13px; min-width: 54px; }
+    .source-duplicate-report { margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 6px 16px var(--shadow); }
+    .duplicate-report-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; min-width: 0; }
+    .duplicate-group-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
+    .duplicate-group { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--soft); min-width: 0; }
+    .duplicate-group-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; min-width: 0; }
+    .duplicate-group-heading strong { overflow-wrap: anywhere; min-width: 0; }
+    .duplicate-pill { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; background: var(--panel); color: var(--muted); font-size: 12px; white-space: normal; }
+    .duplicate-pill.warning, .duplicate-source-warning { color: #8a3b00; border-color: #d99a55; background: #fff0d6; }
+    .duplicate-source-list { display: grid; gap: 6px; }
+    .duplicate-source-item { display: grid; gap: 3px; width: 100%; text-align: start; border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: var(--panel); color: var(--text); cursor: pointer; min-width: 0; }
+    .duplicate-source-item:hover, .duplicate-source-item:focus { border-color: var(--accent); outline: none; }
+    .duplicate-source-title, .duplicate-source-meta, .duplicate-source-warning { overflow-wrap: anywhere; unicode-bidi: plaintext; }
+    .duplicate-source-title { font-weight: 650; }
+    .duplicate-source-meta, .duplicate-source-warning { color: var(--muted); font-size: 12px; }
+    .target-highlight { outline: 3px solid var(--accent); outline-offset: -3px; background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
     .answer { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px; min-height: 260px; line-height: 1.5; direction: auto; text-align: start; overflow-wrap: anywhere; }
     .answer [dir="auto"], .answer [dir="rtl"], .answer [dir="ltr"] { text-align: start; }
     .answer [data-align="right"] { text-align: right; }
@@ -5794,6 +6021,7 @@ function renderHtml() {
           <button id="rename-source" class="secondary" type="button">Rename selected source</button>
           <button id="reprocess-source" class="secondary" type="button">Reprocess selected source</button>
           <button id="reprocess-history" class="secondary" type="button">Reprocess history</button>
+          <button id="audit-duplicate-sources" class="secondary" type="button">Audit duplicate sources</button>
           <button id="merge-sources" class="secondary" type="button">Merge selected sources</button>
           <button id="delete-sources" class="secondary" type="button">Archive selected sources</button>
           <select id="files-export-format" aria-label="Selected files export format">
@@ -5808,6 +6036,7 @@ function renderHtml() {
           <span id="rename-source-feedback" class="copy-feedback"></span>
           <span id="reprocess-source-feedback" class="copy-feedback"></span>
           <span id="reprocess-history-feedback" class="copy-feedback"></span>
+          <span id="source-duplicate-feedback" class="copy-feedback"></span>
           <span id="merge-sources-feedback" class="copy-feedback"></span>
           <span id="delete-sources-feedback" class="copy-feedback"></span>
           <span id="files-export-feedback" class="copy-feedback"></span>
@@ -5819,6 +6048,7 @@ function renderHtml() {
           <button id="files-clear-filter" class="secondary" type="button">Clear</button>
         </div>
       </div>
+      <div id="source-duplicate-report" class="source-duplicate-report" hidden></div>
       <table>
         <thead>
           <tr>
@@ -6483,6 +6713,9 @@ function renderHtml() {
     const reprocessSourceFeedback = document.querySelector("#reprocess-source-feedback");
     const reprocessHistoryButton = document.querySelector("#reprocess-history");
     const reprocessHistoryFeedback = document.querySelector("#reprocess-history-feedback");
+    const auditDuplicateSourcesButton = document.querySelector("#audit-duplicate-sources");
+    const sourceDuplicateFeedback = document.querySelector("#source-duplicate-feedback");
+    const sourceDuplicateReport = document.querySelector("#source-duplicate-report");
     const mergeSourcesButton = document.querySelector("#merge-sources");
     const mergeSourcesFeedback = document.querySelector("#merge-sources-feedback");
     const deleteSourcesButton = document.querySelector("#delete-sources");
@@ -6862,6 +7095,7 @@ function renderHtml() {
     renameSourceButton.addEventListener("click", renameSelectedSource);
     reprocessSourceButton.addEventListener("click", reprocessSelectedSources);
     reprocessHistoryButton.addEventListener("click", chooseReprocessHistory);
+    auditDuplicateSourcesButton.addEventListener("click", auditDuplicateSources);
     mergeSourcesButton.addEventListener("click", mergeSelectedSources);
     deleteSourcesButton.addEventListener("click", deleteSelectedSources);
     exportSelectedFilesButton.addEventListener("click", () => exportSelectedFiles("download", filesExportFormat.value));
@@ -7789,6 +8023,108 @@ function renderHtml() {
       } finally {
         reprocessHistoryButton.disabled = false;
         setTimeout(() => { reprocessHistoryFeedback.textContent = ""; }, 6200);
+      }
+    }
+
+    async function auditDuplicateSources() {
+      auditDuplicateSourcesButton.disabled = true;
+      sourceDuplicateFeedback.textContent = "Auditing...";
+      sourceDuplicateReport.hidden = false;
+      sourceDuplicateReport.innerHTML = '<p class="muted">Scanning active and archived source pages for duplicate capture keys, content hashes, URLs, and repeated baseline pages...</p>';
+      try {
+        const response = await fetch("/api/source-duplicates?includeArchives=1");
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        renderSourceDuplicateReport(data);
+        sourceDuplicateFeedback.textContent = data.totalGroups
+          ? "Found " + data.totalGroups + " duplicate group" + (data.totalGroups === 1 ? "" : "s")
+          : "No duplicate groups found";
+      } catch (error) {
+        sourceDuplicateReport.innerHTML = '<p class="error">' + escapeHtml(error.message) + '</p>';
+        sourceDuplicateFeedback.textContent = "Audit failed";
+      } finally {
+        auditDuplicateSourcesButton.disabled = false;
+        setTimeout(() => { sourceDuplicateFeedback.textContent = ""; }, 5200);
+      }
+    }
+
+    function renderSourceDuplicateReport(data) {
+      const groups = data.groups || [];
+      if (!groups.length) {
+        sourceDuplicateReport.innerHTML =
+          '<div class="duplicate-report-summary"><strong>No duplicate groups found.</strong><span class="muted"> Scanned ' +
+          escapeHtml(data.scanned || 0) + ' source page(s).</span></div>';
+        return;
+      }
+      const limitedGroups = groups.slice(0, 24);
+      sourceDuplicateReport.innerHTML =
+        '<div class="duplicate-report-summary">' +
+          '<strong>Duplicate source audit</strong>' +
+          '<span>Found ' + escapeHtml(data.totalGroups) + ' group(s), ' + escapeHtml(data.totalItems) + ' source page(s), scanned ' + escapeHtml(data.scanned) + '.</span>' +
+          '<span class="muted">This report is read-only. Select active rows and use Reprocess selected source, Reprocess history, or Archive selected sources when ready.</span>' +
+        '</div>' +
+        '<div class="duplicate-group-list">' +
+          limitedGroups.map((group, index) => renderSourceDuplicateGroup(group, index)).join("") +
+        '</div>' +
+        (groups.length > limitedGroups.length ? '<p class="muted">Showing the largest ' + limitedGroups.length + ' group(s). Narrow the Files filter or archive resolved duplicates, then audit again.</p>' : "");
+      sourceDuplicateReport.querySelectorAll("[data-duplicate-source]").forEach((button) => {
+        button.addEventListener("click", () => focusDuplicateSource(button.dataset.vault || "", button.dataset.sourcePage || "", button.dataset.archived === "1"));
+      });
+    }
+
+    function renderSourceDuplicateGroup(group, index) {
+      const title = bestDuplicateGroupTitle(group);
+      return '<section class="duplicate-group">' +
+        '<div class="duplicate-group-heading">' +
+          '<strong>' + escapeHtml(index + 1) + '. ' + escapeHtml(title) + '</strong>' +
+          '<span class="duplicate-pill">' + escapeHtml(group.items?.length || 0) + ' source page(s)</span>' +
+          '<span class="duplicate-pill">' + escapeHtml(group.reason || "similar source") + '</span>' +
+          (group.baselineCount ? '<span class="duplicate-pill warning">' + escapeHtml(group.baselineCount) + ' baseline marker(s)</span>' : "") +
+        '</div>' +
+        '<div class="duplicate-source-list">' +
+          (group.items || []).map((item) => renderSourceDuplicateItem(item)).join("") +
+        '</div>' +
+      '</section>';
+    }
+
+    function renderSourceDuplicateItem(item) {
+      const title = item.title || item.sourcePage || "source page";
+      const sourceHint = item.sourcePath || item.sourceUrl || item.sourcePage || "";
+      return '<button class="duplicate-source-item" type="button" data-duplicate-source="1" data-vault="' + escapeHtml(item.vault || "") + '" data-source-page="' + escapeHtml(item.sourcePage || "") + '" data-archived="' + (item.archived ? "1" : "0") + '" title="' + escapeHtml(sourceHint) + '">' +
+        '<span class="duplicate-source-title">' + escapeHtml(title) + '</span>' +
+        '<span class="duplicate-source-meta">' + escapeHtml(item.vault || "") + ' · ' + (item.archived ? "archived" : "active") + ' · ' + escapeHtml(item.updatedAtLocal || "") + '</span>' +
+        (item.baselineCount ? '<span class="duplicate-source-warning">baseline provider fallback</span>' : "") +
+      '</button>';
+    }
+
+    function bestDuplicateGroupTitle(group) {
+      const items = group.items || [];
+      return items.find((item) => item.title && !/^media from\b/i.test(item.title))?.title ||
+        items[0]?.title ||
+        group.key ||
+        "Duplicate source group";
+    }
+
+    async function focusDuplicateSource(vault, sourcePage, archived) {
+      if (!vault || !sourcePage) return;
+      if (archived) {
+        sourceDuplicateFeedback.textContent = "Archived source: open Archive and restore it before reprocessing.";
+        await activateTab("archives");
+        archivesFilter.value = sourcePage;
+        renderArchivesTable();
+        return;
+      }
+      filesVaultFilter.value = vault;
+      filesFilter.value = sourcePage;
+      renderFilesTable();
+      const row = Array.from(filesBody.querySelectorAll("tr")).find((item) => (item.dataset.sourcePage || "") === sourcePage);
+      if (row) {
+        row.classList.add("target-highlight");
+        row.scrollIntoView({ behavior: "smooth", block: "center" });
+        setTimeout(() => row.classList.remove("target-highlight"), 2600);
+        sourceDuplicateFeedback.textContent = "Filtered to selected source page.";
+      } else {
+        sourceDuplicateFeedback.textContent = "Filtered Files by source page. Use Refresh if the row is stale.";
       }
     }
 

@@ -44,6 +44,10 @@ You can also retry a source manually from Files with `Reprocess selected source`
 
 After several attempts, use `Reprocess history` in Files to choose which ingestion you want to keep. Select one source row, choose a timestamped snapshot, and confirm restore. Learning Boost first backs up the current source page under the same history area, then restores the selected snapshot so the favorite ingestion becomes the active source page.
 
+Use `Audit duplicate sources` when Files, Learning, or Obsidian show repeated source pages. The audit is read-only. It scans active `wiki/sources/` pages and archived `wiki/archive/sources/` pages, then groups likely duplicates by content hash, capture dedupe key, embedded source hash, source URL, and normalized title. Baseline provider-fallback pages are flagged so you can reprocess or archive them deliberately.
+
+Click an active audit result to filter Files to that source page. Select the row and then use `Reprocess selected source`, `Reprocess history`, or `Archive selected sources`. Archived audit results are labeled `archived`; restore them from Archive first if you want to reprocess them. Learning Boost does not delete or rewrite duplicate history during the audit.
+
 ## Learning Output
 
 Every processed source asks the provider for a `learning_boost` object. The app normalizes that object into:

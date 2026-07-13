@@ -166,6 +166,8 @@ Reprocess is targeted: it retries the selected source pages only and does not sc
 
 Use `Reprocess history` to pick a favorite previous ingestion. Select exactly one source row, open the history chooser, pick a numbered snapshot, and confirm restore. The app backs up the current source page before restoring the chosen snapshot, so restore actions remain reversible.
 
+Use `Audit duplicate sources` when repeated captures or old baseline pages are cluttering learning output. The report groups active and archived source pages by capture identity, content hash, URL, or normalized title, flags pages that contain the old baseline-provider fallback text, and lets you click an active item to filter the Files table to the exact source page. The audit is non-destructive; after filtering, use the existing reprocess, history restore, merge, or archive controls.
+
 ## Capture Scan Status
 
 Source Capture includes Scan capture sources now. It runs safe local collectors for enabled watch folders, screenshot folders, ResourceInbox staging status, and preview-safe opened-document metadata when explicitly enabled. It shows captured, duplicate, skipped, and last-scan counts so enabled capture controls have visible feedback.
