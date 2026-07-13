@@ -50,6 +50,10 @@ function fakeProvider() {
           target_languages: ["AUTO"],
           gist: "Practice remembering, not just rereading.",
           core_summary: "Small recall prompts make study easier to review and schedule.",
+          technical_reference: {
+            steps: [{ title: "Recall session", items: ["Read the gist.", "Answer one card.", "Review the evidence."], evidence: ["source"] }],
+            technical_details: [{ kind: "method", title: "Session size", detail: "Keep recall sessions short enough to finish.", evidence: ["source"] }]
+          },
           detail_layers: [{ level: "core", title: "Recall", body: "Answering prompts improves memory.", evidence: ["source"] }],
           learning_bits: [{ type: "concept", level: "core", title: "Retrieval practice", body: "Recall from memory.", cognitiveLoad: 1, evidence: ["source"] }],
           general_cards: [{ type: "qa", front: "What is retrieval practice?", back: "Recall from memory.", evidence: ["source"] }],
@@ -85,6 +89,35 @@ test("web processor extracts readable text, schema.org, and media refs", () => {
   assert.deepEqual(source.mediaRefs, ["https://example.com/image.png"]);
 });
 
+test("processor routes expanded learning source formats to best-effort extractors", () => {
+  const { root } = makeVault();
+  const samples = [
+    ["component.vue", "<template><h1>Vue learning note</h1></template>", "text"],
+    ["book.mobi", "not a real ebook", "document"],
+    ["scan.djvu", "not a real djvu", "document"],
+    ["camera.dng", "not a real raw image", "image"],
+    ["voice.mpga", "not real audio", "audio"],
+    ["clip.vob", "not real video", "video"]
+  ];
+
+  for (const [name, content, kind] of samples) {
+    const file = path.join(root, name);
+    fs.writeFileSync(file, content);
+    const source = processSourceFile(file, {
+      disableOcr: true,
+      disableAsr: true,
+      disableVideoOcr: true
+    });
+
+    assert.equal(source.kind, kind, name);
+    assert.notEqual(source.kind, "unsupported", name);
+    if (["image", "audio", "video", "document"].includes(kind)) {
+      assert.match(source.extractionStatus || "", /pending|manual|extracted/i, name);
+      assert.ok(source.processingNotes.length >= 1, name);
+    }
+  }
+});
+
 test("learning_boost normalization preserves cards, evidence, media, and staging", () => {
   const boost = normalizeLearningBoost({
     source_language: "English",
@@ -101,9 +134,63 @@ test("learning_boost normalization preserves cards, evidence, media, and staging
   assert.equal(boost.source_language, "English");
   assert.equal(boost.learning_bits[0].sourcePage, "wiki/sources/source.md");
   assert.deepEqual(boost.learning_bits[0].mediaRefs, ["figure.png"]);
+  assert.equal(boost.learning_bits.length >= 3, true);
   assert.equal(boost.cards.length, 4);
   assert.equal(boost.staging.needed, true);
   assert.match(renderLearningBoostSection(boost), /## Learning Boost/);
+});
+
+test("learning_boost extracts technical reference details into bits, cards, and source page markdown", () => {
+  const boost = normalizeLearningBoost({
+    source_language: "English",
+    target_languages: ["AUTO"],
+    gist: "Configure the local endpoint before running the client.",
+    core_summary: "The setup uses a URL, a timeout, and a command.",
+    technical_reference: {
+      steps: [{ title: "Local router setup", items: ["Start the router.", "Set OPENAI_COMPAT_BASE_URL=http://127.0.0.1:17640/v1."], evidence: ["setup.md"] }],
+      code_blocks: [{ language: "sh", title: "Health check", code: "curl http://127.0.0.1:17640/api/health", explanation: "Confirms the router API is reachable.", evidence: ["setup.md"] }],
+      formulas: [{ name: "Retry budget", formula: "retry_budget = timeout_ms / attempt_ms", variables: ["timeout_ms = total timeout", "attempt_ms = one attempt"], use: "Estimate how many retries fit.", evidence: ["setup.md"] }]
+    },
+    learning_bits: [],
+    general_cards: []
+  }, {
+    sourceRel: "wiki/sources/setup.md",
+    sourceTitle: "Router setup"
+  });
+  const markdown = renderLearningBoostSection(boost);
+
+  assert.match(markdown, /### Technical Reference/);
+  assert.match(markdown, /Local router setup/);
+  assert.match(markdown, /```sh\ncurl http:\/\/127\.0\.0\.1:17640\/api\/health/);
+  assert.match(markdown, /retry_budget = timeout_ms \/ attempt_ms/);
+  assert.equal(boost.learning_bits.some((bit) => /Start the router/.test(bit.body)), true);
+  assert.equal(boost.cards.some((card) => /What are the key steps for Local router setup/.test(card.front)), true);
+  assert.equal(boost.cards.some((card) => /What code or command implements Health check/.test(card.front)), true);
+});
+
+test("learning_boost infers code, ordered steps, and formulas from sparse source text", () => {
+  const boost = normalizeLearningBoost({
+    gist: "Sparse provider output.",
+    learning_bits: [],
+    general_cards: []
+  }, {
+    sourceRel: "wiki/sources/local.md",
+    sourceTitle: "Local setup",
+    sourceText: `1. Install the runtime.
+2. Run the health check.
+
+\`\`\`js
+const baseUrl = "http://127.0.0.1:17640/v1";
+\`\`\`
+
+latency_score = tokens_per_second / prompt_tokens`
+  });
+
+  assert.equal(boost.technical_reference.steps.length, 1);
+  assert.equal(boost.technical_reference.code_blocks.length, 1);
+  assert.equal(boost.technical_reference.formulas.length, 1);
+  assert.equal(boost.learning_bits.some((bit) => /Install the runtime/.test(bit.body)), true);
+  assert.equal(boost.cards.some((card) => /What formula should you remember/.test(card.front)), true);
 });
 
 test("ingestFile renders Learning Boost sections and writes learning JSONL outputs", async () => {
@@ -117,18 +204,309 @@ test("ingestFile renders Learning Boost sections and writes learning JSONL outpu
   const cards = fs.readFileSync(path.join(paths.dir, "cards.jsonl"), "utf8");
   const bits = fs.readFileSync(path.join(paths.dir, "bits.jsonl"), "utf8");
   const plans = fs.readFileSync(path.join(paths.dir, "plans.jsonl"), "utf8");
+  const sourceLinks = fs.readFileSync(path.join(paths.dir, "source-links.jsonl"), "utf8");
   const behavior = fs.readFileSync(path.join(paths.dir, "behavior-log.jsonl"), "utf8");
   const remnote = fs.readFileSync(path.join(paths.exportsDir, "remnote-import.md"), "utf8");
+  const sourceMap = fs.readFileSync(path.join(vault, "wiki", "learning", "source-map.md"), "utf8");
 
   assert.match(page, /## Learning Boost/);
   assert.match(page, /### Working-Memory Friendly Gist/);
+  assert.match(page, /### Technical Reference/);
+  assert.match(page, /Recall session/);
   assert.match(page, /### Evidence Map/);
   assert.match(cards, /What is retrieval practice/);
   assert.match(bits, /Retrieval practice/);
-  assert.match(plans, /first pass/);
+  assert.equal(plans.trim(), "");
+  assert.match(sourceLinks, /Retrieval Practice/);
   assert.match(behavior, /source_processed/);
+  assert.match(behavior, /source_linked_to_learning/);
   assert.match(remnote, /# RemNote Import/);
+  assert.match(sourceMap, /Retrieval Practice/);
   assert.doesNotMatch(remnote, /RemNote Import Draft/);
-  assert.equal(result.learning.cardsCreated, 2);
+  assert.equal(result.learning.cardsCreated >= 4, true);
+  assert.equal(result.learning.bitsCreated >= 3, true);
+  assert.equal(result.learning.sourceLink.cardsCreated >= 4, true);
   assert.equal(fs.existsSync(path.join(vault, result.processed)), true);
+});
+
+test("ingestFile accepts provider JSON wrapped in prose and fills sparse learning fields", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "input", "local-models.md");
+  fs.writeFileSync(source, "# Local Model Routing\n\nA router can select Ollama when it is healthy. Small local models work best when tasks are bounded.");
+
+  const result = await ingestFile(vault, source, config(root), {
+    async complete() {
+      return `Here is the analysis:\n${JSON.stringify({
+        language: "English",
+        summary: "Local routers should select a healthy runtime and keep tasks bounded.",
+        key_points: ["Router health matters before chat.", "Bounded tasks fit small local models."],
+        concepts: [{ name: "Local model routing", summary: "Choosing a reachable local runtime for a task." }],
+        source_learning_questions: [{ question: "Why does router health matter?", answer: "It proves the selected local runtime can answer." }]
+      })}\nDone.`;
+    }
+  });
+  const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+  const cards = fs.readFileSync(path.join(learningPaths(vault).dir, "cards.jsonl"), "utf8");
+
+  assert.match(page, /Local routers should select/);
+  assert.match(page, /## Learning Boost/);
+  assert.match(cards, /Local model routing/);
+  assert.equal(result.learning.cardsCreated >= 4, true);
+  assert.equal(result.learning.bitsCreated >= 3, true);
+});
+
+test("video processor finds language-suffixed transcript sidecars and collapses adjacent duplicate cues", () => {
+  const { root } = makeVault();
+  const video = path.join(root, "lesson.mp4");
+  const transcript = path.join(root, "lesson.ar-orig.srt");
+  fs.writeFileSync(video, "fake video bytes");
+  fs.writeFileSync(transcript, `1
+00:00:01,000 --> 00:00:02,000
+السلام عليكم
+
+2
+00:00:02,000 --> 00:00:03,000
+السلام عليكم
+
+3
+00:00:03,000 --> 00:00:04,000
+الفكرة المهمة
+`);
+
+  const source = processSourceFile(video, { assetRel: "raw/assets/lesson.mp4" });
+
+  assert.equal(source.kind, "video");
+  assert.match(source.text, /السلام عليكم/);
+  assert.match(source.text, /الفكرة المهمة/);
+  assert.equal((source.text.match(/السلام عليكم/g) || []).length, 1);
+  assert.match(source.processingNotes.join("\n"), /transcript sidecar/i);
+});
+
+test("audio processor uses local ASR when no transcript sidecar exists", () => {
+  const { root } = makeVault();
+  const audio = path.join(root, "lecture.mp3");
+  const whisper = path.join(root, "fake-whisper.sh");
+  fs.writeFileSync(audio, "fake audio bytes");
+  fs.writeFileSync(whisper, `#!/usr/bin/env bash
+input="$1"
+shift
+outdir=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output_dir) outdir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+name="$(basename "$input")"
+name="\${name%.*}"
+mkdir -p "$outdir"
+printf 'Local transcript line\\nLocal transcript line\\nNext idea\\n' > "$outdir/$name.txt"
+`);
+  fs.chmodSync(whisper, 0o755);
+
+  const source = processSourceFile(audio, {
+    assetRel: "raw/assets/lecture.mp3",
+    whisperCommand: whisper,
+    whisperModel: "tiny-test"
+  });
+
+  assert.equal(source.kind, "audio");
+  assert.match(source.text, /Local ASR transcript/);
+  assert.match(source.text, /Next idea/);
+  assert.match(source.processingNotes.join("\n"), /Local ASR transcribed audio/);
+});
+
+test("media ingest preserves unextracted assets without metadata-only learning cards", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "input", "photo.jpg");
+  fs.writeFileSync(source, "not a real image");
+  let providerCalled = false;
+
+  const result = await ingestFile(vault, source, config(root), {
+    async complete() {
+      providerCalled = true;
+      throw new Error("provider should not analyze metadata-only media");
+    }
+  });
+  const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+  const paths = learningPaths(vault);
+
+  assert.equal(providerCalled, false);
+  assert.equal(result.pendingContent, true);
+  assert.match(page, /media_analysis_status: pending_content/);
+  assert.match(page, /provider_raw_file_sent: false/);
+  assert.match(page, /provider_input_status: not_sent_no_extracted_content/);
+  assert.match(page, /Raw media file sent to provider: no/);
+  assert.match(page, /Provider call attempted: no/);
+  assert.match(page, /Extracted text\/transcript\/OCR sent: no/);
+  assert.match(page, /The selected provider did not receive a raw media copy/);
+  assert.match(page, /No learning cards or bits were created/);
+  assert.equal(fs.existsSync(path.join(paths.dir, "cards.jsonl")), false);
+  assert.equal(fs.existsSync(path.join(vault, result.processed)), true);
+  assert.equal(fs.existsSync(source), false);
+});
+
+test("media ingest with extracted text but provider failure creates no metadata cards", async () => {
+  const { root, vault } = makeVault();
+  const fakeTesseract = path.join(root, "fake-tesseract.sh");
+  fs.writeFileSync(fakeTesseract, "#!/bin/sh\necho 'Readable OCR text about local AI routing, model latency, and source evidence.'\n");
+  fs.chmodSync(fakeTesseract, 0o755);
+  const previous = process.env.LEARNING_BOOST_TESSERACT_COMMAND;
+  process.env.LEARNING_BOOST_TESSERACT_COMMAND = fakeTesseract;
+  const source = path.join(vault, "raw", "input", "diagram.png");
+  fs.writeFileSync(source, "not a real image but fake OCR ignores the bytes");
+
+  try {
+    const result = await ingestFile(vault, source, config(root), {
+      async complete() {
+        throw new Error("provider unavailable for media analysis");
+      }
+    });
+    const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+    const paths = learningPaths(vault);
+
+    assert.equal(result.learning.cardsCreated, 0);
+    assert.equal(result.learning.bitsCreated, 0);
+    assert.match(page, /media_analysis_status: pending_provider_analysis/);
+    assert.match(page, /provider_raw_file_sent: false/);
+    assert.match(page, /provider_input_status: extracted_text_and_metadata_sent/);
+    assert.match(page, /Raw media file sent to provider: no/);
+    assert.match(page, /Provider call attempted: yes/);
+    assert.match(page, /Extracted text\/transcript\/OCR sent: yes/);
+    assert.match(page, /raw media bytes were not attached/i);
+    assert.match(page, /No learning cards or bits were created because provider media analysis is still pending/);
+    assert.equal(fs.existsSync(path.join(paths.dir, "cards.jsonl")), false);
+    assert.equal(fs.existsSync(path.join(paths.dir, "bits.jsonl")), false);
+  } finally {
+    if (previous === undefined) delete process.env.LEARNING_BOOST_TESSERACT_COMMAND;
+    else process.env.LEARNING_BOOST_TESSERACT_COMMAND = previous;
+  }
+});
+
+test("media ingest accepts provider JSON without processing_notes", async () => {
+  const { root, vault } = makeVault();
+  const fakeTesseract = path.join(root, "fake-tesseract.sh");
+  fs.writeFileSync(fakeTesseract, "#!/bin/sh\necho 'Readable OCR text about model routing, local provider readiness, and source evidence for a learning diagram.'\n");
+  fs.chmodSync(fakeTesseract, 0o755);
+  const previous = process.env.LEARNING_BOOST_TESSERACT_COMMAND;
+  process.env.LEARNING_BOOST_TESSERACT_COMMAND = fakeTesseract;
+  const source = path.join(vault, "raw", "input", "provider-diagram.png");
+  fs.writeFileSync(source, "fake image bytes");
+
+  try {
+    const result = await ingestFile(vault, source, config(root), {
+      async complete() {
+        return JSON.stringify({
+          language: "English",
+          summary: "A diagram about local AI provider readiness.",
+          key_points: ["Provider readiness must mean the selected provider can answer."],
+          concepts: [{ name: "Provider readiness", summary: "A check that confirms an AI provider can answer before processing." }],
+          entities: [],
+          open_questions: [],
+          contradictions: [],
+          source_learning_questions: [{ question: "What should provider readiness confirm?", answer: "That the selected provider can answer." }],
+          open_learning_questions: [],
+          learning_boost: {
+            source_language: "English",
+            gist: "Provider readiness should be based on real answers.",
+            core_summary: "Learning automation should wait for the selected provider to answer before processing sources.",
+            learning_bits: [
+              { type: "concept", title: "Provider readiness", body: "A provider is ready only when it can answer a short analysis probe.", evidence: ["OCR text"] },
+              { type: "detail", title: "Selected provider", body: "Direct provider modes should not silently fall back to other providers.", evidence: ["OCR text"] },
+              { type: "workflow", title: "Pending sources", body: "Pending files stay in place until the selected provider can analyze them.", evidence: ["OCR text"] }
+            ],
+            general_cards: [
+              { type: "qa", front: "What should provider readiness confirm?", back: "That the selected provider can answer.", evidence: ["OCR text"] },
+              { type: "qa", front: "What happens when provider analysis is blocked?", back: "Pending files stay in place.", evidence: ["OCR text"] },
+              { type: "cloze", front: "Direct provider modes should not {{fall back}} silently.", back: "fall back", evidence: ["OCR text"] },
+              { type: "qa", front: "Why should media analysis use extracted text?", back: "Raw media bytes are not sent to the provider.", evidence: ["OCR text"] }
+            ],
+            details_to_keep: [{ kind: "rule", text: "Use the selected provider directly.", why_it_matters: "It keeps ingest behavior predictable.", evidence: ["OCR text"] }]
+          }
+        });
+      }
+    });
+    const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+    const paths = learningPaths(vault);
+
+    assert.equal(result.learning.cardsCreated >= 4, true);
+    assert.equal(result.learning.bitsCreated >= 3, true);
+    assert.match(page, /media_analysis_status: analyzed/);
+    assert.doesNotMatch(page, /Cannot read properties of undefined/);
+    assert.equal(fs.existsSync(path.join(paths.dir, "cards.jsonl")), true);
+    assert.equal(fs.existsSync(path.join(paths.dir, "bits.jsonl")), true);
+  } finally {
+    if (previous === undefined) delete process.env.LEARNING_BOOST_TESSERACT_COMMAND;
+    else process.env.LEARNING_BOOST_TESSERACT_COMMAND = previous;
+  }
+});
+
+test("document ingest preserves unextracted PDFs without metadata-only learning cards", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "input", "scanned.pdf");
+  fs.writeFileSync(source, "%PDF-1.4\n% fake scanned pdf without extractable text\n");
+  let providerCalled = false;
+
+  const result = await ingestFile(vault, source, config(root), {
+    async complete() {
+      providerCalled = true;
+      throw new Error("provider should not analyze unextracted pdf metadata");
+    }
+  });
+  const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+  const paths = learningPaths(vault);
+
+  assert.equal(providerCalled, false);
+  assert.equal(result.pendingContent, true);
+  assert.match(page, /status: pending_content/);
+  assert.match(page, /provider_raw_file_sent: false/);
+  assert.match(page, /Raw source file sent to provider: no/);
+  assert.match(page, /Provider call attempted: no/);
+  assert.match(page, /The selected provider did not receive the raw file/);
+  assert.match(page, /Content extraction is pending/);
+  assert.match(page, /No learning cards or bits were created/);
+  assert.equal(fs.existsSync(path.join(paths.dir, "cards.jsonl")), false);
+  assert.equal(fs.existsSync(path.join(paths.dir, "bits.jsonl")), false);
+  assert.equal(fs.existsSync(path.join(vault, result.processed)), true);
+  assert.equal(fs.existsSync(source), false);
+});
+
+test("ingestFile leaves text sources pending when provider is unavailable", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "inbox", "provider-down.md");
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.writeFileSync(source, "# Provider Down\n\nThis source should stay pending until analysis can run.");
+
+  await assert.rejects(
+    ingestFile(vault, source, config(root), {
+      async complete() {
+        throw new Error("provider unavailable");
+      }
+    }),
+    /provider unavailable/
+  );
+
+  assert.equal(fs.existsSync(source), true);
+  assert.equal(fs.existsSync(path.join(vault, "raw", "processed", "provider-down.md")), false);
+  assert.equal(fs.existsSync(path.join(vault, "wiki", "sources")), false);
+});
+
+test("ingestFile can create explicit manual baseline analysis when enabled", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "inbox", "provider-down.md");
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.writeFileSync(source, "# Provider Down\n\nThis source can be manually baselined.");
+
+  const result = await ingestFile(vault, source, { ...config(root), allowBaselineAnalysis: true }, {
+    async complete() {
+      throw new Error("provider unavailable");
+    }
+  });
+  const page = fs.readFileSync(path.join(vault, result.sourcePage), "utf8");
+
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(fs.existsSync(path.join(vault, result.processed)), true);
+  assert.match(page, /Manual baseline source page created/);
+  assert.match(page, /AI analysis fallback used: provider unavailable/);
+  assert.match(page, /## Learning Boost/);
 });

@@ -2,7 +2,7 @@
 
 Stage 1 makes local/LAN model providers the default path.
 
-For `bilalalissa/Ai-Local-Models-Router` specifically, see [Connect Local AI Router](connect-local-ai-router.md). That guide shows the Provider tab fields for direct local model output and for the router broker endpoint.
+For `bilalalissa/Ai-Local-Models-Router` specifically, see [Connect Local AI Router](connect-local-ai-router.md). That guide covers the preferred same-Mac localhost integration API, the `local-model` router endpoint, and direct provider fallbacks.
 
 ## Default Mode
 

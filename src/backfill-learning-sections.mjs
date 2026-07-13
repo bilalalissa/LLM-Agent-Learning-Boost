@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { getConfig } from "./config.mjs";
+import { fallbackLearningBoost, renderLearningBoostSection } from "./learning-extraction.mjs";
 import { listVaults, vaultName } from "./vaults.mjs";
 
 const sectionNames = [
@@ -29,11 +31,13 @@ export function backfillLearningSections(config = getConfig()) {
 }
 
 function ensureLearningSections(markdown, rel) {
+  if (isSourcePage(markdown, rel) && isPendingOrMetadataOnlySourceMarkdown(markdown)) return markdown;
   const title = extractTitle(markdown, rel);
   const userNotes = markdown.match(/\n## User Notes[\s\S]*$/m)?.[0]?.trimEnd() || "";
   let body = userNotes ? markdown.slice(0, -userNotes.length).trimEnd() : markdown.trimEnd();
   body = repairStrandedKeyPoints(body);
   body = repairLearningLinesInKeyPoints(body);
+  body = ensureLearningBoostSection(body, rel, title);
 
   const openQuestions = renderLearningSection(
     "Open Questions",
@@ -61,6 +65,66 @@ function ensureLearningSections(markdown, rel) {
   const learningBlock = `${sourceLearning.trim()}\n\n${openLearning.trim()}`;
   const next = insertBeforeSection(insertAfterKeyPoints(body, learningBlock), "Contradictions", openQuestions);
   return `${next}${userNotes ? `\n${userNotes}` : ""}\n`;
+}
+
+function ensureLearningBoostSection(markdown, rel, title) {
+  if (!isSourcePage(markdown, rel) || hasSection(markdown, "Learning Boost")) return markdown;
+  if (isPendingOrMetadataOnlySourceMarkdown(markdown)) return markdown;
+  const summary = sectionText(markdown, "Summary") || firstParagraph(markdown);
+  const keyPoints = sectionBullets(markdown, "Key Points");
+  const concepts = [
+    ...extractWikiLinks(extractSection(markdown, "Links")).map((link) => ({
+      name: link.title || link.path,
+      summary: `Linked concept from existing source page: ${link.path}`
+    })),
+    ...keyPoints.slice(0, 5).map((point) => ({
+      name: point.slice(0, 80),
+      summary: point
+    }))
+  ].filter((concept) => concept.name);
+  const boost = fallbackLearningBoost({
+    summary,
+    key_points: keyPoints,
+    concepts,
+    open_questions: parseQuestionAnswerItems(extractSection(markdown, "Open Questions"), "").map((item) => ({
+      question: item.question,
+      answer: item.answer
+    }))
+  }, {
+    sourceRel: rel,
+    sourceTitle: title,
+    summary,
+    evidence: [rel]
+  });
+  const block = renderLearningBoostSection({
+    ...boost,
+    processing_notes: [
+      ...(boost.processing_notes || []),
+      "Learning Boost section backfilled from existing source page summary and key points."
+    ]
+  });
+  return insertAfterKeyPoints(markdown, block).replace(/\n{3,}/g, "\n\n");
+}
+
+function isPendingOrMetadataOnlySourceMarkdown(markdown = "") {
+  const text = String(markdown || "");
+  const status = frontmatterValue(text, "status").toLowerCase();
+  const mediaStatus = frontmatterValue(text, "media_analysis_status").toLowerCase();
+  const mediaAnalyzed = frontmatterValue(text, "media_analyzed").toLowerCase();
+  if (status === "pending_content") return true;
+  if (/^pending_|fallback/.test(mediaStatus)) return true;
+  if (mediaAnalyzed === "false" && /^media_kind:\s*.+$/m.test(text)) return true;
+  if (/No learning cards or bits were created because source content extraction is still pending/i.test(text)) return true;
+  if (/No learning cards or bits were created because provider media analysis is still pending/i.test(text)) return true;
+  if (/preserved as a local (image|audio|video) asset/i.test(text) && /not analyzed|not transcribed|pending/i.test(text)) return true;
+  return false;
+}
+
+function frontmatterValue(markdown, key) {
+  const frontmatter = String(markdown || "").match(/^---\n([\s\S]*?)\n---/);
+  if (!frontmatter) return "";
+  const match = frontmatter[1].match(new RegExp(`^${escapeRegExp(key)}:\\s*(.+)$`, "m"));
+  return match ? match[1].trim().replace(/^["']|["']$/g, "") : "";
 }
 
 function repairStrandedKeyPoints(markdown) {
@@ -364,6 +428,27 @@ function sectionBullets(markdown, heading) {
     .filter(Boolean);
 }
 
+function isSourcePage(markdown, rel) {
+  return /^type:\s*source\s*$/m.test(markdown) || /(^|\/)sources\/.+\.md$/.test(rel);
+}
+
+function firstParagraph(markdown) {
+  return String(markdown || "")
+    .replace(/^---[\s\S]*?---\s*/m, "")
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter((part) => part && !part.startsWith("#") && !part.startsWith("- "))
+    .find(Boolean) || "";
+}
+
+function extractWikiLinks(section) {
+  const links = [];
+  for (const match of String(section || "").matchAll(/\[\[([^|\]]+)(?:\|([^\]]+))?\]\]/g)) {
+    links.push({ path: match[1], title: match[2] || path.basename(match[1]) });
+  }
+  return links;
+}
+
 function stripWiki(value) {
   return String(value)
     .replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, "$2")
@@ -416,7 +501,7 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const results = backfillLearningSections();
   for (const result of results) {
     console.log(`[${result.vault}] ${result.file}`);

@@ -1,4 +1,6 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { trackBehaviorEvent } from "./behavior-tracker.mjs";
 import { learningPageDir, learningPaths } from "./learning-store.mjs";
@@ -9,12 +11,13 @@ export const RESOURCE_INBOX_FILE = "resource-inbox.jsonl";
 
 export function defaultSourceCaptureSettings() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     enabled: false,
     fullLocalCaptureMode: false,
     manualImport: true,
     watchFolders: [],
     browserClipper: true,
+    autoProcessCapturedResources: true,
     browserHistoryImport: false,
     openedDocuments: false,
     screenshots: false,
@@ -53,14 +56,20 @@ export function updateSourceCaptureSettings(vaultPath, input = {}) {
 
 export function normalizeSourceCaptureSettings(input = {}) {
   const full = input.fullLocalCaptureMode === true;
+  const schemaVersion = Number(input.schemaVersion || 0);
+  const autoProcessCapturedResources = schemaVersion < 2
+    ? true
+    : input.autoProcessCapturedResources !== false;
   return {
     ...defaultSourceCaptureSettings(),
     ...input,
+    schemaVersion: 2,
     enabled: input.enabled === true,
     fullLocalCaptureMode: full,
     manualImport: input.manualImport !== false,
-    watchFolders: normalizeList(input.watchFolders),
+    watchFolders: normalizeList(input.watchFolders).map(expandTilde),
     browserClipper: input.browserClipper !== false,
+    autoProcessCapturedResources,
     browserHistoryImport: full && input.browserHistoryImport === true,
     openedDocuments: full && input.openedDocuments === true,
     screenshots: input.screenshots === true,
@@ -133,6 +142,16 @@ export function captureResource(vaultPath, input = {}, options = {}) {
   }
   const now = new Date();
   const resource = normalizeResource(input, { sourceType, now, vaultPath, settings });
+  const duplicate = resourceInbox(vaultPath).find((item) => resourceIdentity(item) === resourceIdentity(resource));
+  if (duplicate) {
+    return {
+      captured: false,
+      duplicate: true,
+      reason: "This resource is already in ResourceInbox.",
+      resource: duplicate,
+      settings
+    };
+  }
   appendJsonl(resourceInboxPath(vaultPath), resource);
   writeResourcesPage(vaultPath, resourceInbox(vaultPath));
   trackBehaviorEvent(vaultPath, {
@@ -146,6 +165,15 @@ export function captureResource(vaultPath, input = {}, options = {}) {
     }
   });
   return { captured: true, resource, settings };
+}
+
+function resourceIdentity(resource = {}) {
+  const dedupeKey = String(resource.dedupeKey || resource.ingest?.dedupeKey || "").trim();
+  if (dedupeKey) return `${normalizeSourceType(resource.sourceType || "manual_import")}|${dedupeKey}`;
+  return [
+    normalizeSourceType(resource.sourceType || "manual_import"),
+    String(resource.file || resource.url || resource.title || "").trim().toLowerCase()
+  ].join("|");
 }
 
 export function resourceInbox(vaultPath) {
@@ -190,6 +218,68 @@ export function deleteResource(vaultPath, id) {
   return { deleted: current.length - next.length, id };
 }
 
+export function stageResourcesForIngest(vaultPath, options = {}) {
+  const limit = Math.max(1, Number(options.limit || 12));
+  const current = resourceInbox(vaultPath);
+  const staged = [];
+  const now = new Date();
+  const next = current.map((item) => {
+    if (staged.length >= limit || !resourceCanBeStaged(item)) return item;
+    const existingRawInput = String(item.rawInput || "");
+    if (existingRawInput && fs.existsSync(path.join(vaultPath, existingRawInput))) {
+      staged.push({ id: item.id, title: item.title, file: existingRawInput, reused: true });
+      return {
+        ...item,
+        processingStatus: "ready_for_ingest",
+        recommendedNextAction: "Processing is queued. Run captured-source processing to create insights."
+      };
+    }
+    const file = uniqueResourceInputRel(vaultPath, item, now);
+    fs.mkdirSync(path.dirname(path.join(vaultPath, file)), { recursive: true });
+    fs.writeFileSync(path.join(vaultPath, file), renderResourceInputMarkdown(item));
+    staged.push({ id: item.id, title: item.title, file, reused: false });
+    return {
+      ...item,
+      rawInput: file,
+      processingStatus: "ready_for_ingest",
+      recommendedNextAction: "Processing is queued. Run captured-source processing to create insights."
+    };
+  });
+  if (staged.length) {
+    writeJsonl(resourceInboxPath(vaultPath), next);
+    writeResourcesPage(vaultPath, next);
+  }
+  return { staged, resources: next };
+}
+
+export function markResourceIngestResults(vaultPath, ingestResults = []) {
+  const byRawInput = new Map();
+  for (const result of ingestResults || []) {
+    if (result?.source) byRawInput.set(String(result.source), result);
+  }
+  if (!byRawInput.size) return { updated: 0, resources: resourceInbox(vaultPath) };
+  let updated = 0;
+  const next = resourceInbox(vaultPath).map((item) => {
+    const result = byRawInput.get(String(item.rawInput || ""));
+    if (!result) return item;
+    updated += 1;
+    return {
+      ...item,
+      processingStatus: "ingested",
+      sourcePage: result.sourcePage || item.sourcePage || "",
+      processed: result.processed || item.processed || "",
+      ingestedAt: new Date().toISOString(),
+      learning: result.learning || item.learning || null,
+      recommendedNextAction: result.sourcePage
+        ? "Open the generated source page and review the Learning Boost insights."
+        : "Review the processed source output."
+    };
+  });
+  writeJsonl(resourceInboxPath(vaultPath), next);
+  writeResourcesPage(vaultPath, next);
+  return { updated, resources: next };
+}
+
 export function exportResources(vaultPath) {
   const paths = learningPaths(vaultPath);
   const file = path.join(paths.exportsDir, "resources-export.json");
@@ -224,6 +314,8 @@ function normalizeResource(input, { sourceType, now, vaultPath, settings }) {
     title,
     sourceType,
     topic: stringOr(input.topic, inferTopic(input)),
+    dedupeKey: stringOr(input.dedupeKey, ""),
+    contentHash: stringOr(input.contentHash || input.sha256, ""),
     targetLanguageRelevance: normalizeList(input.targetLanguageRelevance || input.targetLanguages),
     urgency: choice(input.urgency, ["none", "low", "medium", "high"], "none"),
     deadline: stringOr(input.deadline, ""),
@@ -243,6 +335,10 @@ function normalizeResource(input, { sourceType, now, vaultPath, settings }) {
       userApproved: input.userApproved === true || sourceType === "manual_import" || sourceType === "browser_clip",
       contentApproved: input.contentApproved === true,
       sourceCollector: sourceType
+    },
+    provenance: {
+      dedupeKey: stringOr(input.dedupeKey, ""),
+      contentHash: stringOr(input.contentHash || input.sha256, "")
     }
   };
   resource.sensitivity = classifySourceSensitivity({ ...resource, text: input.text || "" });
@@ -251,25 +347,107 @@ function normalizeResource(input, { sourceType, now, vaultPath, settings }) {
   return resource;
 }
 
+function resourceCanBeStaged(item = {}) {
+  if (["ingested", "deferred", "deleted"].includes(item.processingStatus)) return false;
+  if (item.sourceType === "browser_clip") return false;
+  return Boolean(item.title || item.url || item.file || item.description);
+}
+
+function uniqueResourceInputRel(vaultPath, item, now) {
+  const stamp = now.toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const base = `${stamp}--resource--${slugify(item.title || item.url || item.file || "captured-source")}`;
+  let rel = `raw/input/${base}.md`;
+  let index = 2;
+  while (fs.existsSync(path.join(vaultPath, rel))) {
+    rel = `raw/input/${base}-${index}.md`;
+    index += 1;
+  }
+  return rel;
+}
+
+function renderResourceInputMarkdown(item = {}) {
+  const lines = [
+    "---",
+    "type: captured-resource",
+    `title: ${yamlString(item.title || "Captured resource")}`,
+    `source_type: ${yamlString(item.sourceType || "manual_import")}`,
+    `resource_id: ${yamlString(item.id || "")}`,
+    `captured_at: ${yamlString(item.capturedAt || "")}`,
+    `topic: ${yamlString(item.topic || "")}`,
+    `sensitivity: ${yamlString(item.sensitivity || "unknown")}`,
+    `source_url: ${yamlString(item.url || "")}`,
+    `source_file: ${yamlString(item.file || "")}`,
+    `source_dedupe_key: ${yamlString(item.dedupeKey || item.ingest?.dedupeKey || "")}`,
+    `source_content_sha256: ${yamlString(item.contentHash || item.provenance?.contentHash || "")}`,
+    "---",
+    "",
+    `# ${item.title || "Captured resource"}`,
+    "",
+    item.url ? `Source URL: ${item.url}` : "",
+    item.file ? `Source file: ${item.file}` : "",
+    item.topic ? `Topic: ${item.topic}` : "",
+    "",
+    "## Capture Notes",
+    "",
+    item.description || "This ResourceInbox item was staged for Learning Boost processing. Review the generated source page and add more source text if the resulting insights need more evidence.",
+    "",
+    "## Processing Guidance",
+    "",
+    "- Treat this as captured source material.",
+    "- Keep generated insights grounded in the available title, URL, file reference, description, and later source review.",
+    "- If the source content is not available in this staged note, say that the generated insight is based on metadata only."
+  ];
+  return lines.filter((line, index) => line || lines[index - 1] === "").join("\n") + "\n";
+}
+
+export function hashFileForDedupe(file, options = {}) {
+  const maxBytes = Math.max(0, Number(options.maxBytes || 128 * 1024 * 1024));
+  const stat = fs.statSync(file);
+  if (maxBytes && stat.size > maxBytes) return "";
+  const hash = crypto.createHash("sha256");
+  const fd = fs.openSync(file, "r");
+  try {
+    const buffer = Buffer.alloc(1024 * 1024);
+    let position = 0;
+    while (position < stat.size) {
+      const bytes = fs.readSync(fd, buffer, 0, Math.min(buffer.length, stat.size - position), position);
+      if (!bytes) break;
+      hash.update(buffer.subarray(0, bytes));
+      position += bytes;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest("hex");
+}
+
+function yamlString(value) {
+  return JSON.stringify(String(value || ""));
+}
+
 function preserveLocalFile(vaultPath, file, sourceType, input) {
   const text = String(file || "").trim();
   if (!text || !path.isAbsolute(text) || !fs.existsSync(text) || !fs.statSync(text).isFile()) return "";
-  const shouldCopy = input.contentApproved === true || ["screenshot", "voice_memo"].includes(sourceType);
+  const shouldCopy = ["screenshot", "voice_memo"].includes(sourceType);
   if (!shouldCopy) return "";
   const dir = path.join(vaultPath, "raw", "assets", "resource-capture");
-  fs.mkdirSync(dir, { recursive: true });
-  const parsed = path.parse(text);
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  let name = `${stamp}--${slugify(parsed.name)}${parsed.ext.toLowerCase()}`;
-  let target = path.join(dir, name);
-  let index = 2;
-  while (fs.existsSync(target)) {
-    name = `${stamp}--${slugify(parsed.name)}-${index}${parsed.ext.toLowerCase()}`;
-    target = path.join(dir, name);
-    index += 1;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const parsed = path.parse(text);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    let name = `${stamp}--${slugify(parsed.name)}${parsed.ext.toLowerCase()}`;
+    let target = path.join(dir, name);
+    let index = 2;
+    while (fs.existsSync(target)) {
+      name = `${stamp}--${slugify(parsed.name)}-${index}${parsed.ext.toLowerCase()}`;
+      target = path.join(dir, name);
+      index += 1;
+    }
+    fs.copyFileSync(text, target);
+    return path.relative(vaultPath, target).replace(/\\/g, "/");
+  } catch {
+    return "";
   }
-  fs.copyFileSync(text, target);
-  return path.relative(vaultPath, target).replace(/\\/g, "/");
 }
 
 function collectorAllowed(settings, sourceType, options) {
@@ -400,6 +578,19 @@ function positiveNumber(value, fallback) {
 
 function stableId(prefix, value) {
   return `${prefix}-${slugify(String(value || "").slice(0, 140))}`;
+}
+
+function expandTilde(value) {
+  const text = String(value || "").trim();
+  if (text === "~") return os.homedir();
+  if (text.startsWith("~/")) return path.join(os.homedir(), text.slice(2));
+  if (!path.isAbsolute(text)) {
+    const [first, ...rest] = text.split(/[\\/]/).filter(Boolean);
+    if (["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures"].includes(first)) {
+      return path.join(os.homedir(), first, ...rest);
+    }
+  }
+  return text;
 }
 
 function sourceTypeLabel(sourceType) {

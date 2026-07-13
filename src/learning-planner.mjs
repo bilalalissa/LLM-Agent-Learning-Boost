@@ -7,6 +7,7 @@ import { slugify, vaultName } from "./vaults.mjs";
 
 export const GOALS_FILE = "goals.jsonl";
 export const PLANS_FILE = "plans.jsonl";
+export const SOURCE_LINKS_FILE = "source-links.jsonl";
 export const EXTERNAL_WRITE_LOG_FILE = "external-write-log.jsonl";
 
 export function normalizeLearningGoal(goal = {}) {
@@ -47,6 +48,7 @@ export function planningPaths(vaultPath) {
   return {
     goals: path.join(paths.dir, GOALS_FILE),
     plans: path.join(paths.dir, PLANS_FILE),
+    sourceLinks: path.join(paths.dir, SOURCE_LINKS_FILE),
     externalWriteLog: path.join(paths.dir, EXTERNAL_WRITE_LOG_FILE)
   };
 }
@@ -60,17 +62,90 @@ export function readLearningPlans(vaultPath) {
 }
 
 export function learningPlanningState(vaultPath) {
+  const sourceLinks = readSourceLinks(vaultPath);
   return {
     goals: readLearningGoals(vaultPath),
     plans: readLearningPlans(vaultPath),
+    sourceLinks,
+    sourceGroups: sourceGroupsFromLinks(sourceLinks),
     externalWriteLog: readJsonl(planningPaths(vaultPath).externalWriteLog)
   };
 }
 
+export function readSourceLinks(vaultPath) {
+  return readJsonl(planningPaths(vaultPath).sourceLinks).map(normalizeSourceLink);
+}
+
+export function linkProcessedSourceToLearning(vaultPath, source = {}) {
+  const now = new Date(source.created || Date.now()).toISOString();
+  const currentGoals = readLearningGoals(vaultPath);
+  const currentPlans = readLearningPlans(vaultPath);
+  const eligibleGoals = currentGoals.filter(isLinkableLearningItem);
+  const eligiblePlans = currentPlans.filter(isLinkableLearningItem);
+  const existingLinks = readSourceLinks(vaultPath).filter((item) => item.sourcePage !== source.sourceRel);
+  const sourceKeywords = keywordsForSource(source);
+  const goalMatches = rankMatches(eligibleGoals, sourceKeywords, goalSearchText).slice(0, 3);
+  const planMatches = rankMatches(eligiblePlans, sourceKeywords, planSearchText).slice(0, 3);
+  const singleActivePlan = eligiblePlans.filter((plan) => ["active", "approved"].includes(plan.status));
+  const linkedPlans = planMatches.length ? planMatches : (singleActivePlan.length === 1 ? [{ item: singleActivePlan[0], score: 1, reason: "only active/approved plan" }] : []);
+  const linkedGoalIds = new Set(goalMatches.map((match) => match.item.id).filter(Boolean));
+  for (const match of linkedPlans) if (match.item.goalId) linkedGoalIds.add(match.item.goalId);
+  const linkedGoals = [
+    ...goalMatches,
+    ...eligibleGoals.filter((goal) => linkedGoalIds.has(goal.id) && !goalMatches.some((match) => match.item.id === goal.id)).map((goal) => ({ item: goal, score: 1, reason: "linked plan goal" }))
+  ].slice(0, 3);
+  const group = groupLabelFor(source, linkedGoals, linkedPlans);
+  const sourcePage = source.sourceRel || "";
+  const sourceTitle = source.sourceTitle || path.basename(sourcePage || "Source", ".md");
+  const nextGoals = currentGoals.map((goal) => linkedGoalIds.has(goal.id) ? normalizeLearningGoal({
+    ...goal,
+    resources: unique([...(goal.resources || []), sourcePage].filter(Boolean)),
+    updated: now
+  }) : goal);
+  const linkedPlanIds = new Set(linkedPlans.map((match) => match.item.id).filter(Boolean));
+  const nextPlans = currentPlans.map((plan) => linkedPlanIds.has(plan.id) ? normalizeLearningPlan({
+    ...plan,
+    stages: addSourceToPlanStages(plan.stages, sourcePage, sourceTitle, sourceKeywords),
+    updated: now
+  }) : plan);
+  if (linkedGoalIds.size) writeJsonl(planningPaths(vaultPath).goals, nextGoals);
+  if (linkedPlanIds.size) writeJsonl(planningPaths(vaultPath).plans, nextPlans);
+
+  const link = normalizeSourceLink({
+    id: `source-link-${compactTimestamp(new Date(now))}-${slugify(sourceTitle)}`,
+    sourcePage,
+    sourcePath: source.processedRel || "",
+    title: sourceTitle,
+    sourceKind: source.sourceKind || "source",
+    group,
+    linkedGoals: linkedGoals.map((match) => sourceGoalRef(match)),
+    linkedPlans: linkedPlans.map((match) => sourcePlanRef(match)),
+    cardsCreated: Number(source.cardsCreated || 0),
+    bitsCreated: Number(source.bitsCreated || 0),
+    created: now
+  });
+  const links = [...existingLinks, link];
+  writeJsonl(planningPaths(vaultPath).sourceLinks, links);
+  writeLearningPlanPages(vaultPath, nextGoals, nextPlans);
+  writeSourceMapPage(vaultPath, links, nextGoals, nextPlans);
+  trackBehaviorEvent(vaultPath, {
+    type: "source_linked_to_learning",
+    sourcePage,
+    sourcePath: source.processedRel || "",
+    count: 1,
+    metadata: {
+      group,
+      linkedGoals: link.linkedGoals.length,
+      linkedPlans: link.linkedPlans.length
+    }
+  });
+  return link;
+}
+
 export function draftLearningPlans(vaultPath, options = {}) {
   const now = new Date(options.now || Date.now());
-  const resources = Array.isArray(options.resources) ? options.resources : resourceInbox(vaultPath);
-  const groups = groupResources(resources).filter((group) => group.resources.length);
+  const resources = Array.isArray(options.resources) ? options.resources : aggregateLearningResources(vaultPath);
+  const groups = groupResources(resources).filter((group) => group.resources.length).map(enrichLearningGroup);
   const selectedGroups = (groups.length ? groups : [emptyGroup(options.topic || "Learning")]).slice(0, Number(options.limit || 3));
   const targetLanguages = normalizeList(options.targetLanguages);
   const existingGoals = readLearningGoals(vaultPath);
@@ -85,7 +160,7 @@ export function draftLearningPlans(vaultPath, options = {}) {
     const goal = normalizeLearningGoal({
       id: `goal-${topicSlug}-${stamp}`,
       title: options.goalTitle || `Learn ${group.topic}`,
-      description: `Turn ${group.resources.length} gathered resource${group.resources.length === 1 ? "" : "s"} into a staged learning outcome.`,
+      description: `Turn ${group.resources.length} gathered learning item${group.resources.length === 1 ? "" : "s"}, ${group.learningBits || 0} bit${group.learningBits === 1 ? "" : "s"}, and ${group.learningCards || 0} card${group.learningCards === 1 ? "" : "s"} into a staged learning outcome.`,
       targetLanguages: targetLanguages.length ? targetLanguages : targetLanguagesFromResources(group.resources),
       resources: resourceIds,
       deadline: earliestDeadline(group.resources),
@@ -126,6 +201,8 @@ export function draftLearningPlans(vaultPath, options = {}) {
     groups: selectedGroups.map((group) => ({
       topic: group.topic,
       resources: group.resources.length,
+      learningBits: group.learningBits || 0,
+      learningCards: group.learningCards || 0,
       outcomes: successCriteriaFor(group)
     })),
     goals: createdGoals,
@@ -133,6 +210,57 @@ export function draftLearningPlans(vaultPath, options = {}) {
     requiresActivationConfirmation: true,
     requiresSeparateExternalWriteConfirmation: true
   };
+}
+
+export function aggregateLearningResources(vaultPath) {
+  const inbox = resourceInbox(vaultPath).map((resource) => ({
+    ...resource,
+    learningBasis: resource.learningBasis || "captured_resource"
+  }));
+  const paths = learningPaths(vaultPath);
+  const bits = readJsonl(path.join(paths.dir, "bits.jsonl"));
+  const cards = readJsonl(path.join(paths.dir, "cards.jsonl"));
+  const links = readSourceLinks(vaultPath);
+  const bySource = new Map();
+  for (const bit of bits) {
+    const key = bit.sourcePage || bit.sourcePath || bit.id;
+    if (!key) continue;
+    const item = bySource.get(key) || { bits: [], cards: [] };
+    item.bits.push(bit);
+    bySource.set(key, item);
+  }
+  for (const card of cards) {
+    const key = card.sourcePage || card.sourcePath || card.id;
+    if (!key) continue;
+    const item = bySource.get(key) || { bits: [], cards: [] };
+    item.cards.push(card);
+    bySource.set(key, item);
+  }
+  const linkMap = new Map(links.map((link) => [link.sourcePage, link]));
+  const processed = [...bySource.entries()].map(([sourcePage, item]) => {
+    const link = linkMap.get(sourcePage) || {};
+    const topic = aggregateTopicFor({ link, bits: item.bits, cards: item.cards });
+    return {
+      id: sourcePage,
+      title: link.title || item.bits[0]?.title || item.cards[0]?.front || path.basename(sourcePage, ".md"),
+      topic,
+      sourceType: "processed_learning",
+      processingStatus: "processed",
+      recommendedNextAction: "Use the gathered bits and cards to plan review, practice, and synthesis.",
+      targetLanguageRelevance: unique(item.cards.map((card) => card.targetLanguage).filter((lang) => lang && lang !== "general")),
+      sourcePage,
+      learningBasis: "processed_bits_cards",
+      learningBits: item.bits.length,
+      learningCards: item.cards.length,
+      evidenceBits: item.bits.slice(0, 8).map((bit) => bit.id || bit.title).filter(Boolean),
+      evidenceCards: item.cards.slice(0, 8).map((card) => card.id || card.front || card.cloze).filter(Boolean)
+    };
+  });
+  const inboxIds = new Set(inbox.map((item) => item.id || item.sourcePage || item.file).filter(Boolean));
+  return [
+    ...inbox,
+    ...processed.filter((item) => !inboxIds.has(item.id))
+  ];
 }
 
 export function approveLearningPlan(vaultPath, planId, options = {}) {
@@ -191,6 +319,57 @@ export function activateLearningPlan(vaultPath, planId, options = {}) {
   return { activated: true, plan, goal: nextGoals.find((goal) => goal.id === plan.goalId) };
 }
 
+export function reviseLearningGoal(vaultPath, goalId, patch = {}) {
+  const now = new Date().toISOString();
+  const goals = readLearningGoals(vaultPath);
+  let updatedGoal = null;
+  const nextGoals = goals.map((goal) => {
+    if (goal.id !== goalId) return goal;
+    updatedGoal = normalizeLearningGoal({
+      ...goal,
+      ...pick(patch, ["title", "description", "deadline", "status"]),
+      targetLanguages: patch.targetLanguages == null ? goal.targetLanguages : normalizeList(patch.targetLanguages),
+      resources: patch.resources == null ? goal.resources : normalizeList(patch.resources),
+      successCriteria: patch.successCriteria == null ? goal.successCriteria : normalizeList(patch.successCriteria),
+      updated: now
+    });
+    return updatedGoal;
+  });
+  if (!updatedGoal) throw new Error(`Unknown learning goal: ${goalId}`);
+  writeJsonl(planningPaths(vaultPath).goals, nextGoals);
+  writeLearningPlanPages(vaultPath, nextGoals, readLearningPlans(vaultPath));
+  trackBehaviorEvent(vaultPath, { type: "learning_goal_revised", goalId, metadata: { status: updatedGoal.status } });
+  return { revised: true, goal: updatedGoal };
+}
+
+export function reviseLearningPlan(vaultPath, planId, patch = {}) {
+  const now = new Date().toISOString();
+  const goals = readLearningGoals(vaultPath);
+  const plans = readLearningPlans(vaultPath);
+  let updatedPlan = null;
+  const nextPlans = plans.map((plan) => {
+    if (plan.id !== planId) return plan;
+    updatedPlan = normalizeLearningPlan({
+      ...plan,
+      ...pick(patch, ["goalId", "title", "status", "reviewPolicy", "workingMemoryPolicy"]),
+      stages: patch.stages == null ? plan.stages : normalizeStages(patch.stages, plan.stages),
+      calendarItems: patch.calendarItems == null ? plan.calendarItems : normalizeArray(patch.calendarItems),
+      reminderItems: patch.reminderItems == null ? plan.reminderItems : normalizeArray(patch.reminderItems),
+      updated: now
+    });
+    return updatedPlan;
+  });
+  if (!updatedPlan) throw new Error(`Unknown learning plan: ${planId}`);
+  const nextGoals = goals.map((goal) => goal.id === updatedPlan.goalId && patch.status
+    ? normalizeLearningGoal({ ...goal, status: linkedGoalStatus(patch.status, goal.status), updated: now })
+    : goal);
+  writeJsonl(planningPaths(vaultPath).goals, nextGoals);
+  writeJsonl(planningPaths(vaultPath).plans, nextPlans);
+  writeLearningPlanPages(vaultPath, nextGoals, nextPlans);
+  trackBehaviorEvent(vaultPath, { type: "learning_plan_revised", planId, metadata: { goalId: updatedPlan.goalId, status: updatedPlan.status } });
+  return { revised: true, plan: updatedPlan, goal: nextGoals.find((goal) => goal.id === updatedPlan.goalId) };
+}
+
 export function recordExternalWriteLog(vaultPath, entry = {}) {
   const record = {
     id: entry.id || `external-write-${compactTimestamp(new Date())}-${slugify(entry.type || "export")}`,
@@ -215,6 +394,12 @@ export function writeLearningPlanPages(vaultPath, goals = readLearningGoals(vaul
   fs.writeFileSync(path.join(dir, "learning-plan.md"), renderPlansPage(plans, goals));
 }
 
+export function writeSourceMapPage(vaultPath, links = readSourceLinks(vaultPath), goals = readLearningGoals(vaultPath), plans = readLearningPlans(vaultPath)) {
+  const dir = learningPageDir(vaultPath);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "source-map.md"), renderSourceMapPage(links, goals, plans));
+}
+
 export function confirmationRequired(action, message) {
   return {
     [action === "plan_activation" ? "activated" : "approved"]: false,
@@ -229,11 +414,14 @@ function planStagesFor(group, goal) {
   const resourceIds = resources.map((item) => item.id).filter(Boolean);
   const titles = resources.map((item) => item.title).filter(Boolean).slice(0, 5);
   const topic = group.topic || goal.title || "Learning";
+  const bitCount = group.learningBits || resources.reduce((sum, item) => sum + Number(item.learningBits || 0), 0);
+  const cardCount = group.learningCards || resources.reduce((sum, item) => sum + Number(item.learningCards || 0), 0);
+  const aggregateSuffix = bitCount || cardCount ? ` Use the existing ${bitCount} learning bit${bitCount === 1 ? "" : "s"} and ${cardCount} card${cardCount === 1 ? "" : "s"} as the evidence base.` : "";
   return [
-    stage(1, "Resource triage and goal selection", "first_pass_source_reading", `Choose the highest-value ${topic} resources and defer the rest.`, resourceIds, titles, 20),
-    stage(2, "First-pass understanding", "first_pass_source_reading", "Create a one-screen gist and list confusing terms.", resourceIds.slice(0, 3), titles, 25),
-    stage(3, "Deep extraction and concept linking", "deep_processing_session", "Extract concepts, evidence, prerequisites, and links.", resourceIds.slice(0, 3), titles, 35),
-    stage(4, "Active recall and RemNote export", "recall_practice", "Create a small active-recall set and export when useful.", resourceIds.slice(0, 3), titles, 25),
+    stage(1, "Resource triage and goal selection", "first_pass_source_reading", `Choose the highest-value ${topic} learning cluster and defer the rest.${aggregateSuffix}`, resourceIds, titles, 20),
+    stage(2, "First-pass understanding", "first_pass_source_reading", "Review the gathered gists, learning bits, and weak points as a cluster.", resourceIds.slice(0, 6), titles, 25),
+    stage(3, "Deep extraction and concept linking", "deep_processing_session", "Connect concepts, evidence, prerequisites, and relationships across the gathered items.", resourceIds.slice(0, 6), titles, 35),
+    stage(4, "Active recall and RemNote export", "recall_practice", "Refine the existing cards into a small active-recall set and export when useful.", resourceIds.slice(0, 6), titles, 25),
     stage(5, "Practice sessions and review", "weekly_review", "Run short reviews and mark weak concepts.", resourceIds.slice(0, 3), titles, 20),
     stage(6, "Weak-point repair", "weak_point_repair", "Patch missed concepts with simpler prerequisite cards.", resourceIds.slice(0, 3), titles, 20),
     stage(7, "Final synthesis or target-language production", "target_language_practice", "Produce a summary, explanation, or target-language practice output.", resourceIds.slice(0, 3), titles, 30)
@@ -294,11 +482,13 @@ function reminderItemsFor(group) {
 
 function successCriteriaFor(group) {
   const topic = group.topic || "the selected topic";
+  const bitCount = group.learningBits || 0;
+  const cardCount = group.learningCards || 0;
   return [
-    `Summarize ${topic} from memory in a few sentences.`,
-    "Review a small active-recall set without overloading the session.",
+    `Summarize ${topic} from memory using the gathered learning bits, not one isolated source.`,
+    `Review a small active-recall set drawn from ${cardCount || "the"} available card${cardCount === 1 ? "" : "s"} without overloading the session.`,
     "Identify weak points and schedule a repair pass."
-  ];
+  ].concat(bitCount ? [`Connect at least ${Math.min(bitCount, 5)} learning bit${Math.min(bitCount, 5) === 1 ? "" : "s"} into a coherent explanation.`] : []);
 }
 
 function renderGoalsPage(goals) {
@@ -332,6 +522,183 @@ ${plan.stages.map((stage) => `### ${stage.sequence}. ${stage.title}\n\n- Status:
 `;
 }
 
+function renderSourceMapPage(links, goals, plans) {
+  const goalMap = new Map(goals.map((goal) => [goal.id, goal]));
+  const planMap = new Map(plans.map((plan) => [plan.id, plan]));
+  const groups = sourceGroupsFromLinks(links);
+  return `${frontmatter("learning-source-map")}# Source Map
+
+Processed sources are routed to related learning groups, goals, and plans after successful AI analysis.
+
+## Groups
+
+${groups.length ? groups.map((group) => `- **${group.group}**: ${group.count} source${group.count === 1 ? "" : "s"}, ${group.goals} linked goal${group.goals === 1 ? "" : "s"}, ${group.plans} linked plan${group.plans === 1 ? "" : "s"}`).join("\n") : "No processed sources linked yet."}
+
+## Recent Sources
+
+${links.length ? links.slice(-25).reverse().map((link) => {
+  const goalsText = unique(link.linkedGoals.map((item) => goalMap.get(item.id)?.title || item.title || item.id).filter(Boolean)).join(", ") || "none";
+  const plansText = unique(link.linkedPlans.map((item) => planMap.get(item.id)?.title || item.title || item.id).filter(Boolean)).join(", ") || "none";
+  return `- **${link.title}** (${link.group || "Ungrouped"})\n  - Source: [[${link.sourcePage}]]\n  - Goals: ${goalsText}\n  - Plans: ${plansText}`;
+}).join("\n") : "No processed sources linked yet."}
+`;
+}
+
+function normalizeSourceLink(link = {}) {
+  return {
+    id: link.id || "",
+    sourcePage: link.sourcePage || "",
+    sourcePath: link.sourcePath || "",
+    title: link.title || "",
+    sourceKind: link.sourceKind || "source",
+    group: link.group || "Ungrouped",
+    linkedGoals: Array.isArray(link.linkedGoals) ? link.linkedGoals : [],
+    linkedPlans: Array.isArray(link.linkedPlans) ? link.linkedPlans : [],
+    cardsCreated: Number(link.cardsCreated || 0),
+    bitsCreated: Number(link.bitsCreated || 0),
+    created: link.created || new Date().toISOString()
+  };
+}
+
+function isLinkableLearningItem(item = {}) {
+  return !["archived", "completed"].includes(String(item.status || "").toLowerCase());
+}
+
+function sourceGroupsFromLinks(links = []) {
+  const groups = new Map();
+  for (const link of links) {
+    const groupName = link.group || "Ungrouped";
+    const group = groups.get(groupName) || { group: groupName, count: 0, goals: 0, plans: 0, latest: "", sources: [] };
+    group.count += 1;
+    group.goals += (link.linkedGoals || []).length;
+    group.plans += (link.linkedPlans || []).length;
+    group.latest = [group.latest, link.created].filter(Boolean).sort().at(-1) || "";
+    group.sources.push(link);
+    groups.set(groupName, group);
+  }
+  return [...groups.values()].sort((a, b) => String(b.latest).localeCompare(String(a.latest)));
+}
+
+function keywordsForSource(source = {}) {
+  const boost = source.boost || {};
+  const bits = Array.isArray(boost.learning_bits) ? boost.learning_bits : [];
+  const plans = Array.isArray(boost.learning_plan_suggestions) ? boost.learning_plan_suggestions : [];
+  const relationships = Array.isArray(boost.relationships) ? boost.relationships : [];
+  return keywords([
+    source.sourceTitle,
+    source.sourceRel,
+    boost.gist,
+    boost.core_summary,
+    ...bits.flatMap((bit) => [bit.title, bit.body]),
+    ...plans.flatMap((plan) => [plan.stage, plan.goal, ...(Array.isArray(plan.tasks) ? plan.tasks : [])]),
+    ...relationships.flatMap((item) => [item.from, item.to, item.relationship])
+  ].join(" "));
+}
+
+function goalSearchText(goal) {
+  return [goal.title, goal.description, ...(goal.successCriteria || []), ...(goal.resources || [])].join(" ");
+}
+
+function planSearchText(plan) {
+  return [
+    plan.title,
+    plan.status,
+    ...(plan.stages || []).flatMap((stage) => [
+      stage.title,
+      stage.outcome,
+      stage.eventType,
+      ...(stage.sourceTitles || []),
+      ...(stage.sourceResourceIds || [])
+    ])
+  ].join(" ");
+}
+
+function rankMatches(items, sourceKeywords, textForItem) {
+  if (!sourceKeywords.size) return [];
+  return items.map((item) => {
+    const itemKeywords = keywords(textForItem(item));
+    let score = 0;
+    for (const token of sourceKeywords) if (itemKeywords.has(token)) score += 1;
+    return {
+      item,
+      score,
+      reason: score ? `${score} shared keyword${score === 1 ? "" : "s"}` : ""
+    };
+  }).filter((match) => match.score > 0).sort((a, b) => b.score - a.score);
+}
+
+function groupLabelFor(source, goals, plans) {
+  const matchedPlan = plans[0]?.item?.title;
+  const matchedGoal = goals[0]?.item?.title;
+  const suggestedGoal = source.boost?.learning_plan_suggestions?.[0]?.goal;
+  const bitTitle = source.boost?.learning_bits?.[0]?.title;
+  return matchedPlan || matchedGoal || suggestedGoal || bitTitle || source.sourceTitle || "Ungrouped";
+}
+
+function addSourceToPlanStages(stages = [], sourcePage, sourceTitle, sourceKeywords) {
+  if (!sourcePage) return stages;
+  const index = bestStageIndex(stages, sourceKeywords);
+  return stages.map((stage, stageIndex) => {
+    if (stageIndex !== index) return stage;
+    return {
+      ...stage,
+      sourceResourceIds: unique([...(stage.sourceResourceIds || []), sourcePage]),
+      sourceTitles: unique([...(stage.sourceTitles || []), sourceTitle].filter(Boolean))
+    };
+  });
+}
+
+function bestStageIndex(stages, sourceKeywords) {
+  if (!stages.length) return -1;
+  let bestIndex = stages.length > 1 ? 1 : 0;
+  let bestScore = -1;
+  stages.forEach((stage, index) => {
+    const stageKeywords = keywords([stage.title, stage.outcome, stage.eventType].join(" "));
+    let score = 0;
+    for (const token of sourceKeywords) if (stageKeywords.has(token)) score += 1;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  });
+  return bestIndex;
+}
+
+function sourceGoalRef(match) {
+  return {
+    id: match.item.id,
+    title: match.item.title,
+    status: match.item.status,
+    score: match.score,
+    reason: match.reason
+  };
+}
+
+function sourcePlanRef(match) {
+  return {
+    id: match.item.id,
+    title: match.item.title,
+    status: match.item.status,
+    score: match.score,
+    reason: match.reason
+  };
+}
+
+function keywords(text) {
+  const stop = new Set(["about", "after", "and", "are", "because", "before", "from", "into", "learn", "learning", "notes", "plan", "practice", "source", "stage", "that", "the", "this", "with", "your"]);
+  return new Set(String(text || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\p{L}\p{N}:]+/gu, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !stop.has(token)));
+}
+
+function unique(items) {
+  return [...new Set(items.filter(Boolean))];
+}
+
 function frontmatter(type) {
   const date = new Date().toISOString().slice(0, 10);
   return `---\ntype: ${type}\nstatus: active\nupdated: ${date}\ntags:\n  - learning-boost\n---\n\n`;
@@ -349,10 +716,70 @@ function emptyGroup(topic) {
   return { topic, resources: [], sourceTypes: [], statuses: [], recommendedNextActions: [] };
 }
 
+function enrichLearningGroup(group) {
+  const resources = group.resources || [];
+  return {
+    ...group,
+    learningBits: resources.reduce((sum, item) => sum + Number(item.learningBits || 0), 0),
+    learningCards: resources.reduce((sum, item) => sum + Number(item.learningCards || 0), 0),
+    learningBasis: unique(resources.map((item) => item.learningBasis).filter(Boolean))
+  };
+}
+
+function aggregateTopicFor({ link = {}, bits = [], cards = [] }) {
+  if (link.group && link.group !== "Ungrouped") return link.group;
+  const tags = [...bits, ...cards].flatMap((item) => Array.isArray(item.tags) ? item.tags : []).filter(Boolean);
+  if (tags.length) return titleCase(tags[0]);
+  const concepts = [...bits, ...cards].flatMap((item) => Array.isArray(item.conceptLinks) ? item.conceptLinks : []).filter(Boolean);
+  if (concepts.length) return titleCase(concepts[0]);
+  const title = bits[0]?.title || cards[0]?.front || link.title || "Processed Learning";
+  return titleCase(String(title).split(/[.:?؟\-–—]/)[0].slice(0, 80) || "Processed Learning");
+}
+
+function titleCase(value) {
+  return String(value || "")
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .replace(/\w\S*/g, (word) => word.charAt(0).toUpperCase() + word.slice(1));
+}
+
 function normalizeList(value) {
   if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
   if (typeof value === "string") return value.split(",").map((item) => item.trim()).filter(Boolean);
   return [];
+}
+
+function normalizeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function normalizeStages(value, fallback) {
+  if (!Array.isArray(value)) return fallback;
+  return value.map((stage, index) => ({
+    id: stage.id || `stage-${index + 1}`,
+    sequence: Number(stage.sequence || index + 1),
+    title: stage.title || `Stage ${index + 1}`,
+    status: stage.status || "proposed",
+    eventType: stage.eventType || "learning_session",
+    outcome: stage.outcome || "",
+    sourceResourceIds: Array.isArray(stage.sourceResourceIds) ? stage.sourceResourceIds : [],
+    sourceTitles: Array.isArray(stage.sourceTitles) ? stage.sourceTitles : [],
+    estimatedMinutes: Number(stage.estimatedMinutes || 25),
+    approval: stage.approval && typeof stage.approval === "object" ? stage.approval : { required: true, approved: stage.status === "approved" }
+  }));
+}
+
+function linkedGoalStatus(planStatus, currentStatus) {
+  if (["approved", "active", "completed", "archived", "paused"].includes(planStatus)) return planStatus;
+  return currentStatus;
+}
+
+function pick(source, keys) {
+  const result = {};
+  for (const key of keys) {
+    if (source[key] !== undefined) result[key] = source[key];
+  }
+  return result;
 }
 
 function compactTimestamp(date) {

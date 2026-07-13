@@ -18,6 +18,8 @@ export function processPdfSource(file, options = {}) {
     kind: "pdf",
     title: pdfTitle(file),
     text: text.slice(0, maxChars),
+    contentExtracted: pages.length > 0,
+    extractionStatus: pages.length ? "extracted" : "pending_text_extraction",
     extension: ".pdf",
     metadata: { path: file, bytes: fs.statSync(file).size, pages: pages.length || undefined },
     evidence: pages.length ? pages.slice(0, 12).map((page) => `p. ${page.page}`) : [path.basename(file)],

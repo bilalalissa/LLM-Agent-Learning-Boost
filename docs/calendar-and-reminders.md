@@ -11,9 +11,10 @@ Learning plans start from gathered ResourceInbox items:
 3. Draft proposed goals and plans.
 4. Show the plan in the Learning tab and `wiki/learning/learning-plan.md`.
 5. Ask for confirmation before plan approval or activation.
-6. Ask separately before Calendar or Reminders export.
-7. Export only approved, active, or scheduled plan stages.
-8. Save an external-write log.
+6. Open an Export Review preview before Calendar or Reminders export.
+7. Let the user revise the generated `.ics` or Reminders Markdown content.
+8. Export only after explicit confirmation.
+9. Save an external-write log.
 
 Plans and goals are stored in:
 
@@ -29,9 +30,19 @@ Calendar export is local-first:
 - `.ics` files are written to `.llm-wiki/learning/exports/calendar/`.
 - Apple Calendar creation is available only when a native bridge is provided.
 - If no bridge is available, the app falls back to `.ics` export.
-- Calendar export requires explicit confirmation after plan approval.
+- Calendar export requires an Export Review confirmation after plan approval.
 
 Calendar events are generated for stage types such as first-pass reading, deep processing, recall practice, target-language practice, weekly review, weak-point repair, and goal checkpoints.
+
+Before writing an `.ics` file or asking the native bridge to create Apple Calendar events, Learning Boost shows the selected vault, plan, destination, event count, warnings, and editable `.ics` text. Nothing is written until `Confirm export` is pressed.
+
+After confirmation, the app verifies the `.ics` file exists before it reports success. The expected path is:
+
+```text
+.llm-wiki/learning/exports/calendar/<plan-id>.ics
+```
+
+If verification fails, the Export Review panel stays open and shows the expected path and failure reason.
 
 ## Reminders
 
@@ -40,7 +51,17 @@ Reminders export is also local-first:
 - Copyable Markdown task files are written to `.llm-wiki/learning/exports/reminders/`.
 - Apple Reminders creation is available only when a native bridge is provided.
 - If no bridge is available, the app falls back to Markdown export.
-- Reminder export requires explicit confirmation after plan approval.
+- Reminder export requires an Export Review confirmation after plan approval.
+
+Before writing a Markdown reminder export or asking the native bridge to create Apple Reminders, Learning Boost shows the selected vault, plan, destination, reminder count, warnings, and editable Markdown task text. Nothing is written until `Confirm export` is pressed.
+
+After confirmation, the app verifies the Markdown export exists before it reports success. The expected path is:
+
+```text
+.llm-wiki/learning/exports/reminders/<plan-id>-reminders.md
+```
+
+If Apple Reminders bridge creation is unavailable, the verified Markdown file is the fallback output.
 
 ## Undo and Export Logs
 

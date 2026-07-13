@@ -6,7 +6,7 @@ This manual explains the two tabs that most affect daily use: Provider and Learn
 
 Use the Provider tab first. It tells you whether the app has a usable AI provider and whether that provider is local, LAN, or cloud fallback.
 
-If you are connecting to `bilalalissa/Ai-Local-Models-Router`, use [Connect Local AI Router](connect-local-ai-router.md) for the exact Provider tab fields.
+If you are connecting to `bilalalissa/Ai-Local-Models-Router`, use [Connect Local AI Router](connect-local-ai-router.md) for automatic localhost setup, ready/waiting status meanings, and manual Provider tab fields.
 
 Use the Learning tab second. It turns your vault sources into next actions, cards, plans, source capture settings, and exports.
 
@@ -156,9 +156,10 @@ MLX_LM_SERVER_BASE_URL=http://192.168.1.50:8080
 
 1. Vault selector: choose which vault's learning profile, plans, resources, and settings you are editing.
 2. Overview: read this first. It summarizes next actions, source backlog, plans, reviews, provider health, and profile status.
-3. Plan Actions: draft, approve, activate, and export learning plans. Approval does not automatically schedule anything.
-4. Learner Profile: personalizes explanations, target languages, session length, and coaching style.
-5. Source Capture and Add Resource: controls how new learning material enters the vault.
+3. Learning Autopilot: controls automatic source processing, plan drafting, plan-update suggestions, and native macOS notifications.
+4. Plan Actions: draft, approve, activate, and export learning plans. Approval does not automatically schedule anything.
+5. Learner Profile: personalizes explanations, target languages, session length, and coaching style.
+6. Source Capture and Add Resource: controls how new learning material enters the vault.
 
 ## Learning Tab Walkthrough
 
@@ -191,19 +192,62 @@ Cards you may see include:
 
 Use Overview as your "what now?" area. If it says provider health needs attention, go to Provider before drafting or exporting.
 
+Most Overview, flow, card, source, plan, goal, provider, and notification items are clickable targets. A click should move you to the matching Learning section, Files/Topics row, Provider tab, or plan/goal editor and briefly highlight the destination. If the destination is only a vault file, the app opens that file from the known vault root.
+
+In Source-To-Plan Map, source titles open or highlight the source target. `N goals` and `N plans` chips load revision controls when links exist; zero-count chips are disabled and explain that no linked item exists yet. `N cards` and group chips filter Cards And Bits, where a banner shows the active filter and a Clear filter button.
+
+### Learning Timeline
+
+The Learning Timeline groups dated work into Today, Next 7 days, Later, and Undated. It pulls from due cards, plan stages, goal deadlines, processed sources, plan-update suggestions, and export/review tasks.
+
+Click a timeline item to jump to the related card group, source, plan, goal, Provider state, or export review control. The timeline is a navigation aid; it does not write Calendar events by itself.
+
+### Cards And Bits
+
+Cards And Bits uses the full display-ready card and bit list, not only a small due-card sample. Source-To-Plan Map card counts should match what the Cards And Bits filter can show.
+
+Clicking `Show answer` records a local review event once, adds a `Read` marker to the visible card, and refreshes review summaries. It does not rewrite the original card JSONL; read state is stored in `.llm-wiki/learning/review-log.jsonl`.
+
+### Learning Autopilot
+
+Learning Autopilot is the normal automatic flow. When it is on, Learning Boost watches `raw/`, `raw/inbox/`, `raw/input/`, and approved captured resources. If the selected provider can answer, the app processes pending sources into source pages, multiple learning bits, active-recall cards, source links, and dashboards. If the provider cannot answer, the file stays pending and the Notification Center records the blocker.
+
+Controls:
+
+- Learning Autopilot: pause or resume background learning work for the selected vault.
+- Auto-process new sources: process new raw files and staged ResourceInbox items when safe.
+- Auto-draft plans/goals: draft proposed plans from gathered bits, cards, source links, and resources.
+- Auto-suggest plan updates: record plan edits that may help, without applying them automatically.
+- Native macOS notifications: allow the wrapper to send privacy-safe system alerts.
+- Sync alerts to Apple devices via Reminders: optionally copy privacy-safe learning alerts into an Apple Reminders list named `Learning Boost`; iCloud can sync those reminders to your other Apple devices if your system settings allow it.
+- Process pending now: run the same safe loop immediately.
+- Send test notification: queue one alert and ask macOS to deliver it.
+- Sync alerts to Reminders: retry Apple Reminders mirroring for pending alerts.
+- Mobile Study: open `/mobile` on this Mac, or set `MAC_BRIDGE_HOST=0.0.0.0` and `LEARNING_BOOST_MOBILE_TOKEN` to review Today's Study Plan, cards, bits, and short quiz/test sessions from an iPhone or iPad browser on a trusted LAN.
+
+The in-app Notification Center remains the durable alert log. It shows native delivery state such as pending, delivered, blocked by permission, or failed after retry attempts.
+
+macOS delivery and in-app reading are separate. A notification can be delivered by macOS and still remain unread in the app until you choose Mark read or Dismiss. The stack summary shows unread, pending macOS delivery, delivered, and blocked/failed counts.
+
+Apple Reminders mirroring is separate from macOS Notification Center delivery. It is the practical cross-device path: Learning Boost creates Reminders items on this Mac, then Apple/iCloud handles syncing them to other devices. If macOS Automation access to Reminders is blocked, the Notification Center shows the mirror failure instead of clearing the alert.
+
 ### Plan Actions
 
-Plan Actions are for turning collected resources into staged work.
+Plan Actions are for turning gathered learning outputs into staged work.
 
-Draft plans creates proposed learning plans from ResourceInbox items.
+Draft plans creates proposed learning plans from ResourceInbox items plus processed learning bits, cards, and source links. Source-level suggestions guide the draft, but the plan is based on the gathered context, not one isolated source.
 
 Approve plan marks a plan as approved. Approval means "this plan is acceptable." It does not schedule Calendar or Reminders.
 
 Activate plan makes the approved plan the current active plan.
 
-Export calendar creates an iCalendar file only after confirmation.
+Export calendar opens Export Review first. Review the selected vault, plan, destination, event count, warnings, and editable `.ics` text. Nothing is written until you click Confirm export.
 
-Export reminders creates a Reminders-ready Markdown export only after confirmation.
+Export reminders opens Export Review first. Review the selected vault, plan, destination, reminder count, warnings, and editable Markdown task text. Nothing is written until you click Confirm export.
+
+Export RemNote also opens Export Review. Inspect the card/media counts and editable RemNote Markdown or text before confirming.
+
+After Confirm export, Learning Boost verifies the expected files exist on disk. Verified paths appear in the review panel. If a file is missing, the panel stays open and shows the exact expected path instead of reporting success.
 
 Suggest updates looks for changes that may improve a plan. Suggestions are stored; they are not automatically applied.
 
@@ -242,6 +286,10 @@ Safe default:
 - Cloud policy: ask each time or never.
 
 Full Local Capture Mode is intentionally confirmation-gated. Enable it only if you want broader local activity capture and understand what sources may be indexed locally.
+
+Click Scan capture sources now to see what enabled local collectors can find. The scan reports enabled collectors, last scan time, captured count, duplicates, skipped items grouped by reason and extension, and the next safe action. It checks configured watch folders, screenshot folders when explicitly enabled, ResourceInbox status, and preview-safe opened-document metadata when explicitly enabled. It does not silently start live screen recording, broad browser history import, clipboard monitoring, or full monitoring.
+
+Watch folder scans now queue common documents, images, media, subtitles, local URL files, and text/data files as best-effort sources. If hundreds of files are skipped, the status card groups them by extension and reason with sample filenames so you can decide whether to narrow the folder, move a file, or add it manually. Permission or iCloud copy failures are shown as per-file blockers instead of stopping the whole app.
 
 ### Add Resource
 
@@ -308,8 +356,10 @@ Use this if privacy matters and you want deliberate capture.
 2. Select the vault.
 3. Read Overview for card count.
 4. Click Export RemNote.
-5. Confirm if the export is large.
-6. Use the generated Markdown/text files and media bundle for manual RemNote import.
+5. Review the Export Review panel.
+6. Edit the preview content if needed.
+7. Click Confirm export.
+8. Use the generated Markdown/text files and media bundle for manual RemNote import.
 
 ## Common Problems
 

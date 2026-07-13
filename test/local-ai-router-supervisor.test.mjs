@@ -4,7 +4,9 @@ import {
   checkRouterReachability,
   createLocalAiRouterSupervisor,
   launchLocalAiRouter,
+  mapRouterIntegrationConfig,
   mapRouterRecommendation,
+  shouldAutoApplyRouterPatch,
   waitForRouter
 } from "../src/local-ai-router-supervisor.mjs";
 
@@ -81,6 +83,24 @@ test("checkRouterReachability treats 401 as reachable but unauthorized", async (
   assert.match(result.detail, /Bearer token/);
 });
 
+test("checkRouterReachability prefers router API when configured base is a model runtime port", async () => {
+  const calls = [];
+  const fetch = async (url) => {
+    calls.push(String(url));
+    if (String(url).startsWith("http://127.0.0.1:17640/api/health")) {
+      return response({ status: "ready" });
+    }
+    return response({}, 404);
+  };
+  const result = await checkRouterReachability(router({
+    baseUrl: "http://127.0.0.1:11434",
+    compatBaseUrl: "http://127.0.0.1:17640/v1"
+  }), { fetch });
+  assert.equal(result.ok, true);
+  assert.equal(result.baseUrl, "http://127.0.0.1:17640");
+  assert.ok(calls[0].startsWith("http://127.0.0.1:17640/"));
+});
+
 test("waitForRouter polls until the router becomes reachable", async () => {
   const fetch = fakeFetch([
     new Error("connection refused"),
@@ -129,6 +149,140 @@ test("mapRouterRecommendation maps broker recommendations into OpenAI-compatible
   assert.equal(mapped.patch.values.OPENAI_COMPAT_BASE_URL, "http://127.0.0.1:17640/v1");
   assert.equal(mapped.patch.values.OPENAI_COMPAT_AUTH_METHOD, "bearer");
   assert.equal(mapped.patch.secrets.OPENAI_COMPAT_BEARER_TOKEN.value, "secret-token");
+});
+
+test("mapRouterIntegrationConfig applies router-provided Learning Boost env", () => {
+  const mapped = mapRouterIntegrationConfig({
+    status: "ready",
+    learning_boost_env: {
+      DEFAULT_AI_PROVIDER: "openai_compat",
+      DEFAULT_AI_MODEL: "local-model",
+      OPENAI_COMPAT_BASE_URL: "http://127.0.0.1:17640/v1",
+      OPENAI_COMPAT_AUTH_METHOD: "none",
+      LOCAL_AI_ROUTER_AUTO_INSTALL: "false"
+    },
+    selected_runtime: {
+      provider_name: "Ollama",
+      model: "qwen3:8b"
+    }
+  }, router());
+  assert.equal(mapped.patch.values.DEFAULT_AI_PROVIDER, "openai_compat");
+  assert.equal(mapped.patch.values.DEFAULT_AI_MODEL, "local-model");
+  assert.equal(mapped.patch.values.OPENAI_COMPAT_AUTH_METHOD, "none");
+  assert.equal(mapped.patch.values.LOCAL_AI_ROUTER_AUTO_INSTALL, "false");
+  assert.match(mapped.detail, /Selected runtime/);
+});
+
+test("mapRouterIntegrationConfig applies updated selected_route and provider_runtime fields", () => {
+  const mapped = mapRouterIntegrationConfig({
+    status: "ready",
+    local_integration: {
+      base_url: "http://127.0.0.1:17640",
+      openai_compatible_base_url: "http://127.0.0.1:17640/v1",
+      auth_method: "none"
+    },
+    learning_boost_env: {
+      DEFAULT_AI_PROVIDER: "openai_compat",
+      DEFAULT_AI_MODEL: "llama-3-1-8b-q4",
+      OPENAI_COMPAT_BASE_URL: "http://127.0.0.1:17640/v1",
+      OPENAI_COMPAT_AUTH_METHOD: "none",
+      LOCAL_AI_ROUTER_BASE_URL: "http://127.0.0.1:17640"
+    },
+    selected_route: {
+      model_id: "llama-3-1-8b-q4",
+      provider_name: "Ollama"
+    },
+    provider_runtime: {
+      provider_name: "Ollama",
+      running: true,
+      health: "Healthy",
+      active_model: "llama3.1:8b"
+    },
+    router_decision: {
+      can_execute: true
+    }
+  }, router({ baseUrl: "http://127.0.0.1:11434", compatBaseUrl: "http://127.0.0.1:17640/v1" }));
+  assert.equal(mapped.patch.values.DEFAULT_AI_MODEL, "llama-3-1-8b-q4");
+  assert.equal(mapped.patch.values.OPENAI_COMPAT_BASE_URL, "http://127.0.0.1:17640/v1");
+  assert.equal(mapped.patch.values.LOCAL_AI_ROUTER_BASE_URL, "http://127.0.0.1:17640");
+  assert.match(mapped.detail, /Selected runtime: Ollama llama3.1:8b/);
+});
+
+test("mapRouterIntegrationConfig marks waiting router as actionable local setup", () => {
+  const mapped = mapRouterIntegrationConfig({
+    status: "waiting_for_provider",
+    local_integration: {
+      openai_compatible_base_url: "http://127.0.0.1:17640/v1",
+      auth_method: "none"
+    },
+    selected_runtime: null
+  }, router());
+  assert.equal(mapped.patch.values.DEFAULT_AI_PROVIDER, "openai_compat");
+  assert.equal(mapped.patch.values.DEFAULT_AI_MODEL, "local-model");
+  assert.equal(mapped.patch.values.OPENAI_COMPAT_BASE_URL, "http://127.0.0.1:17640/v1");
+  assert.match(mapped.detail, /start Ollama/);
+});
+
+test("router auto-apply respects manual subscription provider selection", () => {
+  const patch = { values: { DEFAULT_AI_PROVIDER: "openai_compat" } };
+  assert.equal(shouldAutoApplyRouterPatch({ provider: "local_auto", localAiRouter: router() }, patch), true);
+  assert.equal(shouldAutoApplyRouterPatch({ provider: "openai_compat", localAiRouter: router() }, patch), true);
+  assert.equal(shouldAutoApplyRouterPatch({ provider: "openai_subscription", localAiRouter: router() }, patch), false);
+});
+
+test("supervisor prefers integration config when the updated router returns it", async () => {
+  const writes = [];
+  const fetch = async (url) => {
+    if (String(url).endsWith("/api/integration/manifest")) {
+      return response({ app: "Local AI Router" });
+    }
+    if (String(url).endsWith("/api/integration/config")) {
+      return response({
+        status: "ready",
+        learning_boost_env: {
+          DEFAULT_AI_PROVIDER: "openai_compat",
+          DEFAULT_AI_MODEL: "local-model",
+          OPENAI_COMPAT_BASE_URL: "http://127.0.0.1:17640/v1",
+          OPENAI_COMPAT_AUTH_METHOD: "none"
+        },
+        selected_runtime: { provider_name: "LM Studio", model: "local-chat" }
+      });
+    }
+    if (String(url).endsWith("/api/integration/recommend")) {
+      return response({
+        provider: "ollama-local",
+        base_url: "http://127.0.0.1:11434",
+        model: "qwen3:8b"
+      });
+    }
+    return response({});
+  };
+  const supervisor = createLocalAiRouterSupervisor({
+    getConfig: () => ({ configFile: "/tmp/config.env", localAiRouter: router() }),
+    applyProviderConfig: (patch) => writes.push(patch),
+    reloadRuntimeConfig: () => writes.push("reloaded"),
+    deps: { fetch }
+  });
+  const status = await supervisor.start();
+  assert.equal(status.status, "applied");
+  assert.equal(writes[0].values.DEFAULT_AI_PROVIDER, "openai_compat");
+  assert.equal(writes[0].values.OPENAI_COMPAT_BASE_URL, "http://127.0.0.1:17640/v1");
+  assert.equal(writes[0].values.OLLAMA_BASE_URL, undefined);
+});
+
+test("recommendation fallback maps /v1/models local-model", async () => {
+  const { recommendLocalAiProvider } = await import("../src/local-ai-router-supervisor.mjs");
+  const recommendation = await recommendLocalAiProvider(router(), {
+    fetch: async (url) => {
+      if (String(url).endsWith("/api/integration/recommend")) return response({}, 404);
+      if (String(url).endsWith("/api/integration/providers")) return response([], 404);
+      if (String(url).endsWith("/v1/models")) return response({ data: [{ id: "local-model" }] });
+      return response({}, 404);
+    }
+  });
+  assert.equal(recommendation.ok, true);
+  assert.equal(recommendation.model, "local-model");
+  assert.equal(recommendation.provider, "local_ai_router_broker");
 });
 
 test("supervisor starts router, requests provider start, applies recommendation", async () => {

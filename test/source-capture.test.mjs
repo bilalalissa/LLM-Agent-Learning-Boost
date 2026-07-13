@@ -13,11 +13,15 @@ import {
   deleteResource,
   exportResources,
   groupedResourceInbox,
+  markResourceIngestResults,
   purgeExpiredResources,
   readSourceCaptureSettings,
   resourceInbox,
+  resourceInboxPath,
+  stageResourcesForIngest,
   updateSourceCaptureSettings
 } from "../src/source-capture.mjs";
+import { queueResourceInboxForIngestAsync } from "../src/source-capture-ingest.mjs";
 import { ensureLearningScaffold, learningPaths } from "../src/learning-store.mjs";
 
 function makeVault() {
@@ -33,13 +37,34 @@ test("source capture settings default to safe normal capture", () => {
   const { vault } = makeVault();
   const settings = readSourceCaptureSettings(vault);
 
+  assert.equal(settings.schemaVersion, 2);
   assert.equal(settings.enabled, false);
   assert.equal(settings.fullLocalCaptureMode, false);
   assert.equal(settings.manualImport, true);
   assert.equal(settings.browserClipper, true);
+  assert.equal(settings.autoProcessCapturedResources, true);
   assert.equal(settings.browserHistoryImport, false);
   assert.equal(settings.localProcessingOnly, true);
   assert.equal(settings.criticalInfoCloudPolicy, "never");
+});
+
+test("old source capture settings migrate to auto-process while explicit new off is preserved", () => {
+  const { vault } = makeVault();
+  const settingsFile = path.join(learningPaths(vault).dir, "source-capture-settings.json");
+  fs.writeFileSync(settingsFile, JSON.stringify({
+    schemaVersion: 1,
+    enabled: false,
+    browserClipper: true,
+    autoProcessCapturedResources: false
+  }, null, 2));
+
+  ensureLearningScaffold(vault, {});
+  assert.equal(readSourceCaptureSettings(vault).schemaVersion, 2);
+  assert.equal(readSourceCaptureSettings(vault).autoProcessCapturedResources, true);
+
+  updateSourceCaptureSettings(vault, { autoProcessCapturedResources: false });
+  assert.equal(readSourceCaptureSettings(vault).schemaVersion, 2);
+  assert.equal(readSourceCaptureSettings(vault).autoProcessCapturedResources, false);
 });
 
 test("full local capture gates broad collectors behind explicit mode and preview", () => {
@@ -94,6 +119,131 @@ test("manual resource capture groups resources and writes resources page", () =>
   assert.match(resourcesPage, /LLM Agent Notes/);
 });
 
+test("duplicate captures are reported without appending another ResourceInbox row", () => {
+  const { vault } = makeVault();
+  const first = captureResource(vault, {
+    sourceType: "manual_import",
+    title: "Repeated local note",
+    file: "/tmp/repeated-note.md",
+    userApproved: true
+  });
+  const second = captureResource(vault, {
+    sourceType: "manual_import",
+    title: "Repeated local note again",
+    file: "/tmp/repeated-note.md",
+    userApproved: true
+  });
+
+  assert.equal(first.captured, true);
+  assert.equal(second.captured, false);
+  assert.equal(second.duplicate, true);
+  assert.equal(resourceInbox(vault).length, 1);
+});
+
+test("duplicate captures use explicit dedupe keys across renamed files", () => {
+  const { vault } = makeVault();
+  const first = captureResource(vault, {
+    sourceType: "manual_import",
+    title: "Downloaded paper",
+    file: "/tmp/download-a.pdf",
+    dedupeKey: "file-sha256:same-content",
+    contentHash: "same-content",
+    userApproved: true
+  });
+  const second = captureResource(vault, {
+    sourceType: "manual_import",
+    title: "Renamed downloaded paper",
+    file: "/tmp/download-b.pdf",
+    dedupeKey: "file-sha256:same-content",
+    contentHash: "same-content",
+    userApproved: true
+  });
+
+  assert.equal(first.captured, true);
+  assert.equal(second.captured, false);
+  assert.equal(second.duplicate, true);
+  assert.equal(resourceInbox(vault).length, 1);
+  assert.equal(resourceInbox(vault)[0].dedupeKey, "file-sha256:same-content");
+  assert.equal(resourceInbox(vault)[0].contentHash, "same-content");
+});
+
+test("captured resources can be staged for ingest and marked as ingested", () => {
+  const { vault } = makeVault();
+  const captured = captureResource(vault, {
+    title: "Retrieval Practice Article",
+    url: "https://example.com/retrieval-practice",
+    topic: "Learning",
+    description: "A source about recall practice.",
+    processingStatus: "ready_for_ingest",
+    userApproved: true
+  });
+
+  const staged = stageResourcesForIngest(vault);
+  assert.equal(captured.captured, true);
+  assert.equal(staged.staged.length, 1);
+  assert.match(staged.staged[0].file, /^raw\/input\/.+retrieval-practice-article\.md$/);
+  assert.equal(fs.existsSync(path.join(vault, staged.staged[0].file)), true);
+  assert.match(fs.readFileSync(path.join(vault, staged.staged[0].file), "utf8"), /A source about recall practice/);
+
+  const marked = markResourceIngestResults(vault, [{
+    source: staged.staged[0].file,
+    sourcePage: "wiki/sources/2026-07-01--retrieval-practice-article.md",
+    processed: "raw/processed/2026-07-01--retrieval-practice-article.md",
+    learning: { cardsCreated: 2 }
+  }]);
+  const resource = resourceInbox(vault)[0];
+  assert.equal(marked.updated, 1);
+  assert.equal(resource.processingStatus, "ingested");
+  assert.equal(resource.sourcePage, "wiki/sources/2026-07-01--retrieval-practice-article.md");
+  assert.equal(resource.learning.cardsCreated, 2);
+});
+
+test("recent ResourceInbox queue failures are skipped during automatic retry backoff", async () => {
+  const { root, vault } = makeVault();
+  const blockedFile = path.join(root, "blocked.md");
+  const readyFile = path.join(root, "ready.md");
+  fs.writeFileSync(blockedFile, "# Blocked\n\nReadable but currently blocked.");
+  fs.writeFileSync(readyFile, "# Ready\n\nReadable text.");
+  const now = new Date("2026-07-12T18:00:00.000Z");
+
+  captureResource(vault, {
+    sourceType: "manual_import",
+    title: "Blocked image",
+    file: blockedFile,
+    processingStatus: "ready_for_ingest",
+    userApproved: true
+  });
+  captureResource(vault, {
+    sourceType: "manual_import",
+    title: "Ready note",
+    file: readyFile,
+    processingStatus: "ready_for_ingest",
+    userApproved: true
+  });
+
+  const current = resourceInbox(vault);
+  current[0] = {
+    ...current[0],
+    ingest: {
+      ...(current[0].ingest || {}),
+      lastQueueError: "Could not queue resource file: Timed out while queueing blocked.png.",
+      lastQueueAttemptAt: "2026-07-12T17:45:00.000Z"
+    }
+  };
+  fs.writeFileSync(resourceInboxPath(vault), current.map((item) => JSON.stringify(item)).join("\n") + "\n");
+
+  const staged = await queueResourceInboxForIngestAsync(vault, {
+    limit: 1,
+    maxQueueAttempts: 1,
+    retryBackoffMs: 30 * 60 * 1000,
+    now
+  });
+
+  assert.equal(staged.staged.length, 1);
+  assert.match(staged.staged[0].title, /Ready note/);
+  assert.equal(staged.skipped.some((item) => /Waiting 15 minutes/.test(item.reason)), true);
+});
+
 test("screenshots collector requires enabled screenshot capture or manual approval", () => {
   const { root, vault } = makeVault();
   const folder = path.join(root, "Screenshots");
@@ -109,6 +259,25 @@ test("screenshots collector requires enabled screenshot capture or manual approv
   assert.equal(resourceInbox(vault)[0].sourceType, "screenshot");
   assert.match(resourceInbox(vault)[0].file, /^raw\/assets\/resource-capture\/.+shot\.png$/);
   assert.equal(fs.existsSync(path.join(vault, resourceInbox(vault)[0].file)), true);
+});
+
+test("screenshot copy failure stays as a captured resource instead of crashing", () => {
+  const { root, vault } = makeVault();
+  const file = path.join(root, "blocked-shot.png");
+  fs.writeFileSync(file, "fake image");
+  fs.mkdirSync(path.join(vault, "raw", "assets"), { recursive: true });
+  fs.writeFileSync(path.join(vault, "raw", "assets", "resource-capture"), "not a directory");
+
+  const captured = captureResource(vault, {
+    sourceType: "screenshot",
+    title: "Blocked screenshot copy",
+    file,
+    userApproved: true
+  });
+
+  assert.equal(captured.captured, true);
+  assert.equal(resourceInbox(vault)[0].file, file);
+  assert.match(resourceInbox(vault)[0].recommendedNextAction, /screen/i);
 });
 
 test("resource retention purge, delete, and export are reversible controls", () => {

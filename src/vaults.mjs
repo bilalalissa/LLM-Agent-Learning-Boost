@@ -3,10 +3,38 @@ import os from "node:os";
 import path from "node:path";
 
 export function listVaults(root) {
+  const envVaults = listVaultsFromEnv();
+  if (envVaults.length) return envVaults;
+  const rootVaults = listVaultsUnderRoot(root);
+  const registryVaults = shouldUseObsidianRegistry(rootVaults) ? listObsidianVaults() : [];
   return uniquePaths([
-    ...listVaultsUnderRoot(root),
-    ...listObsidianVaults()
+    ...rootVaults,
+    ...registryVaults
   ]).sort((a, b) => vaultName(a).localeCompare(vaultName(b), undefined, { sensitivity: "base" }));
+}
+
+function listVaultsFromEnv() {
+  const raw = process.env.LLM_WIKI_VAULT_PATHS || "";
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return uniquePaths(parsed
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+      .map((item) => path.resolve(expandTilde(item)))
+      .filter(Boolean)
+      .filter(isDirectory))
+      .sort((a, b) => vaultName(a).localeCompare(vaultName(b), undefined, { sensitivity: "base" }));
+  } catch {
+    return [];
+  }
+}
+
+function shouldUseObsidianRegistry(rootVaults) {
+  if (process.env.LLM_WIKI_SKIP_OBSIDIAN_REGISTRY === "1") return false;
+  if (process.env.LLM_WIKI_INCLUDE_OBSIDIAN_REGISTRY === "1") return true;
+  return false;
 }
 
 function listVaultsUnderRoot(root) {
@@ -46,6 +74,7 @@ function isDirectory(file) {
 
 function readJson(file) {
   try {
+    traceFileRead(file);
     return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
     return null;
@@ -93,7 +122,18 @@ export function readVaultLog(vaultPath) {
 }
 
 export function readIfExists(file) {
+  traceFileRead(file);
   return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+}
+
+function traceFileRead(file) {
+  const traceFile = process.env.LLM_WIKI_WORKER_TRACE_FILE;
+  if (!traceFile) return;
+  try {
+    fs.appendFileSync(traceFile, `${new Date().toISOString()} read ${file}\n`, "utf8");
+  } catch {
+    // Trace logging must never block normal vault operations.
+  }
 }
 
 export function ensureDir(dir) {
@@ -120,46 +160,174 @@ export function listRawCandidates(vaultPath) {
   const rawDir = path.join(vaultPath, "raw");
   if (!fs.existsSync(rawDir)) return [];
   const result = [];
-  walkRawCandidates(rawDir, rawDir, result);
+  collectDirectRawFiles(rawDir, result);
+  for (const folder of ["inbox", "input"]) {
+    const dir = path.join(rawDir, folder);
+    if (isDirectory(dir)) collectDirectRawFiles(dir, result);
+  }
   return result;
+}
+
+function collectDirectRawFiles(dir, result) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const file = path.join(dir, entry.name);
+    if (entry.isFile() && isIngestibleRawFile(file)) result.push(file);
+  }
 }
 
 const ingestibleExtensions = new Set([
   ".md",
+  ".mdx",
+  ".rst",
   ".txt",
   ".markdown",
   ".html",
   ".htm",
+  ".mhtml",
   ".rtf",
   ".csv",
   ".tsv",
+  ".log",
+  ".ini",
+  ".conf",
+  ".toml",
+  ".xml",
+  ".yaml",
+  ".yml",
   ".json",
   ".jsonl",
+  ".ipynb",
+  ".bib",
+  ".tex",
+  ".sql",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".py",
+  ".js",
+  ".mjs",
+  ".cjs",
+  ".ts",
+  ".tsx",
+  ".jsx",
+  ".vue",
+  ".svelte",
+  ".css",
+  ".scss",
+  ".java",
+  ".c",
+  ".cc",
+  ".cpp",
+  ".h",
+  ".hpp",
+  ".swift",
+  ".go",
+  ".rs",
+  ".rb",
+  ".php",
+  ".kt",
+  ".kts",
+  ".r",
+  ".pl",
+  ".lua",
   ".docx",
+  ".doc",
+  ".xlsx",
+  ".xls",
   ".odt",
+  ".ods",
   ".pptx",
+  ".ppt",
   ".odp",
+  ".pages",
+  ".numbers",
+  ".key",
   ".epub",
+  ".mobi",
+  ".azw3",
+  ".eml",
+  ".msg",
+  ".ics",
+  ".webloc",
+  ".webarchive",
+  ".djvu",
   ".png",
   ".jpg",
   ".jpeg",
+  ".jfif",
   ".gif",
   ".webp",
+  ".avif",
+  ".apng",
+  ".bmp",
+  ".tif",
+  ".tiff",
   ".svg",
   ".heic",
+  ".heif",
+  ".ico",
+  ".jxl",
+  ".dng",
+  ".raw",
+  ".cr2",
+  ".cr3",
+  ".nef",
+  ".arw",
+  ".orf",
+  ".rw2",
   ".pdf",
   ".mp3",
+  ".mpga",
   ".wav",
+  ".wave",
   ".m4a",
+  ".m4b",
+  ".m4p",
+  ".aif",
   ".aiff",
   ".aac",
+  ".flac",
+  ".ogg",
+  ".oga",
+  ".opus",
+  ".amr",
+  ".caf",
+  ".wma",
+  ".mka",
+  ".ac3",
+  ".dts",
   ".mp4",
   ".mov",
   ".m4v",
   ".webm",
+  ".mkv",
+  ".avi",
+  ".wmv",
+  ".flv",
+  ".mpg",
+  ".mpeg",
+  ".3gp",
+  ".m2t",
+  ".m2ts",
+  ".mts",
+  ".vob",
+  ".ogv",
+  ".divx",
   ".vtt",
   ".srt",
-  ".url"
+  ".sbv",
+  ".smi",
+  ".lrc",
+  ".ass",
+  ".ssa",
+  ".url",
+  ".zip"
 ]);
 
 export function isIngestibleRawFile(file) {
@@ -169,23 +337,88 @@ export function isIngestibleRawFile(file) {
 export function isTextRawFile(file) {
   return new Set([
     ".md",
+    ".mdx",
+    ".rst",
     ".txt",
     ".markdown",
     ".html",
     ".htm",
+    ".mhtml",
     ".rtf",
     ".csv",
     ".tsv",
+    ".log",
+    ".ini",
+    ".conf",
+    ".toml",
+    ".xml",
+    ".yaml",
+    ".yml",
     ".json",
     ".jsonl",
+    ".ipynb",
+    ".bib",
+    ".tex",
+    ".sql",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".py",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".vue",
+    ".svelte",
+    ".css",
+    ".scss",
+    ".java",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".swift",
+    ".go",
+    ".rs",
+    ".rb",
+    ".php",
+    ".kt",
+    ".kts",
+    ".r",
+    ".pl",
+    ".lua",
     ".docx",
+    ".doc",
+    ".xlsx",
+    ".xls",
     ".odt",
+    ".ods",
     ".pptx",
+    ".ppt",
     ".odp",
+    ".pages",
+    ".numbers",
+    ".key",
     ".epub",
+    ".mobi",
+    ".azw3",
+    ".eml",
+    ".msg",
+    ".ics",
+    ".webloc",
+    ".webarchive",
+    ".djvu",
     ".pdf",
     ".vtt",
     ".srt",
+    ".sbv",
+    ".smi",
+    ".lrc",
+    ".ass",
+    ".ssa",
     ".url"
   ]).has(path.extname(file).toLowerCase());
 }
@@ -200,19 +433,6 @@ function walk(dir, result) {
     if (entry.isDirectory()) {
       walk(file, result);
     } else {
-      result.push(file);
-    }
-  }
-}
-
-function walkRawCandidates(rawDir, dir, result) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const file = path.join(dir, entry.name);
-    const rel = path.relative(rawDir, file);
-    if (entry.isDirectory()) {
-      if (rel === "processed" || rel === "assets") continue;
-      walkRawCandidates(rawDir, file, result);
-    } else if (isIngestibleRawFile(file)) {
       result.push(file);
     }
   }

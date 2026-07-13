@@ -2,7 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 
-const documentExtensions = new Set([".rtf", ".docx", ".odt", ".pptx", ".odp", ".epub"]);
+const documentExtensions = new Set([
+  ".rtf", ".docx", ".doc", ".odt", ".ods", ".pptx", ".ppt", ".odp",
+  ".xlsx", ".xls", ".pages", ".numbers", ".key", ".epub", ".mobi", ".azw3", ".eml", ".msg", ".ics", ".webarchive", ".djvu", ".zip"
+]);
 
 export function canProcessDocumentSource(file) {
   return documentExtensions.has(path.extname(file).toLowerCase());
@@ -12,10 +15,18 @@ export function processDocumentSource(file, options = {}) {
   const ext = path.extname(file).toLowerCase();
   const notes = [];
   let text = "";
+  let extracted = false;
   if (ext === ".rtf") text = readRtf(file, notes);
   else if (ext === ".docx") text = unzipXml(file, ["word/document.xml"], notes);
   else if (ext === ".pptx") text = unzipXml(file, ["ppt/slides/slide*.xml"], notes);
-  else if (ext === ".odt" || ext === ".odp" || ext === ".epub") text = unzipXml(file, ["content.xml", "*.xhtml", "*.html"], notes);
+  else if (ext === ".xlsx") text = unzipXml(file, ["xl/sharedStrings.xml", "xl/worksheets/sheet*.xml"], notes);
+  else if ([".odt", ".ods", ".odp", ".epub", ".mobi", ".azw3", ".pages", ".numbers", ".key"].includes(ext)) text = unzipXml(file, ["content.xml", "*.xhtml", "*.html", "index.xml", "Metadata/*.plist"], notes);
+  else if (ext === ".webarchive") text = readTextLike(file, notes);
+  else if (ext === ".eml" || ext === ".msg" || ext === ".ics") text = readTextLike(file, notes);
+  else if (ext === ".doc" || ext === ".ppt" || ext === ".xls") text = convertWithTextutil(file, notes);
+  else if (ext === ".djvu") text = convertWithDjvutxt(file, notes);
+  else if (ext === ".zip") text = zipListing(file, notes);
+  extracted = hasMeaningfulText(text) && !/^ZIP archive with \d+ listed item\(s\)\./i.test(text);
   if (!text.trim()) {
     text = `${path.basename(file)} preserved for local review. Text extraction is unavailable without optional local document tools.`;
     notes.push(`Document text extraction fallback used for ${ext}.`);
@@ -25,12 +36,59 @@ export function processDocumentSource(file, options = {}) {
     kind: "document",
     title: path.basename(file, ext),
     text: text.slice(0, maxChars),
+    contentExtracted: extracted,
+    extractionStatus: extracted ? "extracted" : "pending_text_extraction",
     extension: ext,
     metadata: { path: file, bytes: fs.statSync(file).size },
     evidence: [path.basename(file)],
     mediaRefs: [],
     processingNotes: notes
   };
+}
+
+function zipListing(file, notes) {
+  try {
+    const listing = execFileSync("unzip", ["-Z1", file], { encoding: "utf8", timeout: 10000 })
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(0, 200);
+    notes.push("ZIP archive indexed by filename only; extract individual files for full content analysis.");
+    return [
+      `ZIP archive with ${listing.length} listed item(s).`,
+      "Files:",
+      ...listing.map((item) => `- ${item}`)
+    ].join("\n");
+  } catch (error) {
+    notes.push(`ZIP listing unavailable or failed: ${error.message}`);
+    return "";
+  }
+}
+
+function readTextLike(file, notes) {
+  try {
+    return fs.readFileSync(file, "utf8").replace(/\s+/g, " ").trim();
+  } catch (error) {
+    notes.push(`Text-like document read failed: ${error.message}`);
+    return "";
+  }
+}
+
+function convertWithTextutil(file, notes) {
+  try {
+    return execFileSync("textutil", ["-convert", "txt", "-stdout", file], { encoding: "utf8", timeout: 15000 });
+  } catch (error) {
+    notes.push(`Legacy document conversion unavailable or failed: ${error.message}`);
+    return "";
+  }
+}
+
+function convertWithDjvutxt(file, notes) {
+  try {
+    return execFileSync("djvutxt", [file], { encoding: "utf8", timeout: 15000 });
+  } catch (error) {
+    notes.push(`DjVu text extraction unavailable or failed: ${error.message}`);
+    return "";
+  }
 }
 
 function readRtf(file, notes) {
@@ -73,4 +131,8 @@ function xmlToText(xml) {
     .replace(/&#39;/g, "'")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function hasMeaningfulText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().length >= 40;
 }

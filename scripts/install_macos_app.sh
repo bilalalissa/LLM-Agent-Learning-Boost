@@ -5,19 +5,88 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 "$ROOT/scripts/build_macos_app.sh"
 
 APP="$ROOT/build/macos/LLM Agent Learning Boost.app"
-TARGET="/Applications/LLM Agent Learning Boost.app"
+find "$ROOT/build/macos" -maxdepth 1 -type d -name 'LLM Agent Learning Boost [0-9]*.app' -exec rm -rf {} + 2>/dev/null || true
+TARGET_DIR="${LEARNING_BOOST_INSTALL_DIR:-$HOME/Applications}"
+TARGET="$TARGET_DIR/LLM Agent Learning Boost.app"
+APPLICATIONS_ALIAS="/Applications/LLM Agent Learning Boost.app"
+LOGIN_ITEM_ENABLED="false"
+if osascript -e 'tell application "System Events" to get the name of every login item' 2>/dev/null | grep -Eq '(^|, )(LLM Agent Learning Boost|LLMWikiAgent)(,|$)'; then
+  LOGIN_ITEM_ENABLED="true"
+fi
 
-osascript -e 'tell application "LLM Agent Learning Boost" to quit' >/dev/null 2>&1 || true
 pkill -x LLMWikiAgent >/dev/null 2>&1 || true
+pkill -x LLMAgentLearningBoost >/dev/null 2>&1 || true
 pkill -f "$TARGET/Contents/Resources/agent/src/server.mjs" >/dev/null 2>&1 || true
+pkill -f "$APPLICATIONS_ALIAS/Contents/Resources/agent/src/server.mjs" >/dev/null 2>&1 || true
 pkill -f "$ROOT/build/macos/LLM Agent Learning Boost.app/Contents/Resources/agent/src/server.mjs" >/dev/null 2>&1 || true
+ps -axo pid=,ppid=,command= | awk '$2 == 1 && $0 ~ /\/node src\/server\.mjs/ { print $1 }' | xargs -r kill >/dev/null 2>&1 || true
+pkill -f "$TARGET/Contents/Resources/agent/src/tab-data-worker.mjs" >/dev/null 2>&1 || true
+pkill -f "$TARGET/Contents/Resources/agent/src/auto-ingest-worker.mjs" >/dev/null 2>&1 || true
+pkill -f "$TARGET/Contents/Resources/agent/src/startup-learning-backfill-worker.mjs" >/dev/null 2>&1 || true
+pkill -f "$TARGET/Contents/Resources/agent/src/capture-scan-worker.mjs" >/dev/null 2>&1 || true
+pkill -f "$TARGET/Contents/Resources/agent/src/provider-status-worker.mjs" >/dev/null 2>&1 || true
+pkill -f "$ROOT/build/macos/LLM Agent Learning Boost.app/Contents/Resources/agent/src/tab-data-worker.mjs" >/dev/null 2>&1 || true
+pkill -f "$ROOT/build/macos/LLM Agent Learning Boost.app/Contents/Resources/agent/src/auto-ingest-worker.mjs" >/dev/null 2>&1 || true
+pkill -f "$ROOT/build/macos/LLM Agent Learning Boost.app/Contents/Resources/agent/src/startup-learning-backfill-worker.mjs" >/dev/null 2>&1 || true
+pkill -f "$ROOT/build/macos/LLM Agent Learning Boost.app/Contents/Resources/agent/src/capture-scan-worker.mjs" >/dev/null 2>&1 || true
+pkill -f "$ROOT/build/macos/LLM Agent Learning Boost.app/Contents/Resources/agent/src/provider-status-worker.mjs" >/dev/null 2>&1 || true
 sleep 0.5
 
+mkdir -p "$TARGET_DIR"
 if [[ -d "$TARGET" ]]; then
   rm -rf "$TARGET"
 fi
-cp -R "$APP" "$TARGET"
+/usr/bin/ditto "$APP" "$TARGET"
+xattr -cr "$TARGET" 2>/dev/null || true
+SIGN_IDENTITY="${CODE_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | awk -F '"' '/Apple Development:/{print $2; exit}')}"
+if [[ -z "$SIGN_IDENTITY" ]]; then
+  SIGN_IDENTITY="-"
+fi
+codesign --force --deep --sign "$SIGN_IDENTITY" "$TARGET"
 touch "$TARGET"
 
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -x "$LSREGISTER" ]]; then
+  "$LSREGISTER" -f "$TARGET" >/dev/null 2>&1 || true
+fi
+
+if [[ "$APPLICATIONS_ALIAS" != "$TARGET" ]]; then
+  if [[ -L "$APPLICATIONS_ALIAS" ]]; then
+    rm -f "$APPLICATIONS_ALIAS"
+  elif [[ -d "$APPLICATIONS_ALIAS" ]]; then
+    rm -rf "$APPLICATIONS_ALIAS"
+  fi
+  ln -s "$TARGET" "$APPLICATIONS_ALIAS" 2>/dev/null || true
+fi
+
+if [[ -x "$LSREGISTER" && -e "$APPLICATIONS_ALIAS" ]]; then
+  "$LSREGISTER" -f "$APPLICATIONS_ALIAS" >/dev/null 2>&1 || true
+fi
+
+osascript >/dev/null 2>&1 <<'APPLESCRIPT' || true
+tell application "System Events"
+  repeat with itemName in {"LLMWikiAgent", "LLM Agent Learning Boost"}
+    repeat with loginItem in (every login item whose name is itemName)
+      delete loginItem
+    end repeat
+  end repeat
+end tell
+APPLESCRIPT
+
+if [[ "$LOGIN_ITEM_ENABLED" == "true" ]]; then
+  osascript >/dev/null 2>&1 <<APPLESCRIPT || true
+tell application "System Events"
+  make login item at end with properties {path:"$TARGET", hidden:false}
+end tell
+APPLESCRIPT
+fi
+find "$ROOT/build/macos" -maxdepth 1 -type d -name 'LLM Agent Learning Boost [0-9]*.app' -exec rm -rf {} + 2>/dev/null || true
+
 echo "Installed: $TARGET"
+if [[ -L "$APPLICATIONS_ALIAS" ]]; then
+  echo "Applications alias: $APPLICATIONS_ALIAS -> $TARGET"
+fi
+if [[ "$LOGIN_ITEM_ENABLED" == "true" ]]; then
+  echo "Refreshed Login Item: $TARGET"
+fi
 echo "Open it from /Applications or run: open '$TARGET'"

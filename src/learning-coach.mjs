@@ -35,6 +35,7 @@ export function coachingSummary(vaultPath, state = {}) {
   return {
     settings,
     alerts,
+    recentEvents: events.slice(-12).reverse(),
     counts: {
       events: events.length,
       reviews: reviews.length,

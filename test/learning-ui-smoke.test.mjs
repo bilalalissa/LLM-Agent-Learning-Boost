@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 const serverSource = fs.readFileSync(path.resolve("src/server.mjs"), "utf8");
+const automationSource = fs.readFileSync(path.resolve("src/learning-automation.mjs"), "utf8");
 const clipperPopupSource = fs.readFileSync(path.resolve("extension/arc-clipper/popup.js"), "utf8");
 const clipperPopupHtml = fs.readFileSync(path.resolve("extension/arc-clipper/popup.html"), "utf8");
 const clipperBackgroundSource = fs.readFileSync(path.resolve("extension/arc-clipper/background.js"), "utf8");
 const clipperContentSource = fs.readFileSync(path.resolve("extension/arc-clipper/content.js"), "utf8");
+const macosWrapperSource = fs.readFileSync(path.resolve("native/macos/LLMWikiAgent/Sources/LLMWikiAgent/main.swift"), "utf8");
+const macosInstallScript = fs.readFileSync(path.resolve("scripts/install_macos_app.sh"), "utf8");
 
 test("Learning Boost UI includes Stage 8 sections and working-memory panels", () => {
   for (const label of [
@@ -24,7 +28,23 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
     "Provider health",
     "Profile/onboarding",
     "Internet research controls",
-    "System/device alerts"
+    "System/device alerts",
+    "Learning Flow",
+    "Numbered Learning Flow",
+    "This Week",
+    "When A Source Is Processed",
+    "Capture/source",
+    "Understanding/bit",
+    "Practice/card",
+    "Plan/goal",
+    "Alert/provider",
+    "Learning Autopilot",
+    "Cards And Bits",
+    "Plan And Goal Guide",
+    "Notification Center",
+    "Source-To-Plan Map",
+    "Groups And Notifications",
+    "Event Feed"
   ]) {
     assert.match(serverSource, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
@@ -36,11 +56,170 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /Schedule this\?/);
   assert.match(serverSource, /Export to RemNote/);
   assert.match(serverSource, /learning-workspace/);
+  assert.match(serverSource, /learning-stepper/);
+  assert.match(serverSource, /learning-card-deck/);
+  assert.match(serverSource, /learning-card-topic-groups/);
+  assert.match(serverSource, /learning-card-topic-group/);
+  assert.match(serverSource, /data-learning-target/);
+  assert.match(serverSource, /navigateLearningTarget/);
+  assert.match(serverSource, /revealSourcePageTarget/);
+  assert.match(serverSource, /revealPlanTarget/);
+  assert.match(serverSource, /revealGoalTarget/);
+  assert.match(serverSource, /open-vault-path/);
+  assert.match(serverSource, /openVaultPath/);
+  assert.match(serverSource, /safeVaultPath\(vaultPath, file\)/);
+  assert.match(serverSource, /learning-target-highlight/);
+  assert.match(serverSource, /learning-scroll-target/);
+  assert.match(serverSource, /attrEqualsSelector/);
+  assert.match(serverSource, /data-source-page/);
+  assert.match(serverSource, /data-topic-path/);
+  assert.match(serverSource, /learning-type-legend/);
+  assert.match(serverSource, /displayPrompt/);
+  assert.match(serverSource, /displayTopic/);
+  assert.match(serverSource, /displayQuality === "repaired"/);
+  assert.match(serverSource, /groupLearningCardsAndBits/);
+  assert.match(serverSource, /renderLearningStepByStepFlow/);
+  assert.match(serverSource, /data-learning-target="cards"/);
+  assert.match(serverSource, /learning-filter-banner/);
+  assert.match(serverSource, /clear-card-filter/);
+  assert.match(serverSource, /No linked goals yet/);
+  assert.match(serverSource, /No linked plans yet/);
+  assert.match(serverSource, /renderSourceMapChips/);
+  assert.match(serverSource, /button\.learning-chip:disabled/);
+  assert.ok(serverSource.includes(".learning-stepper li { position: relative; display: block;"));
+  assert.ok(serverSource.includes(".learning-flow-lane li { display: block;"));
+  assert.match(serverSource, /\.learning-stepper button \{[^}]*overflow-wrap: (break-word|anywhere)/);
+  assert.match(serverSource, /\.learning-flow-lane \.learning-flow-step-button \{[^}]*overflow-wrap: (break-word|anywhere)/);
+  assert.match(serverSource, /writing-mode: horizontal-tb/);
+  assert.match(serverSource, /#source-capture-form button/);
+  assert.match(serverSource, /#source-capture-form \{ align-items: start/);
+  assert.match(serverSource, /learning-flow-step-button/);
+  assert.match(serverSource, /LLM_WIKI_ENABLE_STARTUP_TAB_REFRESH !== "0"/);
+  assert.match(serverSource, /compactSideTopicText/);
+  assert.match(serverSource, /Skipped files by reason and extension/);
+  assert.doesNotMatch(serverSource, /\.learning-jump, \.learning-target-button \{[^}]*overflow-wrap: anywhere/);
+  assert.ok(!serverSource.includes(".learning-stepper li { position: relative; display: grid; grid-template-columns: 28px"));
+  assert.ok(!serverSource.includes(".learning-flow-lane li { display: grid; grid-template-columns: 28px"));
+  assert.ok(!serverSource.includes(".learning-flow-lane .learning-flow-step-button { display: grid; grid-template-columns: 28px"));
+  assert.match(serverSource, /Review due cards/);
+  assert.match(serverSource, /Finish pending sources/);
+  assert.match(serverSource, /Read the gist/);
+  assert.match(serverSource, /Inspect bits/);
+  assert.match(serverSource, /learning-bit-explorer/);
+  assert.match(serverSource, /learning-notification-center/);
+  assert.match(serverSource, /learning-notification-summary/);
+  assert.match(serverSource, /Notification delivery stack/);
+  assert.match(serverSource, /Pending macOS/);
+  assert.match(serverSource, /Blocked\/failed/);
+  assert.match(serverSource, /Reminders mirrored/);
+  assert.match(serverSource, /Pending Reminders/);
+  assert.match(serverSource, /notificationStackSummary/);
+  assert.match(serverSource, /notificationTargetType/);
+  assert.match(serverSource, /prefers-reduced-motion/);
+  assert.match(serverSource, /api\/learning\/automation-status/);
+  assert.match(serverSource, /fastLearningAutomationStatusForVault/);
+  assert.match(serverSource, /fastPendingRawCandidates/);
+  assert.match(serverSource, /safeReadJsonlLimited/);
+  assert.match(serverSource, /api\/learning\/automation-settings/);
+  assert.match(serverSource, /api\/learning\/process-pending/);
+  assert.match(serverSource, /api\/learning\/notifications/);
+  assert.match(serverSource, /api\/native\/notification-test/);
+  assert.match(serverSource, /api\/learning\/notification-reminder-sync/);
+  assert.match(serverSource, /api\/learning\/export-preview/);
+  assert.match(serverSource, /api\/learning\/export-confirm/);
+  assert.match(serverSource, /learning-export-review/);
+  assert.match(serverSource, /Confirm export/);
+  assert.match(serverSource, /Editable export preview/);
+  assert.match(serverSource, /api\/learning\/capture-scan/);
+  assert.match(serverSource, /Scan capture sources now/);
+  assert.match(serverSource, /capture-scan-status/);
+  assert.match(serverSource, /Skipped files by reason/);
+  assert.match(serverSource, /groupSkippedForDisplay/);
+  assert.match(serverSource, /skippedGroups/);
+  assert.match(serverSource, /Documents, images, audio\/video, subtitles/);
+  assert.match(serverSource, /runLearningCaptureScan/);
+  assert.match(serverSource, /collectWatchFolderResources/);
+  assert.match(serverSource, /collectScreenshots/);
+  assert.match(serverSource, /learningNotification/);
+  assert.match(serverSource, /learning-native-notification-status/);
+  assert.match(serverSource, /notificationDeliveryLabel/);
+  assert.match(serverSource, /macOS delivered/);
+  assert.match(serverSource, /macOS notifications blocked/);
+  assert.match(serverSource, /Apple Reminders mirrored/);
+  assert.match(serverSource, /Sync alerts to Apple devices via Reminders/);
+  assert.match(serverSource, /Sync alerts to Reminders/);
+  assert.match(serverSource, /syncNotificationsToReminders/);
+  assert.match(serverSource, /pollNow/);
   assert.match(serverSource, /Plan Actions/);
   assert.match(serverSource, /Learner Profile/);
   assert.match(serverSource, /Source Capture/);
   assert.match(serverSource, /Add Resource/);
+  assert.match(serverSource, /Auto insights after capture/);
+  assert.match(serverSource, /Process captured sources now/);
+  assert.match(serverSource, /Enable learning notifications/);
+  assert.match(serverSource, /learning-notification-control/);
+  assert.match(serverSource, /Behavior And Notifications/);
+  assert.match(serverSource, /Learning event capture/);
+  assert.match(serverSource, /Coaching alerts/);
+  assert.match(serverSource, /Expanded monitoring/);
+  assert.match(serverSource, /Detailed notifications/);
+  assert.match(serverSource, /Clipboard/);
+  assert.match(serverSource, /Visited web pages/);
+  assert.match(serverSource, /Frontmost app metadata/);
+  assert.match(serverSource, /Auto-process raw\/inbox and raw\/input/);
+  assert.match(serverSource, /data-config-key="AUTO_INGEST_ON_START"/);
+  assert.match(serverSource, /data-config-key="WATCH_INTERVAL_MS"/);
+  assert.match(serverSource, /data-config-key="AI_PROVIDER_TIMEOUT_MS"/);
+  assert.match(serverSource, /Provider timeout ms/);
+  assert.match(serverSource, /main \{ max-width: none; margin: 0;/);
+  assert.match(serverSource, /setSideTopicHidden\(savedSideTopicHidden !== "0"\)/);
+  assert.doesNotMatch(serverSource, /main \{ max-width: none; margin: 0 392px/);
+  assert.doesNotMatch(serverSource, /providerForAutoIngest/);
+  assert.doesNotMatch(serverSource, /openAiCompatForAutoIngest/);
+  assert.doesNotMatch(serverSource, /Using Local AI Router .* for background ingest/);
+  assert.match(serverSource, /runAutoIngestWorker/);
+  assert.match(serverSource, /auto-ingest-worker\.mjs/);
+  assert.match(serverSource, /Auto-ingest blocked/);
+  assert.match(serverSource, /AUTO_INGEST_TIMEOUT/);
+  assert.doesNotMatch(serverSource, /Auto-ingest worker timed out/);
+  assert.match(serverSource, /status: "paused"/);
+  assert.match(serverSource, /nextAutoIngestVault/);
+  assert.match(serverSource, /resourceLimit: batchSize/);
+  assert.match(serverSource, /Learning Autopilot is processing/);
+  assert.match(serverSource, /\.provider-grid \.inline-toggle/);
+  assert.match(serverSource, /Revise Plans And Goals/);
+  assert.match(serverSource, /Save plan revision/);
+  assert.match(serverSource, /Save goal revision/);
+  assert.match(serverSource, /api\/learning\/plan-revise/);
+  assert.match(serverSource, /api\/learning\/goal-revise/);
   assert.match(serverSource, /learning-toggle-grid/);
+  assert.match(serverSource, /learning-flowchart/);
+  assert.match(serverSource, /learning-map-grid/);
+  assert.match(serverSource, /repeat\(auto-fit, minmax\(min\(260px, 100%\), 1fr\)\)/);
+  assert.match(serverSource, /repeat\(auto-fit, minmax\(min\(280px, 100%\), 1fr\)\)/);
+  assert.match(serverSource, /overflow: visible/);
+  assert.match(serverSource, /learning-study-card-face\.back \{ display: none/);
+  assert.match(serverSource, /source_linked_to_learning/);
+  assert.match(serverSource, /Learning Boost source processed/);
+  assert.match(serverSource, /recentEvents/);
+  assert.match(serverSource, /Practice Learning Cards And Bits/);
+  assert.match(serverSource, /Open practice window/);
+  assert.match(serverSource, /Practice \/ edit/);
+  assert.match(serverSource, /Study \/ edit bit/);
+  assert.match(serverSource, /learningCardsFilter \? filterLearningItems/);
+  assert.match(serverSource, /Due and unread items appear first/);
+  assert.match(serverSource, /api\/learning\/bit-review/);
+  assert.match(serverSource, /api\/learning\/card-edit/);
+  assert.match(serverSource, /api\/learning\/bit-edit/);
+  assert.match(serverSource, /studyQueueCards/);
+  assert.match(serverSource, /studyQueueBits/);
+  assert.match(serverSource, /Practice note/);
+  assert.match(serverSource, /data-learning-action="practice-grade"/);
+  assert.match(serverSource, /Again/);
+  assert.match(serverSource, /Good/);
+  assert.match(serverSource, /sourceLinks/);
+  assert.match(serverSource, /sourceGroups/);
+  assert.match(serverSource, /Processed links/);
   assert.doesNotMatch(serverSource, /onclick="/);
   assert.match(serverSource, /Local AI unavailable/);
   assert.match(serverSource, /Save provider settings/);
@@ -58,6 +237,8 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /LOCAL_AI_ROUTER_AUTOSTART/);
   assert.match(serverSource, /LOCAL_AI_ROUTER_AUTO_START_PROVIDER/);
   assert.match(serverSource, /api\/local-ai-router-status/);
+  assert.match(serverSource, /provider-details-table/);
+  assert.match(serverSource, /table-layout: fixed/);
 });
 
 test("Chat tab exposes controlled remote research controls", () => {
@@ -74,6 +255,170 @@ test("Chat tab exposes controlled remote research controls", () => {
   assert.match(serverSource, /api\/learning\/remote-source-save/);
 });
 
+test("Learning tab has timeline, bounded tab loading, read-state, and verified export hooks", () => {
+  for (const label of [
+    "Learning Timeline",
+    "Study Plan",
+    "Short quiz/test",
+    "Spaced review",
+    "Next 7 days",
+    "Later",
+    "Undated",
+    "ready_empty",
+    "stale_refreshing",
+    "Automatic refresh failed",
+    "Export verified",
+    "Export failed verification",
+    "Checked file path(s)",
+    "Card marked read",
+    "Learning Profile Summary",
+    "Mobile Study",
+    "Learning Boost Mobile Study",
+    "Short Quiz/Test",
+    "Card and bit types",
+    "Clear focus",
+    "another trusted local device",
+    "Remote access should use a private VPN or tunnel",
+    "capture/source",
+    "understanding/bit",
+    "Mark tested",
+    "Reviewed from mobile study.",
+    "recent study activity",
+    "default spacing"
+  ]) {
+    assert.match(serverSource, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  assert.match(serverSource, /renderLearningTimeline/);
+  assert.match(serverSource, /renderLearningDailyStudyPlan/);
+  assert.match(serverSource, /buildFastDailyStudyPlan/);
+  assert.match(serverSource, /fastReviewActivity/);
+  assert.match(serverSource, /fastStudyTimes/);
+  assert.match(serverSource, /timingBasis/);
+  assert.match(serverSource, /activeHours/);
+  assert.match(serverSource, /renderMobileStudyHtml/);
+  assert.match(serverSource, /mobileStudyPayload/);
+  assert.match(serverSource, /mobileStudyAccessSummary/);
+  assert.match(serverSource, /localLanAddresses/);
+  assert.match(serverSource, /recommendedUrl/);
+  assert.match(serverSource, /lanUrls/);
+  assert.match(serverSource, /data-mobile-jump/);
+  assert.match(serverSource, /focus-active/);
+  assert.match(serverSource, /unicode-bidi: plaintext/);
+  assert.match(serverSource, /dir="auto"/);
+  assert.match(serverSource, /MOBILE_CACHE_KEY/);
+  assert.match(serverSource, /readCachedMobileStudy/);
+  assert.match(serverSource, /Offline cached study data/);
+  assert.match(serverSource, /buildMobileQuizItems/);
+  assert.match(serverSource, /quizzes/);
+  assert.match(serverSource, /authorizedMobileStudyRequest/);
+  assert.match(serverSource, /api\/mobile\/study/);
+  assert.match(serverSource, /api\/learning\/mobile-study/);
+  assert.match(serverSource, /api\/mobile\/review/);
+  assert.match(serverSource, /api\/reprocess-sources/);
+  assert.match(serverSource, /api\/reprocess-history/);
+  assert.match(serverSource, /api\/reprocess-history-restore/);
+  assert.match(serverSource, /api\/source-duplicates/);
+  assert.match(serverSource, /reprocess-history/);
+  assert.match(serverSource, /Reprocess history/);
+  assert.match(serverSource, /restoreReprocessHistory/);
+  assert.match(serverSource, /findSourceDuplicateGroups/);
+  assert.match(serverSource, /sourceDuplicateKey/);
+  assert.match(serverSource, /Audit duplicate sources/);
+  assert.match(serverSource, /source-duplicate-report/);
+  assert.match(serverSource, /source_content_sha256/);
+  assert.match(serverSource, /source_dedupe_key/);
+  assert.match(serverSource, /Baseline source page created from local extracted text/);
+  assert.match(serverSource, /skipRawCandidates: true/);
+  assert.match(serverSource, /Reprocess selected source/);
+  assert.match(serverSource, /Reprocess selected source page/);
+  assert.match(serverSource, /Unknown learning \(card\|bit\)/);
+  assert.match(serverSource, /LEARNING_BOOST_MOBILE_TOKEN/);
+  assert.match(serverSource, /learning-daily-plan/);
+  assert.match(serverSource, /learning-daily-sessions/);
+  assert.match(serverSource, /automationControlText/);
+  assert.match(automationSource, /recoveredFromStaleRuntime/);
+  assert.match(serverSource, /autoIngestVaultCursor/);
+  assert.match(serverSource, /Learning Autopilot is checking/);
+  assert.match(serverSource, /const pendingRawCount = safeRawCandidateCount\(vaultPath\);/);
+  assert.match(serverSource, /const pendingResourceCount = safeQueueableResourceCount\(vaultPath\);/);
+  assert.match(serverSource, /const pendingMediaCount = safePendingProviderMediaCount\(vaultPath\);/);
+  assert.match(serverSource, /if \(!pendingRawCount && !pendingResourceCount && !pendingMediaCount\) continue;/);
+  assert.match(serverSource, /reprocessPendingMedia: pendingVault\.pendingMediaCount > 0/);
+  assert.match(serverSource, /Resume/);
+  assert.match(serverSource, /Snooze 1 hour/);
+  assert.match(serverSource, /Automatic learning stopped/);
+  assert.match(serverSource, /groupTimelineItems/);
+  assert.match(serverSource, /tabPayloadStatus/);
+  assert.match(serverSource, /loading: status === "loading"/);
+  assert.match(serverSource, /scheduleTabDataRefresh/);
+  assert.match(serverSource, /state\.items\.length && state\.loading/);
+  assert.doesNotMatch(serverSource, /state\.items\.length && stale\) return "stale_refreshing"/);
+  assert.doesNotMatch(serverSource, /refreshTabData\(kind\);/);
+  assert.doesNotMatch(serverSource, /loading: status === "loading" \|\| status === "stale_refreshing"/);
+  assert.doesNotMatch(serverSource, /data-tab-refresh/);
+  assert.match(serverSource, /Topics are still indexing\. They will appear automatically when ready\./);
+  assert.match(serverSource, /document\.addEventListener\("pointerdown"/);
+  assert.equal((serverSource.match(/function activateTab\(/g) || []).length, 1);
+  assert.match(serverSource, /if \(name === "files"\) await loadFiles\(\);/);
+  assert.match(serverSource, /if \(name === "archives"\) await loadArchives\(\);/);
+  assert.match(serverSource, /if \(name === "topics"\) \{/);
+  assert.match(serverSource, /filesLoadPolls <= 4/);
+  assert.match(serverSource, /archivesLoadPolls <= 4/);
+  assert.match(serverSource, /topicsLoadPolls <= 4/);
+  assert.match(serverSource, /sideTopicsLoadPolls <= 18/);
+  assert.match(serverSource, /filesLoadPolls <= 2 \? 1400 : 5000/);
+  assert.match(serverSource, /filesBody\.innerHTML = tabStatusRow\(7, "Loading vault files/);
+  assert.match(serverSource, /archivesBody\.innerHTML = tabStatusRow\(7, "Loading archive history/);
+  assert.match(serverSource, /Use Retry to force a refresh/);
+  assert.match(serverSource, /class="secondary table-retry"/);
+  assert.match(serverSource, /data-retry-tab/);
+  assert.match(serverSource, /loadFiles\(\{ refresh: true \}\)/);
+  assert.match(serverSource, /loadArchives\(\{ refresh: true \}\)/);
+  assert.match(serverSource, /loadTopics\(\{ refresh: true \}\)/);
+  assert.doesNotMatch(serverSource, /filesLoadPolls <= 18/);
+  assert.doesNotMatch(serverSource, /archivesLoadPolls <= 18/);
+  assert.doesNotMatch(serverSource, /Retrying automatically/);
+  assert.match(serverSource, /if \(data\.error && !\(data\.vaults \|\| \[\]\)\.length\) throw new Error\(data\.error\);/);
+  assert.match(serverSource, /if \(data\.error && !\(data\.topics \|\| \[\]\)\.length\) throw new Error\(data\.error\);/);
+  assert.match(serverSource, /api\/learning\/card-review/);
+  assert.match(serverSource, /markLearningCardRead/);
+  assert.match(serverSource, /displayRead/);
+  assert.match(serverSource, /allCards/);
+  assert.match(serverSource, /allBits/);
+  assert.match(serverSource, /countLearningCardsForLink/);
+  assert.match(serverSource, /Showing .* of .* card/);
+  assert.match(serverSource, /verifyLearningExport/);
+  assert.match(serverSource, /verifiedFiles/);
+  assert.match(serverSource, /expectedFile/);
+  assert.match(serverSource, /renderLearningExportResult/);
+  assert.match(serverSource, /learning-export-result/);
+  assert.match(serverSource, /learning-export-files/);
+  assert.match(serverSource, /learningExportReview\.addEventListener/);
+});
+
+test("Learning saves preserve unrelated dirty fields and expose source insight processing", () => {
+  assert.match(serverSource, /snapshotDirtyLearningFields/);
+  assert.match(serverSource, /restoreDirtyLearningFields/);
+  assert.match(serverSource, /markLearningFieldDirty/);
+  assert.match(serverSource, /patchLearningCacheVault/);
+  assert.match(serverSource, /api\/learning\/process-resources/);
+  assert.match(serverSource, /autoProcessCapturedResources/);
+  assert.match(serverSource, /processingStatus: "ready_for_ingest"/);
+});
+
+test("macOS wrapper logs server output and installer refreshes app registration", () => {
+  assert.match(macosWrapperSource, /serverLogURL/);
+  assert.match(macosWrapperSource, /appendServerLog/);
+  assert.match(macosWrapperSource, /serverHealthFailures/);
+  assert.match(macosWrapperSource, /scheduleServerHealthWatchdog/);
+  assert.match(macosWrapperSource, /checkServerHealthAndRestartIfNeeded/);
+  assert.match(macosWrapperSource, /removeLegacyLoginItems/);
+  assert.match(macosWrapperSource, /LLMWikiAgent/);
+  assert.match(macosInstallScript, /LaunchServices\.framework\/Support\/lsregister/);
+  assert.match(macosInstallScript, /\$LSREGISTER" -f "\$TARGET"/);
+  assert.match(macosInstallScript, /\$LSREGISTER" -f "\$APPLICATIONS_ALIAS"/);
+});
+
 test("Stage 8 confirmation gates are present in the app UI", () => {
   for (const message of [
     "Change profile demographics or learning-level settings",
@@ -83,12 +428,16 @@ test("Stage 8 confirmation gates are present in the app UI", () => {
     "Enable screenshot watch",
     "Enable meeting import",
     "Enable voice memo import",
+    "Enable clipboard capture",
+    "Enable visited web page capture",
+    "Enable frontmost app metadata capture",
+    "Enable expanded monitoring",
     "Allow non-sensitive captured sources to use cloud processing",
     "Allow chat to access the internet automatically",
-    "Export approved plan stages to an iCalendar file",
-    "Export approved plan reminders",
     "Activate this learning plan now",
-    "Confirm large RemNote export"
+    "Confirm large RemNote export",
+    "Review export content before confirming",
+    "Nothing has been written yet"
   ]) {
     assert.match(serverSource, new RegExp(message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
@@ -125,7 +474,7 @@ test("rendered app client script parses", async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "llm-learning-ui-"));
   const vaultsRoot = path.join(tmp, "vaults");
   fs.mkdirSync(vaultsRoot, { recursive: true });
-  const port = 18000 + Math.floor(Math.random() * 20000);
+  const port = await freePort();
   const child = spawn(process.execPath, ["src/server.mjs"], {
     cwd: path.resolve("."),
     env: {
@@ -133,11 +482,12 @@ test("rendered app client script parses", async (t) => {
       CHAT_PORT: String(port),
       MAC_BRIDGE_HOST: "127.0.0.1",
       DEFAULT_AI_PROVIDER: "local_auto",
+      AUTO_INGEST_ON_START: "false",
       LOCAL_AI_ROUTER_AUTOSTART: "false",
       VAULTS_ROOT: vaultsRoot,
       LLM_WIKI_ENV_FILE: path.join(tmp, "config.env")
     },
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "inherit", "inherit"]
   });
   t.after(() => {
     child.kill();
@@ -212,27 +562,57 @@ test("rendered app client script parses", async (t) => {
   assert.match(await rawMediaResponse.text(), /Annotated Provider tab/);
 });
 
+function freePort() {
+  return stablePortFromRange(18790, 18840);
+}
+
+async function stablePortFromRange(start, end) {
+  for (let port = start; port <= end; port += 1) {
+    if (await canBindPort(port)) return port;
+  }
+  throw new Error(`no free test port in range ${start}-${end}`);
+}
+
+function canBindPort(port) {
+  return new Promise((resolve) => {
+    const socket = net.createServer();
+    socket.once("error", () => resolve(false));
+    socket.listen(port, "127.0.0.1", () => {
+      socket.close(() => resolve(true));
+    });
+  });
+}
+
 function waitForServer(child, port) {
   return new Promise((resolve, reject) => {
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      reject(new Error(`server did not start on ${port}: ${stderr || stdout}`));
-    }, 8000);
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-      if (stdout.includes(`http://127.0.0.1:${port}`)) {
-        clearTimeout(timer);
-        resolve();
+    let settled = false;
+    async function checkPort() {
+      if (settled) return;
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/`);
+        if (response.ok) {
+          settled = true;
+          clearTimeout(timer);
+          clearInterval(poll);
+          resolve();
+        }
+      } catch {
+        // Keep polling until the startup timeout expires.
       }
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
+    }
+    const timer = setTimeout(() => {
+      settled = true;
+      clearInterval(poll);
+      reject(new Error(`server did not start on ${port}`));
+    }, 20000);
+    const poll = setInterval(checkPort, 150);
+
     child.on("exit", (code) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      reject(new Error(`server exited before ready (${code}): ${stderr || stdout}`));
+      clearInterval(poll);
+      reject(new Error(`server exited before ready (${code})`));
     });
   });
 }

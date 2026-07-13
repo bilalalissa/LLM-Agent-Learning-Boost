@@ -1,27 +1,86 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { resolveCommand } from "./tool-paths.mjs";
 
 export function canProcessImageSource(file) {
-  return new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".heic"]).has(path.extname(file).toLowerCase());
+  return new Set([
+    ".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif", ".apng", ".bmp", ".tif", ".tiff",
+    ".svg", ".heic", ".heif", ".ico", ".jxl", ".dng", ".raw", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2"
+  ]).has(path.extname(file).toLowerCase());
 }
 
 export function processImageSource(file, options = {}) {
   const ext = path.extname(file).toLowerCase();
   const metadata = imageMetadata(file, ext);
   const manual = String(options.manualDescription || "").trim();
+  const ocr = manual ? { text: "", notes: [] } : extractImageOcr(file, options);
+  const text = manual || ocr.text || `${path.basename(file)} is preserved as a local image asset. Visual content was not analyzed because local OCR found no readable text and no manual description or permitted vision provider was supplied.`;
   return {
     kind: "image",
     title: path.basename(file, ext),
-    text: manual || `${path.basename(file)} is preserved as a local image asset. Visual content was not analyzed unless a manual description or permitted vision provider is supplied.`,
+    text,
+    contentExtracted: Boolean(manual || ocr.text),
+    extractionStatus: manual ? "manual_description" : (ocr.text ? "ocr_extracted" : "pending_visual_text"),
     extension: ext,
     metadata,
-    evidence: [path.basename(file)],
+    evidence: ocr.text ? [`OCR:${path.basename(file)}`] : [path.basename(file)],
     mediaRefs: [options.assetRel || path.basename(file)],
     processingNotes: [
-      manual ? "Image description supplied by user/source text." : "Image content not visually inspected; only metadata was extracted."
+      manual ? "Image description supplied by user/source text." : (ocr.text ? "Image OCR extracted local text for provider analysis." : "Image OCR did not produce readable text; metadata was preserved."),
+      ...ocr.notes
     ]
   };
+}
+
+export function extractImageOcr(file, options = {}) {
+  if (options.disableOcr || process.env.LEARNING_BOOST_DISABLE_IMAGE_OCR === "1") {
+    return { text: "", notes: ["Image OCR disabled by configuration."] };
+  }
+  const tesseract = resolveCommand([
+    options.tesseractCommand || process.env.LEARNING_BOOST_TESSERACT_COMMAND,
+    "tesseract",
+    "/usr/local/bin/tesseract",
+    "/opt/homebrew/bin/tesseract"
+  ]);
+  if (!tesseract) {
+    return { text: "", notes: ["Image OCR unavailable: tesseract is not installed."] };
+  }
+  const languages = String(options.ocrLanguages || process.env.LEARNING_BOOST_OCR_LANGUAGES || "eng+ara");
+  const timeout = Number(options.ocrTimeoutMs || process.env.LEARNING_BOOST_OCR_TIMEOUT_MS || 20000);
+  const candidates = uniqueValues([
+    languages,
+    ...languages.split(/[,+\s]+/).filter(Boolean),
+    "eng"
+  ]);
+  const notes = [];
+  for (const language of candidates) {
+    const result = runTesseract(tesseract, file, language, timeout);
+    if (result.text) {
+      return {
+        text: `Local OCR text from image:\n${result.text}`,
+        notes: [...notes, `Image OCR languages: ${language}.`]
+      };
+    }
+    notes.push(result.note);
+  }
+  return { text: "", notes };
+}
+
+function runTesseract(tesseract, file, languages, timeout) {
+  try {
+    const output = execFileSync(tesseract, [file, "stdout", "-l", languages], {
+      encoding: "utf8",
+      timeout,
+      maxBuffer: 2 * 1024 * 1024
+    });
+    const text = String(output || "").replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    return text
+      ? { text, note: `Image OCR languages ${languages} extracted readable text.` }
+      : { text: "", note: `Image OCR languages ${languages} completed but returned no readable text.` };
+  } catch (error) {
+    return { text: "", note: `Image OCR languages ${languages} failed: ${error.message}` };
+  }
 }
 
 function imageMetadata(file, ext) {
@@ -37,4 +96,15 @@ function imageMetadata(file, ext) {
     metadata.dimensionsAvailable = false;
   }
   return metadata;
+}
+
+function uniqueValues(values) {
+  const seen = new Set();
+  return values
+    .map((value) => String(value || "").trim())
+    .filter((value) => {
+      if (!value || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
 }

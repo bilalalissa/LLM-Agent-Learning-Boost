@@ -9,16 +9,21 @@ import { canProcessVideoSource, processVideoSource } from "./video-processor.mjs
 import { canProcessWebSource, processWebSource } from "./web-processor.mjs";
 
 export const STAGE_3_SOURCE_EXTENSIONS = new Set([
-  ".md", ".markdown", ".txt", ".html", ".htm", ".rtf", ".csv", ".tsv", ".json", ".jsonl",
-  ".docx", ".odt", ".pptx", ".odp", ".epub", ".pdf",
-  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".heic",
-  ".mp3", ".wav", ".m4a", ".aiff", ".aac", ".mp4", ".mov", ".m4v", ".webm",
-  ".vtt", ".srt", ".url"
+  ".md", ".mdx", ".rst", ".markdown", ".txt", ".html", ".htm", ".mhtml", ".rtf", ".csv", ".tsv", ".json", ".jsonl",
+  ".log", ".ini", ".conf", ".toml", ".xml", ".yaml", ".yml", ".ipynb", ".bib", ".tex", ".sql", ".sh", ".bash", ".zsh",
+  ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".vue", ".svelte", ".css", ".scss", ".java", ".c", ".cc", ".cpp", ".h", ".hpp",
+  ".swift", ".go", ".rs", ".rb", ".php", ".kt", ".kts", ".r", ".pl", ".lua", ".docx", ".doc", ".xlsx", ".xls", ".odt", ".ods", ".pptx", ".ppt", ".odp", ".pages",
+  ".numbers", ".key", ".epub", ".mobi", ".azw3", ".eml", ".msg", ".ics", ".webloc", ".webarchive", ".pdf", ".djvu", ".zip",
+  ".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif", ".apng", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif", ".ico", ".jxl", ".dng", ".raw", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2",
+  ".mp3", ".mpga", ".wav", ".wave", ".m4a", ".m4b", ".m4p", ".aif", ".aiff", ".aac", ".flac", ".ogg", ".oga", ".opus", ".amr", ".caf", ".wma", ".mka", ".ac3", ".dts",
+  ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp", ".m2t", ".m2ts", ".mts", ".vob", ".ogv", ".divx",
+  ".vtt", ".srt", ".sbv", ".smi", ".lrc", ".ass", ".ssa", ".url"
 ]);
 
 export const ASSET_SOURCE_EXTENSIONS = new Set([
-  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".heic",
-  ".mp3", ".wav", ".m4a", ".aiff", ".aac", ".mp4", ".mov", ".m4v", ".webm"
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".apng", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif", ".ico", ".jxl", ".dng", ".raw", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2",
+  ".mp3", ".mpga", ".wav", ".wave", ".m4a", ".m4b", ".m4p", ".aif", ".aiff", ".aac", ".flac", ".ogg", ".oga", ".opus", ".amr", ".caf", ".wma", ".mka", ".ac3", ".dts",
+  ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp", ".m2t", ".m2ts", ".mts", ".vob", ".ogv", ".divx"
 ]);
 
 export function isStage3Ingestible(file) {

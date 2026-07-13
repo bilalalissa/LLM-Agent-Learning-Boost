@@ -1,22 +1,28 @@
 import AppKit
 import CoreGraphics
+import Darwin
 import ServiceManagement
 import UniformTypeIdentifiers
+import UserNotifications
 import WebKit
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, UNUserNotificationCenterDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
     private var statusItem: NSStatusItem!
     private var windowMenu: NSMenu!
     private var serverProcess: Process?
+    private var isTerminating = false
+    private var serverRestartAttempts = 0
     private var startAtLoginItem: NSMenuItem!
     private var dockIconItem: NSMenuItem!
     private var closeBehaviorItem: NSMenuItem!
     private var setupAlertItem: NSMenuItem!
     private var snapWindows: [NSWindow] = []
     private var childWindows: [NSWindow] = []
+    private var notificationPollTimer: Timer?
     private var navigationRetryCounts: [ObjectIdentifier: Int] = [:]
+    private var serverHealthFailures = 0
     private weak var snapBoxView: NSView?
     private weak var snapTextView: WKWebView?
     private let closeBehaviorKey = "closeButtonKeepsRunning"
@@ -30,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
     private var defaultConfigURL: URL { appSupport.appendingPathComponent("config.env") }
     private var configPointerURL: URL { appSupport.appendingPathComponent("config-path.txt") }
+    private var serverLogURL: URL { appSupport.appendingPathComponent("server.log") }
     private var configURL: URL { selectedConfigURL() }
     private var agentURL: URL { Bundle.main.resourceURL!.appendingPathComponent("agent", isDirectory: true) }
 
@@ -37,21 +44,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.setActivationPolicy(.regular)
         ensureConfig()
         repairDefaultConfigIfPossible()
+        removeLegacyLoginItems()
         installStatusItem()
         makeWindow()
         startServer()
-        runStartupChecks()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.runStartupChecks()
+        }
         loadAppWhenReady()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            self?.configureNotifications()
+        }
+    }
+
+    private func removeLegacyLoginItems() {
+        DispatchQueue.global(qos: .utility).async {
+            let script = """
+            tell application "System Events"
+              repeat with itemName in {"LLMWikiAgent"}
+                repeat with loginItem in (every login item whose name is itemName)
+                  delete loginItem
+                end repeat
+              end repeat
+            end tell
+            """
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {
+                // Legacy cleanup is best-effort; the app should still launch normally.
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        isTerminating = true
+        notificationPollTimer?.invalidate()
         closeNativeSnap()
-        serverProcess?.terminate()
+        terminateServerProcess()
     }
 
     private func makeWindow() {
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.add(self, name: "snap")
+        configuration.userContentController.add(self, name: "learningNotification")
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -71,13 +112,225 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "snap",
-              let body = message.body as? [String: Any],
-              let text = body["text"] as? String else { return }
-        let html = body["html"] as? String
-        let bodySize = body["size"] as? Double
-        let storedSize = UserDefaults.standard.double(forKey: snapSizeKey)
-        showNativeSnap(text: text, html: html, size: CGFloat(bodySize ?? (storedSize > 0 ? storedSize : 34)))
+        guard let body = message.body as? [String: Any] else { return }
+        if message.name == "snap" {
+            guard let text = body["text"] as? String else { return }
+            let html = body["html"] as? String
+            let bodySize = body["size"] as? Double
+            let storedSize = UserDefaults.standard.double(forKey: snapSizeKey)
+            showNativeSnap(text: text, html: html, size: CGFloat(bodySize ?? (storedSize > 0 ? storedSize : 34)))
+            return
+        }
+        if message.name == "learningNotification" {
+            handleLearningNotificationMessage(body)
+        }
+    }
+
+    private func configureNotifications() {
+        DispatchQueue.main.async {
+            self.notificationPollTimer?.invalidate()
+            self.notificationPollTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+                self?.pollLearningNotifications()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                self?.pollLearningNotifications()
+            }
+        }
+    }
+
+    private func handleLearningNotificationMessage(_ body: [String: Any]) {
+        let action = body["action"] as? String ?? "notify"
+        if action == "requestPermission" {
+            requestNotificationAuthorizationIfNeeded { status, error in
+                let label = self.authorizationStatusLabel(status)
+                if let error {
+                    self.reportNativeNotificationStatus(
+                        status: error.hasPrefix("permission_denied") ? "permission_denied" : label,
+                        message: error
+                    )
+                } else {
+                    self.reportNativeNotificationStatus(status: label, message: "macOS notification permission is \(label).")
+                    self.pollLearningNotifications()
+                }
+            }
+            return
+        }
+        if action == "pollNow" {
+            pollLearningNotifications()
+            return
+        }
+        let title = body["title"] as? String ?? "Learning Boost"
+        let message = body["body"] as? String ?? body["message"] as? String ?? "Learning Boost needs attention."
+        postLearningNotification(id: body["id"] as? String, title: title, body: message) { error in
+            if let error {
+                self.reportNativeNotificationStatus(status: error.hasPrefix("permission_denied") ? "permission_denied" : "failed", message: error)
+            } else {
+                self.reportNativeNotificationStatus(status: "delivered", message: "macOS accepted the notification.")
+            }
+        }
+    }
+
+    private func pollLearningNotifications() {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/api/learning/notifications?pendingNative=1&limit=8") else { return }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+        request.timeoutInterval = 4
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let notifications = json["notifications"] as? [[String: Any]] else { return }
+            if notifications.isEmpty { return }
+            self.requestNotificationAuthorizationIfNeeded { _, authorizationError in
+                if let authorizationError {
+                    let action = authorizationError.hasPrefix("permission_denied") ? "permission_denied" : "native_failed"
+                    for item in notifications {
+                        guard let id = item["id"] as? String,
+                              let vault = item["vault"] as? String else { continue }
+                        self.markLearningNotification(vault: vault, id: id, action: action, nativeError: authorizationError)
+                    }
+                    self.reportNativeNotificationStatus(
+                        status: action == "permission_denied" ? "permission_denied" : "failed",
+                        message: authorizationError
+                    )
+                    return
+                }
+                for item in notifications {
+                    guard let id = item["id"] as? String,
+                          let vault = item["vault"] as? String else { continue }
+                    let title = item["title"] as? String ?? "Learning Boost"
+                    let body = item["body"] as? String ?? item["detail"] as? String ?? "Learning Boost needs attention."
+                    self.deliverLearningNotification(id: id, title: title, body: body) { error in
+                        if let error {
+                            let action = error.hasPrefix("permission_denied") ? "permission_denied" : "native_failed"
+                            self.markLearningNotification(vault: vault, id: id, action: action, nativeError: error)
+                            self.reportNativeNotificationStatus(status: action == "permission_denied" ? "permission_denied" : "failed", message: error)
+                        } else {
+                            self.markLearningNotification(vault: vault, id: id, action: "delivered")
+                            self.reportNativeNotificationStatus(status: "delivered", message: "macOS accepted the notification.")
+                        }
+                    }
+                }
+            }
+        }.resume()
+    }
+
+    private func postLearningNotification(id: String?, title: String, body: String, completion: @escaping (String?) -> Void) {
+        requestNotificationAuthorizationIfNeeded { _, error in
+            if let error {
+                completion(error)
+                return
+            }
+            self.deliverLearningNotification(id: id, title: title, body: body, completion: completion)
+        }
+    }
+
+    private func requestNotificationAuthorizationIfNeeded(completion: @escaping (UNAuthorizationStatus, String?) -> Void) {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.getNotificationSettings { settings in
+            let status = settings.authorizationStatus
+            if self.isNotificationAuthorized(status) {
+                completion(status, nil)
+                return
+            }
+            if status == .denied {
+                completion(status, "permission_denied: macOS notification authorization is denied.")
+                return
+            }
+            if status != .notDetermined {
+                completion(status, "native_failed: macOS notification authorization is \(self.authorizationStatusLabel(status)).")
+                return
+            }
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+                center.requestAuthorization(options: [.alert, .sound, .badge]) { _, requestError in
+                    center.getNotificationSettings { updatedSettings in
+                        let updatedStatus = updatedSettings.authorizationStatus
+                        if let requestError {
+                            completion(updatedStatus, "native_failed: \(requestError.localizedDescription)")
+                            return
+                        }
+                        if self.isNotificationAuthorized(updatedStatus) {
+                            completion(updatedStatus, nil)
+                            return
+                        }
+                        if updatedStatus == .denied {
+                            completion(updatedStatus, "permission_denied: macOS notification authorization is denied.")
+                            return
+                        }
+                        completion(updatedStatus, "native_failed: macOS notification authorization is \(self.authorizationStatusLabel(updatedStatus)).")
+                    }
+                }
+            }
+        }
+    }
+
+    private func isNotificationAuthorized(_ status: UNAuthorizationStatus) -> Bool {
+        status == .authorized || status == .provisional
+    }
+
+    private func deliverLearningNotification(id: String?, title: String, body: String, completion: @escaping (String?) -> Void) {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: id ?? "learning-boost-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        center.add(request) { error in
+            completion(error?.localizedDescription)
+        }
+    }
+
+    private func markLearningNotification(vault: String, id: String, action: String, nativeError: String = "") {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/api/learning/notification-action") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 4
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "vault": vault,
+            "id": id,
+            "action": action,
+            "nativeError": nativeError
+        ])
+        URLSession.shared.dataTask(with: request).resume()
+    }
+
+    private func authorizationStatusLabel(_ status: UNAuthorizationStatus) -> String {
+        switch status {
+        case .notDetermined:
+            return "not_determined"
+        case .denied:
+            return "denied"
+        case .authorized:
+            return "authorized"
+        case .provisional:
+            return "provisional"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    private func reportNativeNotificationStatus(status: String, message: String = "") {
+        let payload: [String: Any] = ["status": status, "message": message]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return }
+        DispatchQueue.main.async {
+            self.webView?.evaluateJavaScript("window.dispatchEvent(new CustomEvent('learning-native-notification-status', { detail: \(json) }));", completionHandler: nil)
+        }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        if #available(macOS 11.0, *) {
+            completionHandler([.banner, .sound])
+        } else {
+            completionHandler([.alert, .sound])
+        }
     }
 
     private func installStatusItem() {
@@ -556,6 +809,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func startServer() {
+        if serverIsReachableSync(timeout: 1.5) {
+            appendServerLog(Data("[native] using existing healthy server on 127.0.0.1:\(port)\n".utf8))
+            serverRestartAttempts = 0
+            serverHealthFailures = 0
+            return
+        }
         stopServerOnConfiguredPort()
         let process = Process()
         process.currentDirectoryURL = agentURL
@@ -566,19 +825,97 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         var env = ProcessInfo.processInfo.environment
         env["LLM_WIKI_ENV_FILE"] = configURL.path
+        env["LEARNING_BOOST_TIME_ZONE"] = env["LEARNING_BOOST_TIME_ZONE"] ?? "America/Regina"
+        env["TZ"] = env["TZ"] ?? "America/Regina"
         env["PATH"] = expandedPath()
         process.environment = env
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            self?.appendServerLog(handle.availableData)
+        }
+        errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            self?.appendServerLog(handle.availableData)
+        }
+        process.terminationHandler = { [weak self, weak process] terminatedProcess in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let finishedProcess = process, self.serverProcess === finishedProcess {
+                    self.serverProcess = nil
+                }
+                guard !self.isTerminating else { return }
+                guard terminatedProcess.terminationStatus != 0 else { return }
+                guard self.serverRestartAttempts < 2 else { return }
+                self.serverRestartAttempts += 1
+                self.startServer()
+                self.loadAppWhenReady()
+            }
+        }
         serverProcess = process
         do {
             try process.run()
+            serverRestartAttempts = 0
+            serverHealthFailures = 0
+            scheduleServerHealthWatchdog(after: 45)
         } catch {
             showAlert("Node.js required", "Install Node.js, then restart LLM Agent Learning Boost.\n\nThe app checks /opt/homebrew/bin/node, /usr/local/bin/node, and PATH.\n\nError: \(error.localizedDescription)")
         }
     }
 
+    private func appendServerLog(_ data: Data) {
+        guard !data.isEmpty else { return }
+        do {
+            try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: serverLogURL.path) {
+                FileManager.default.createFile(atPath: serverLogURL.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: serverLogURL)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.close()
+        } catch {
+            // Server logging must not affect the app.
+        }
+    }
+
+    private func scheduleServerHealthWatchdog(after delay: TimeInterval = 60) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.checkServerHealthAndRestartIfNeeded()
+        }
+    }
+
+    private func checkServerHealthAndRestartIfNeeded() {
+        guard !isTerminating, serverProcess?.isRunning == true,
+              let statusURL = URL(string: "http://127.0.0.1:\(port)/api/status") else { return }
+        var request = URLRequest(url: statusURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+        request.timeoutInterval = 5
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            let ok = (response as? HTTPURLResponse)?.statusCode == 200 && !(data?.isEmpty ?? true)
+            DispatchQueue.main.async {
+                guard !self.isTerminating else { return }
+                if ok {
+                    self.serverHealthFailures = 0
+                    self.scheduleServerHealthWatchdog(after: 60)
+                    return
+                }
+                self.serverHealthFailures += 1
+                self.appendServerLog(Data("[native] server health check failed \(self.serverHealthFailures) time(s)\n".utf8))
+                if self.serverHealthFailures >= 2 {
+                    self.serverHealthFailures = 0
+                    self.terminateServerProcess()
+                    self.startServer()
+                    self.loadAppWhenReady()
+                } else {
+                    self.scheduleServerHealthWatchdog(after: 20)
+                }
+            }
+        }.resume()
+    }
+
     private func restartServerAndReload() {
-        serverProcess?.terminate()
-        serverProcess = nil
+        terminateServerProcess()
         startServer()
         loadAppWhenReady()
     }
@@ -954,9 +1291,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         for line in output.split(separator: "\n") {
             let pid = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
             if !pid.isEmpty && pid != String(ProcessInfo.processInfo.processIdentifier) {
+                terminateChildren(of: pid)
                 _ = runQuick(["kill", pid])
+                usleep(300_000)
+                let remaining = runQuick(["lsof", "-nP", "-tiTCP:\(port)", "-sTCP:LISTEN"])
+                if remaining.split(separator: "\n").contains(where: { String($0).trimmingCharacters(in: .whitespacesAndNewlines) == pid }) {
+                    _ = runQuick(["kill", "-9", pid])
+                    usleep(200_000)
+                }
             }
         }
+    }
+
+    private func serverIsReachableSync(timeout: TimeInterval) -> Bool {
+        guard let statusURL = URL(string: "http://127.0.0.1:\(port)/api/status") else { return false }
+        var request = URLRequest(url: statusURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+        request.timeoutInterval = timeout
+        let semaphore = DispatchSemaphore(value: 0)
+        var ok = false
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            ok = (response as? HTTPURLResponse)?.statusCode == 200 && !(data?.isEmpty ?? true)
+            semaphore.signal()
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + timeout + 0.5)
+        return ok
+    }
+
+    private func terminateServerProcess() {
+        guard let process = serverProcess else { return }
+        let pid = String(process.processIdentifier)
+        terminateChildren(of: pid)
+        process.terminate()
+        serverProcess = nil
+    }
+
+    private func terminateChildren(of pid: String) {
+        guard !pid.isEmpty else { return }
+        _ = runQuick(["pkill", "-TERM", "-P", pid])
     }
 
     private func runStartupChecks() {
@@ -1038,7 +1409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return true
         }
         if provider == "openai_subscription" {
-            return runQuick(["codex", "login", "status"]).lowercased().contains("logged in")
+            return commandExists("codex")
         }
         let keyNames = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_COMPAT_API_KEY", "GEMINI_API_KEY", "GEMINI_OAUTH_ACCESS_TOKEN"]
         return keyNames.contains { key in
@@ -1067,8 +1438,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         p.standardOutput = pipe
         p.standardError = pipe
         try? p.run()
-        p.waitUntilExit()
+        let deadline = Date().addingTimeInterval(3)
+        while p.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if p.isRunning {
+            p.terminate()
+            Thread.sleep(forTimeInterval: 0.1)
+            if p.isRunning {
+                kill(p.processIdentifier, SIGKILL)
+            }
+        }
         return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    }
+
+    private func commandExists(_ command: String) -> Bool {
+        for folder in expandedPath().split(separator: ":") {
+            let path = "\(folder)/\(command)"
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return true
+            }
+        }
+        return false
     }
 
     private func expandTilde(_ path: String) -> String {

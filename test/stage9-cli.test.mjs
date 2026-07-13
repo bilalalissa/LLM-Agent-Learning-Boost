@@ -3,7 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { backfillLearningBoost, detectExistingSourcePages } from "../src/backfill-learning-boost.mjs";
+import { backfillLearningSections } from "../src/backfill-learning-sections.mjs";
+import { backfillLearningBoost, backfillSourceMap, detectExistingSourcePages } from "../src/backfill-learning-boost.mjs";
+import { activateLearningPlan, draftLearningPlans, readLearningGoals, readLearningPlans, readSourceLinks } from "../src/learning-planner.mjs";
 import { learningCheck, REQUIRED_DOCS, REQUIRED_SCRIPTS } from "../src/learning-check.mjs";
 import { runLearningPlanCli } from "../src/learning-plan-cli.mjs";
 import { ensureLearningScaffold, learningPaths } from "../src/learning-store.mjs";
@@ -35,6 +37,32 @@ function writeSourcePage(vault, name = "existing-source.md") {
   const file = path.join(vault, "wiki", "sources", name);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `# Existing Source\n\n## Summary\n\nThis source explains retrieval practice.\n\n## Key Points\n\n- Retrieval practice improves memory.\n- Short sessions reduce load.\n\n## User Notes\n\nDo not overwrite this note.\n`);
+  return file;
+}
+
+function writePendingMediaSourcePage(vault, name = "pending-audio.md") {
+  const file = path.join(vault, "wiki", "sources", name);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `---
+type: source
+status: pending_content
+media_kind: audio
+media_analyzed: false
+media_analysis_status: pending_content
+source_path: raw/assets/pending-audio.mp3
+---
+
+# Pending Audio
+
+## Summary
+
+audio source preserved as a local asset. Learning analysis is pending because no readable transcript, OCR text, or manual description was available.
+
+## Key Points
+
+- Preserved local asset: raw/assets/pending-audio.mp3.
+- No source claims were generated because the media content has not been transcribed or inspected.
+`);
   return file;
 }
 
@@ -83,6 +111,99 @@ test("backfillLearningBoost generates learning outputs only once when provider i
   assert.equal(second.results[0].generated, 0);
   assert.ok(cards.length > 0);
   assert.ok(bits.length > 0);
+});
+
+test("backfillLearningBoost skips pending metadata-only media pages", async () => {
+  const { root, vault } = makeVaultRoot();
+  writePendingMediaSourcePage(vault);
+  const result = await backfillLearningBoost(makeConfig(root), {
+    providerStatus: { statusColor: "green", statusDetail: "Connected" }
+  });
+  const paths = learningPaths(vault);
+
+  assert.equal(result.results[0].detected, 0);
+  assert.equal(result.results[0].generated, 0);
+  assert.equal(fs.readFileSync(path.join(paths.dir, "cards.jsonl"), "utf8").trim(), "");
+  assert.equal(fs.readFileSync(path.join(paths.dir, "bits.jsonl"), "utf8").trim(), "");
+});
+
+test("backfillLearningBoost can derive outputs from existing source pages without provider probe", async () => {
+  const { root, vault } = makeVaultRoot();
+  writeSourcePage(vault, "local-existing-source.md");
+  const result = await backfillLearningBoost(makeConfig(root), {
+    assumeProviderAvailable: true
+  });
+  const paths = learningPaths(vault);
+  const cards = fs.readFileSync(path.join(paths.dir, "cards.jsonl"), "utf8").trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
+  const bits = fs.readFileSync(path.join(paths.dir, "bits.jsonl"), "utf8").trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
+
+  assert.equal(result.results[0].generated, 1);
+  assert.equal(result.provider.statusDetail, "Using existing source pages for local Learning Boost backfill.");
+  assert.ok(cards.some((card) => card.sourcePage === "wiki/sources/local-existing-source.md"));
+  assert.ok(bits.some((bit) => bit.sourcePage === "wiki/sources/local-existing-source.md"));
+});
+
+test("backfillLearningSections adds Learning Boost to existing source pages without overwriting user notes", () => {
+  const { root, vault } = makeVaultRoot();
+  writeSourcePage(vault, "older-source.md");
+
+  const result = backfillLearningSections(makeConfig(root));
+  const page = fs.readFileSync(path.join(vault, "wiki", "sources", "older-source.md"), "utf8");
+
+  assert.equal(result.some((item) => item.file === "wiki/sources/older-source.md"), true);
+  assert.match(page, /## Learning Boost/);
+  assert.match(page, /### Learning Bits/);
+  assert.match(page, /Do not overwrite this note/);
+});
+
+test("backfillLearningSections does not add learning sections to pending media", () => {
+  const { root, vault } = makeVaultRoot();
+  writePendingMediaSourcePage(vault, "pending-media-source.md");
+
+  const result = backfillLearningSections(makeConfig(root));
+  const page = fs.readFileSync(path.join(vault, "wiki", "sources", "pending-media-source.md"), "utf8");
+
+  assert.equal(result.some((item) => item.file === "wiki/sources/pending-media-source.md"), false);
+  assert.doesNotMatch(page, /## Learning Boost/);
+});
+
+test("backfillSourceMap links older processed sources without provider or duplicate cards", () => {
+  const { root, vault } = makeVaultRoot();
+  writeSourcePage(vault, "agent-memory.md");
+  captureResource(vault, {
+    sourceType: "manual_import",
+    title: "Agent memory article",
+    topic: "AI",
+    userApproved: true
+  });
+  const draft = draftLearningPlans(vault, { now: "2026-07-02T12:00:00.000Z" });
+  activateLearningPlan(vault, draft.plans[0].id, { confirmed: true });
+  const paths = learningPaths(vault);
+  const goalsPath = path.join(paths.dir, "goals.jsonl");
+  const plansPath = path.join(paths.dir, "plans.jsonl");
+  const goalsBefore = fs.readFileSync(goalsPath, "utf8").trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
+  const plansBefore = fs.readFileSync(plansPath, "utf8").trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
+  fs.writeFileSync(goalsPath, [{ ...goalsBefore[0], id: "archived-goal", status: "archived", resources: [] }, ...goalsBefore].map((item) => JSON.stringify(item)).join("\n") + "\n");
+  fs.writeFileSync(plansPath, [{ ...plansBefore[0], id: "archived-plan", status: "archived", stages: [] }, ...plansBefore].map((item) => JSON.stringify(item)).join("\n") + "\n");
+  const cardsBefore = fs.readFileSync(path.join(paths.dir, "cards.jsonl"), "utf8");
+
+  const first = backfillSourceMap(makeConfig(root), { rebuildSourceMap: true });
+  const second = backfillSourceMap(makeConfig(root));
+  const sourceLinks = readSourceLinks(vault);
+  const goals = readLearningGoals(vault);
+  const plans = readLearningPlans(vault);
+  const sourceMap = fs.readFileSync(path.join(vault, "wiki", "learning", "source-map.md"), "utf8");
+  const cardsAfter = fs.readFileSync(path.join(paths.dir, "cards.jsonl"), "utf8");
+
+  assert.equal(first.results[0].linked, 1);
+  assert.equal(second.results[0].linked, 0);
+  assert.equal(sourceLinks.length, 1);
+  assert.equal(sourceLinks[0].linkedGoals.length, 1);
+  assert.equal(sourceLinks[0].linkedPlans.length, 1);
+  assert.equal(cardsAfter, cardsBefore);
+  assert.match(sourceMap, /Existing Source/);
+  assert.ok(goals.find((goal) => goal.status !== "archived")?.resources.includes("wiki/sources/agent-memory.md"));
+  assert.ok(plans.find((plan) => plan.status !== "archived")?.stages.some((stage) => (stage.sourceResourceIds || []).includes("wiki/sources/agent-memory.md")));
 });
 
 test("backfillLearningBoost asks before large generation", async () => {

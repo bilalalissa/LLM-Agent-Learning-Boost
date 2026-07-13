@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import { formatLocalDateTime } from "./time.mjs";
 import { execFileSync } from "node:child_process";
 import { createProvider } from "./provider.mjs";
 import {
   appendLearningOutputs,
   fallbackLearningBoost,
+  learningBoostCardQualityRules,
   learningBoostJsonShape,
   normalizeLearningBoost,
   renderLearningBoostSection
@@ -21,15 +23,31 @@ import {
   vaultName
 } from "./vaults.mjs";
 
-export async function ingestVault(vaultPath, config, provider = createProvider(config)) {
-  const candidates = listRawCandidates(vaultPath);
+export async function ingestVault(vaultPath, config, provider = createProvider(config), options = {}) {
+  const requestedLimit = Number(options.limit || options.resourceLimit || 0);
+  const limit = Number.isFinite(requestedLimit) && requestedLimit > 0 ? Math.floor(requestedLimit) : 0;
+  const rawCandidates = options.skipRawCandidates === true ? [] : listRawCandidates(vaultPath);
+  const candidates = limit > 0
+    ? rawCandidates.slice(0, limit)
+    : rawCandidates;
   const results = [];
   for (const sourcePath of candidates) {
     await yieldToEventLoop();
     results.push(await ingestFile(vaultPath, sourcePath, config, provider));
   }
-  if (process.env.LLM_WIKI_REPROCESS_PENDING_MEDIA === "1") {
-    results.push(...await reprocessPendingMediaPages(vaultPath, provider));
+  const shouldReprocessPendingMedia = options.reprocessPendingMedia === true || process.env.LLM_WIKI_REPROCESS_PENDING_MEDIA === "1";
+  if (shouldReprocessPendingMedia) {
+    const pendingMediaLimit = Number.isFinite(Number(options.pendingMediaLimit))
+      ? Number(options.pendingMediaLimit)
+      : (options.reprocessPendingMedia === true ? 2 : 0);
+    results.push(...await reprocessPendingMediaPages(vaultPath, provider, {
+      limit: pendingMediaLimit,
+      maxScanned: options.pendingMediaScanLimit,
+      sourcePages: options.pendingMediaSourcePages,
+      preserveHistory: options.preserveReprocessHistory === true,
+      ingestMaxChars: config.ingestMaxChars,
+      config
+    }));
   }
   return results;
 }
@@ -50,15 +68,47 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
   const processedRel = uniqueRel(vaultPath, `raw/processed/${date}--${slug}${processedExt}`);
   const sourceRel = `wiki/sources/${date}--${slug}.md`;
 
-  const analysis = await analyzeSource(provider, {
+  const analysisInput = {
     contract,
     index,
     sourceTitle,
     sourcePath: path.relative(vaultPath, sourcePath),
     sourceText,
     processedSource,
-    vault: vaultName(vaultPath)
-  });
+    vault: vaultName(vaultPath),
+    allowBaselineFallback: config.allowBaselineAnalysis === true || config.ingestAllowBaselineFallback === true
+  };
+  if (sourceRequiresExtractedContent(processedSource) && !hasMeaningfulExtractedContent(processedSource)) {
+    const analysis = pendingFileAnalysis(processedSource, analysisInput);
+    ensureDir(path.join(vaultPath, "wiki/sources"));
+    ensureDir(path.join(vaultPath, "raw/processed"));
+    fs.writeFileSync(path.join(vaultPath, sourceRel), renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource }));
+    updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages: [] });
+    appendLog(vaultPath, {
+      date,
+      sourceRel,
+      sourcePath,
+      processedRel,
+      sourceTitle,
+      conceptPages: [],
+      receivedAt,
+      sourceKind: `${processedSource.kind || "source"} pending_content`
+    });
+    const processedPath = path.join(vaultPath, processedRel);
+    if (path.resolve(sourcePath) !== path.resolve(processedPath)) {
+      fs.renameSync(sourcePath, processedPath);
+    }
+    return {
+      vault: vaultName(vaultPath),
+      source: path.relative(vaultPath, sourcePath),
+      sourcePage: sourceRel,
+      processed: processedRel,
+      conceptPages: [],
+      learning: { cardsCreated: 0, bitsCreated: 0, pendingContent: true },
+      pendingContent: true
+    };
+  }
+  const analysis = await analyzeSource(provider, analysisInput);
 
   ensureDir(path.join(vaultPath, "wiki/sources"));
   ensureDir(path.join(vaultPath, "wiki/concepts"));
@@ -120,6 +170,39 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
 
   const media = mediaMetadata(assetPath, assetRel, mediaKind, ext);
   const processedSource = processSourceFile(assetPath, { ingestMaxChars: config.ingestMaxChars, assetRel });
+  if (mediaRequiresExtractedContent(mediaKind) && !hasMeaningfulExtractedContent(processedSource)) {
+    const analysis = pendingMediaAnalysis(media, { sourceTitle, processedSource });
+    fs.writeFileSync(sourcePagePath, renderMediaSourcePage({
+      date,
+      sourceTitle,
+      assetRel,
+      mediaKind,
+      ext,
+      media,
+      analysis,
+      processedSource
+    }));
+    updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages: [] });
+    appendLog(vaultPath, {
+      date,
+      sourceRel,
+      sourcePath,
+      processedRel: assetRel,
+      sourceTitle,
+      conceptPages: [],
+      receivedAt,
+      sourceKind: `${mediaKind} pending_content`
+    });
+    return {
+      vault: vaultName(vaultPath),
+      source: path.relative(vaultPath, sourcePath),
+      sourcePage: sourceRel,
+      processed: assetRel,
+      conceptPages: [],
+      learning: { cardsCreated: 0, bitsCreated: 0, pendingContent: true },
+      pendingContent: true
+    };
+  }
   const analysis = await analyzeMediaSource(provider, {
     sourceTitle,
     media,
@@ -139,17 +222,20 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
     processedSource
   }));
 
-  const conceptPages = createConceptPages(vaultPath, { date, analysis, sourceRel });
+  const learningReady = Boolean(analysis.learning_boost);
+  const conceptPages = learningReady ? createConceptPages(vaultPath, { date, analysis, sourceRel }) : [];
 
   updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages });
-  const learningResult = appendLearningOutputs(vaultPath, {
-    sourceRel,
-    sourceTitle,
-    processedRel: assetRel,
-    boost: analysis.learning_boost,
-    sourceKind: mediaKind,
-    processingNotes: [...(processedSource.processingNotes || []), ...(analysis.processing_notes || [])]
-  }, config);
+  const learningResult = learningReady
+    ? appendLearningOutputs(vaultPath, {
+      sourceRel,
+      sourceTitle,
+      processedRel: assetRel,
+      boost: analysis.learning_boost,
+      sourceKind: mediaKind,
+      processingNotes: [...(processedSource.processingNotes || []), ...(analysis.processing_notes || [])]
+    }, config)
+    : { cardsCreated: 0, bitsCreated: 0, pendingProviderAnalysis: true };
   appendLog(vaultPath, {
     date,
     sourceRel,
@@ -158,7 +244,7 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
     sourceTitle,
     conceptPages,
     receivedAt,
-    sourceKind: mediaKind
+    sourceKind: learningReady ? mediaKind : `${mediaKind} pending_provider_analysis`
   });
 
   return {
@@ -171,17 +257,23 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
   };
 }
 
-async function reprocessPendingMediaPages(vaultPath, provider) {
-  const sourceDir = path.join(vaultPath, "wiki", "sources");
-  const results = [];
-  const files = [];
-  if (!fs.existsSync(sourceDir)) return results;
-  walk(sourceDir, files);
+export function countPendingMediaPages(vaultPath, options = {}) {
+  return pendingMediaPagePaths(vaultPath, options).length;
+}
 
-  for (const sourcePagePath of files.filter((file) => file.endsWith(".md"))) {
+async function reprocessPendingMediaPages(vaultPath, provider, options = {}) {
+  const results = [];
+  const limit = Math.max(0, Number(options.limit || 0));
+  let attempted = 0;
+
+  for (const sourcePagePath of pendingMediaPagePaths(vaultPath, {
+    limit,
+    maxScanned: options.maxScanned,
+    providerReadyOnly: options.providerReadyOnly,
+    sourcePages: options.sourcePages
+  })) {
     await yieldToEventLoop();
     const text = fs.readFileSync(sourcePagePath, "utf8");
-    if (!/^media_kind:\s*.+$/m.test(text) || /^media_analysis_status:\s*analyzed\s*$/m.test(text)) continue;
     const assetRel = text.match(/^source_path:\s*(.+)$/m)?.[1]?.trim().replace(/^["']|["']$/g, "");
     const mediaKind = text.match(/^media_kind:\s*(.+)$/m)?.[1]?.trim() || "media";
     if (!assetRel) continue;
@@ -192,10 +284,13 @@ async function reprocessPendingMediaPages(vaultPath, provider) {
     const sourceTitle = text.match(/^#\s+(.+)$/m)?.[1]?.trim() || path.basename(assetPath, path.extname(assetPath));
     const ext = path.extname(assetPath).toLowerCase();
     const media = mediaMetadata(assetPath, assetRel, mediaKind, ext);
-    const processedSource = processSourceFile(assetPath, { assetRel });
-    const analysis = await analyzeMediaSource(provider, { sourceTitle, media, assetPath, processedSource, vault: vaultName(vaultPath) });
+    const processedSource = processSourceFile(assetPath, { assetRel, ingestMaxChars: options.ingestMaxChars });
+    const analysis = mediaRequiresExtractedContent(mediaKind) && !hasMeaningfulExtractedContent(processedSource)
+      ? pendingMediaAnalysis(media, { sourceTitle, processedSource })
+      : await analyzeMediaSource(provider, { sourceTitle, media, assetPath, processedSource, vault: vaultName(vaultPath) });
     const userNotes = text.match(/\n## User Notes[\s\S]*$/m)?.[0] || "";
     const sourceRel = path.relative(vaultPath, sourcePagePath).replace(/\\/g, "/");
+    const historyRel = options.preserveHistory ? preserveReprocessHistory(vaultPath, sourceRel, text) : "";
 
     fs.writeFileSync(sourcePagePath, renderMediaSourcePage({
       date,
@@ -208,8 +303,19 @@ async function reprocessPendingMediaPages(vaultPath, provider) {
       processedSource
     }) + userNotes);
 
-    const conceptPages = createConceptPages(vaultPath, { date, analysis, sourceRel });
+    const learningReady = Boolean(analysis.learning_boost);
+    const conceptPages = learningReady ? createConceptPages(vaultPath, { date, analysis, sourceRel }) : [];
     updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages });
+    const learningResult = learningReady
+      ? appendLearningOutputs(vaultPath, {
+        sourceRel,
+        sourceTitle,
+        processedRel: assetRel,
+        boost: analysis.learning_boost,
+        sourceKind: `${mediaKind} reprocess`,
+        processingNotes: [...(processedSource.processingNotes || []), ...(analysis.processing_notes || [])]
+      }, options.config || {})
+      : { cardsCreated: 0, bitsCreated: 0, pendingProviderAnalysis: analysis.status === "pending_provider_analysis", pendingContent: analysis.status === "pending_content" };
     appendLog(vaultPath, {
       date,
       sourceRel,
@@ -227,10 +333,72 @@ async function reprocessPendingMediaPages(vaultPath, provider) {
       sourcePage: sourceRel,
       processed: assetRel,
       conceptPages,
-      reprocessed: true
+      learning: learningResult,
+      reprocessed: true,
+      history: historyRel,
+      pendingContent: analysis.status === "pending_content",
+      pendingProviderAnalysis: analysis.status === "pending_provider_analysis"
     });
+    attempted += 1;
+    if (limit > 0 && attempted >= limit) break;
   }
   return results;
+}
+
+function pendingMediaPagePaths(vaultPath, options = {}) {
+  const sourceDir = path.join(vaultPath, "wiki", "sources");
+  const limit = Math.max(0, Number(options.limit || 0));
+  const maxScanned = Math.max(0, Number(options.maxScanned || 0));
+  const providerReadyOnly = options.providerReadyOnly !== false;
+  const selected = new Set((Array.isArray(options.sourcePages) ? options.sourcePages : [])
+    .map((item) => normalizeSourcePageRel(item))
+    .filter(Boolean));
+  const result = [];
+  const files = [];
+  if (!fs.existsSync(sourceDir)) return result;
+  walk(sourceDir, files);
+
+  let scanned = 0;
+  for (const sourcePagePath of files.filter((file) => file.endsWith(".md"))) {
+    const rel = path.relative(vaultPath, sourcePagePath).replace(/\\/g, "/");
+    if (selected.size && !selected.has(normalizeSourcePageRel(rel))) continue;
+    scanned += 1;
+    if (maxScanned > 0 && scanned > maxScanned) break;
+    const text = fs.readFileSync(sourcePagePath, "utf8");
+    if (!/^media_kind:\s*.+$/m.test(text)) continue;
+    if (/^media_analysis_status:\s*analyzed\s*$/m.test(text)) continue;
+    if (providerReadyOnly && !mediaPageReadyForProviderRetry(text)) continue;
+    const assetRel = text.match(/^source_path:\s*(.+)$/m)?.[1]?.trim().replace(/^["']|["']$/g, "");
+    if (!assetRel || !fs.existsSync(path.join(vaultPath, assetRel))) continue;
+    result.push(sourcePagePath);
+    if (limit > 0 && result.length >= limit) break;
+  }
+  return result;
+}
+
+function normalizeSourcePageRel(value) {
+  const rel = String(value || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!rel) return "";
+  return rel.endsWith(".md") ? rel : `${rel}.md`;
+}
+
+function preserveReprocessHistory(vaultPath, sourceRel, text) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const sourceBase = slugify(path.basename(sourceRel, ".md") || "source");
+  const rel = `.llm-wiki/learning/reprocess-history/${sourceBase}/${stamp}.md`;
+  const file = path.join(vaultPath, rel);
+  ensureDir(path.dirname(file));
+  fs.writeFileSync(file, text);
+  return rel;
+}
+
+function mediaPageReadyForProviderRetry(text) {
+  const mediaStatus = text.match(/^media_analysis_status:\s*(.+)$/m)?.[1]?.trim().toLowerCase() || "";
+  if (mediaStatus === "pending_provider_analysis") return true;
+  if (mediaStatus === "pending_content") return false;
+  if (/Provider call attempted:\s*yes/i.test(text) && /Extracted text\/transcript\/OCR sent:\s*yes/i.test(text)) return true;
+  if (/^##\s+(Extracted Text|Transcript|OCR Text)\b/im.test(text) && !/no readable transcript|no readable OCR|content extraction is pending/i.test(text)) return true;
+  return false;
 }
 
 function yieldToEventLoop() {
@@ -268,13 +436,28 @@ Media file path: ${input.assetPath}
 Media metadata:
 ${JSON.stringify(input.media, null, 2)}
 
+Provider input boundary:
+- The selected provider receives this text prompt only.
+- Raw media bytes are not attached to provider requests by Learning Boost.
+- The local file path is traceability evidence for the vault; do not assume you can inspect that path.
+- Analyze only extracted OCR text, transcript text, manual description, and metadata supplied in this prompt.
+- If extracted content is insufficient, say that content analysis is incomplete instead of inventing visual, audio, or document facts.
+
 Extracted local text, transcript, or manual description if available:
 ${input.processedSource?.text || ""}
 
 Processor notes:
 ${(input.processedSource?.processingNotes || []).join("\n")}
 
-If you can inspect the local media file, extract visible/audible/document insights. If you cannot inspect the file content, use only metadata and clearly say that the content was not visually/audibly analyzed.
+Learning card quality rules:
+${learningBoostCardQualityRules()}
+
+Technical reference rule:
+- Treat the source as a reusable reference, not only a summary.
+- Extract every included step, instruction, command, code block, solution, quality, property, formula, equation, parameter, endpoint, configuration value, constraint, and caveat that is grounded in the supplied text.
+- Put those details in learning_boost.technical_reference and details_to_keep.
+- Create learning_bits and general_cards that help the learner recall or apply those exact technical details.
+- Preserve exact code, commands, formulas, equations, variable names, settings, and values. Do not invent missing technical details.
 
 Return strict JSON with this shape:
 {
@@ -303,8 +486,7 @@ Return strict JSON with this shape:
 }
 
 function parseMediaJson(text, media, input = {}) {
-  const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
-  const raw = JSON.parse(cleaned);
+  const raw = parseProviderJson(text);
   const parsed = {
     summary: String(raw.summary || ""),
     language: String(raw.language || ""),
@@ -314,7 +496,8 @@ function parseMediaJson(text, media, input = {}) {
     open_questions: asLearningItems(raw.open_questions),
     contradictions: asArray(raw.contradictions),
     source_learning_questions: asLearningItems(raw.source_learning_questions),
-    open_learning_questions: asLearningItems(raw.open_learning_questions)
+    open_learning_questions: asLearningItems(raw.open_learning_questions),
+    processing_notes: asArray(raw.processing_notes)
   };
   const context = analysisContext(input, {
     sourceRel: "",
@@ -324,50 +507,130 @@ function parseMediaJson(text, media, input = {}) {
     evidence: input.processedSource?.evidence || [media.assetRel],
     mediaRefs: [media.assetRel]
   });
+  const enriched = enrichParsedAnalysis(parsed, {
+    ...input,
+    sourceText: input.processedSource?.text || "",
+    sourceTitle: input.sourceTitle,
+    sourcePath: media.assetRel
+  }, "Provider returned sparse media JSON; local extracted text and metadata filled missing analysis fields.");
   return {
-    ...parsed,
-    processing_notes: asArray(raw.processing_notes),
-    learning_boost: normalizeLearningBoost(raw.learning_boost || {}, { ...context, summary: parsed.summary, language: parsed.language }),
+    ...enriched,
+    processing_notes: uniqueStrings([...asArray(raw.processing_notes), ...asArray(enriched.processing_notes)]),
+    learning_boost: normalizeLearningBoost(raw.learning_boost || {}, { ...context, summary: enriched.summary, language: enriched.language }),
     analyzed: true,
     status: "analyzed"
   };
 }
 
 function fallbackMediaAnalysis(media, error, input = {}) {
-  const parsed = {
-    summary: `${media.kind} source preserved as a local asset. The configured provider did not return a media analysis, so this page records metadata and keeps the source available for later review.`,
+  const extracted = hasMeaningfulExtractedContent(input.processedSource);
+  return {
+    summary: `${media.kind} source preserved as a local asset. Provider analysis is pending because the configured provider did not return usable analysis from the extracted local text/metadata. Raw media bytes were not sent to the provider.`,
     language: "unknown",
     key_points: [
-      `Local asset path: ${media.assetRel}.`,
-      `Media kind: ${media.kind}.`,
-      `File size: ${media.sizeLabel}.`
+      `Preserved local asset: ${media.assetRel}.`,
+      extracted
+        ? "Extracted local text was available for the provider request, but provider media analysis did not complete."
+        : "No readable local text was available for provider analysis.",
+      "No source claims were generated from raw media bytes."
     ],
-    concepts: [{ name: `${media.kind} source`, summary: `A locally preserved ${media.kind} file awaiting deeper interpretation.` }],
+    concepts: [],
     entities: [],
     open_questions: [{
       question: "What does this media show, contain, or prove?",
-      answer: "This remains unresolved until the media content is inspected or the user supplies a reliable description."
+      answer: "Pending. Reprocess the source after the selected provider can analyze the extracted transcript, OCR text, or description."
     }],
     contradictions: [],
-    source_learning_questions: [{
-      question: `What should I learn from this ${media.kind} source before connecting it to other notes?`,
-      answer: `Use the preserved metadata and any later human or provider inspection to identify what the ${media.kind} source actually contains before drawing conclusions.`
-    }],
-    open_learning_questions: [{
-      question: `How does this ${media.kind} source connect to broader concepts, tools, or real-world contexts?`,
-      answer: "Treat this as an open connection until the media content is inspected; then link it to the relevant concepts, tools, systems, or examples."
-    }],
-    processing_notes: [`Media analysis fallback used: ${error.message}`],
+    source_learning_questions: [],
+    open_learning_questions: [],
+    processing_notes: [
+      ...(input.processedSource?.processingNotes || []),
+      "Provider received a text prompt containing extracted local text/metadata only; raw media bytes were not attached.",
+      `Provider media analysis failed: ${error.message}`
+    ],
     analyzed: false,
-    status: "fallback"
+    status: "pending_provider_analysis",
+    learning_boost: null
   };
-  parsed.learning_boost = fallbackLearningBoost(parsed, analysisContext(input, {
-    sourceTitle: input.sourceTitle,
-    processedRel: media.assetRel,
-    evidence: input.processedSource?.evidence || [media.assetRel],
-    mediaRefs: [media.assetRel]
-  }));
-  return parsed;
+}
+
+function pendingMediaAnalysis(media, input = {}) {
+  const notes = [
+    ...(input.processedSource?.processingNotes || []),
+    "Content extraction is pending; no Learning Boost cards, bits, concepts, or plans were created from metadata alone."
+  ];
+  return {
+    summary: `${media.kind} source preserved as a local asset. Learning analysis is pending because no readable transcript, OCR text, or manual description was available. The provider was not called and raw media bytes were not sent.`,
+    language: "unknown",
+    key_points: [
+      `Preserved local asset: ${media.assetRel}.`,
+      "No source claims were generated because the media content has not been transcribed or inspected.",
+      "The selected provider did not receive a raw media copy."
+    ],
+    concepts: [],
+    entities: [],
+    open_questions: [{
+      question: "What does this media contain?",
+      answer: "Pending. Add a transcript, OCR-readable image text, or a manual description, then reprocess the source."
+    }],
+    contradictions: [],
+    source_learning_questions: [],
+    open_learning_questions: [],
+    processing_notes: uniqueStrings(notes),
+    analyzed: false,
+    status: "pending_content"
+  };
+}
+
+function mediaRequiresExtractedContent(kind) {
+  return new Set(["image", "audio", "video"]).has(String(kind || "").toLowerCase());
+}
+
+function sourceRequiresExtractedContent(processedSource = {}) {
+  return new Set(["pdf", "document", "image", "audio", "video"]).has(String(processedSource.kind || "").toLowerCase());
+}
+
+function pendingFileAnalysis(processedSource = {}, input = {}) {
+  const kind = processedSource.kind || "source";
+  const notes = [
+    ...(processedSource.processingNotes || []),
+    "Content extraction is pending; no Learning Boost cards, bits, concepts, or plans were created from metadata alone."
+  ];
+  return {
+    summary: `${kind} source preserved for local review. Learning analysis is pending because readable text could not be extracted with the currently available local tools. The provider was not called and the raw file was not sent.`,
+    language: "unknown",
+    key_points: [
+      `Preserved source file: ${input.sourcePath || processedSource.metadata?.path || input.sourceTitle || "source"}.`,
+      "No source claims were generated because the document content was not extracted.",
+      "The selected provider did not receive the raw file."
+    ],
+    concepts: [],
+    entities: [],
+    open_questions: [{
+      question: "What does this document contain?",
+      answer: "Pending. Install or configure a local extractor, add a text transcript/summary, or convert the file to a readable text/PDF format, then reprocess the source."
+    }],
+    contradictions: [],
+    source_learning_questions: [],
+    open_learning_questions: [],
+    processing_notes: uniqueStrings(notes),
+    analyzed: false,
+    status: "pending_content",
+    learning_boost: null
+  };
+}
+
+function hasMeaningfulExtractedContent(processedSource = {}) {
+  if (processedSource.contentExtracted === true) return true;
+  const status = String(processedSource.extractionStatus || "");
+  if (/pending|unavailable|failed/i.test(status)) return false;
+  const text = String(processedSource.text || "").trim();
+  if (!text) return false;
+  if (/preserved as a local (image|audio|video) asset/i.test(text)) return false;
+  if (/preserved for local review\. Text extraction is unavailable/i.test(text)) return false;
+  if (/PDF text extraction is unavailable/i.test(text)) return false;
+  if (/Visual content was not analyzed|Audio content was not transcribed|Visual\/audio content was not analyzed/i.test(text)) return false;
+  return text.replace(/\s+/g, " ").length >= 40;
 }
 
 function mediaMetadata(assetPath, assetRel, kind, ext) {
@@ -424,9 +687,9 @@ function uniqueRel(vaultPath, initialRel) {
 }
 
 function mediaKindFor(ext) {
-  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".heic"].includes(ext)) return "image";
-  if ([".mp4", ".mov", ".m4v", ".webm"].includes(ext)) return "video";
-  if ([".mp3", ".wav", ".m4a", ".aiff", ".aac"].includes(ext)) return "audio";
+  if ([".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif"].includes(ext)) return "image";
+  if ([".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp"].includes(ext)) return "video";
+  if ([".mp3", ".wav", ".m4a", ".m4b", ".aiff", ".aac", ".flac", ".ogg", ".opus", ".amr"].includes(ext)) return "audio";
   if (ext === ".pdf") return "PDF";
   return "media";
 }
@@ -448,6 +711,8 @@ Language rule:
 - Write generated content values in that same primary language.
 - If the source is meaningfully multilingual, preserve the source languages where they carry meaning.
 - Keep JSON keys exactly as requested.
+- Learning card quality rules: ${learningBoostCardQualityRules()}
+- Technical reference rule: extract every included step, instruction, command, code block, solution, quality, property, formula, equation, parameter, endpoint, configuration value, constraint, and caveat into learning_boost.technical_reference and details_to_keep. Create learning_bits and general_cards that help recall or apply those exact details. Preserve exact code, commands, formulas, equations, variable names, settings, and values. Do not invent missing technical details.
 
 Return strict JSON with this shape:
 {
@@ -477,17 +742,67 @@ ${(input.processedSource?.processingNotes || []).join("\n")}
 Source text:
 ${input.sourceText}`;
 
-  const text = await provider.complete([
-    { role: "system", content: "Return only valid JSON. Preserve source traceability. Do not invent facts. Write generated content in the source's primary language unless the source is meaningfully multilingual. Open questions must include current answers or state why they remain unresolved." },
-    { role: "user", content: prompt }
-  ]);
-  return parseJson(text, input);
+  try {
+    const text = await provider.complete([
+      { role: "system", content: "Return only valid JSON. Preserve source traceability. Do not invent facts. Write generated content in the source's primary language unless the source is meaningfully multilingual. Open questions must include current answers or state why they remain unresolved." },
+      { role: "user", content: prompt }
+    ]);
+    return parseJson(text, input);
+  } catch (error) {
+    if (!input.allowBaselineFallback) {
+      throw error;
+    }
+    return fallbackSourceAnalysis(error, input);
+  }
+}
+
+function fallbackSourceAnalysis(error, input = {}) {
+  const sourceText = String(input.sourceText || "").trim();
+  const local = localSourceAnalysis(input, "Manual baseline source page created from local extracted text because AI analysis was explicitly skipped or unavailable.");
+  const excerpt = sourceText.replace(/\s+/g, " ").slice(0, 360);
+  const parsed = {
+    summary: excerpt
+      ? `Manual baseline source page created from local extracted text because AI analysis was explicitly skipped or unavailable. Excerpt: ${excerpt}${sourceText.length > 360 ? "..." : ""}`
+      : "Manual baseline source page created because AI analysis was explicitly skipped or unavailable. The raw source was preserved for later review.",
+    language: "unknown",
+    key_points: local.key_points.length ? local.key_points : [
+      `Source title: ${input.sourceTitle || "Untitled source"}.`,
+      `Original source path: ${input.sourcePath || "unknown"}.`,
+      "AI-generated analysis was deferred by explicit baseline processing."
+    ],
+    concepts: local.concepts.length ? local.concepts : [{
+      name: input.sourceTitle || "Unreviewed source",
+      summary: "A locally processed source awaiting richer AI or human review."
+    }],
+    entities: [],
+    open_questions: local.open_questions.length ? local.open_questions : [{
+      question: "What should be extracted from this source?",
+      answer: "This remains open until the AI provider is available or the user reviews the processed source page."
+    }],
+    contradictions: [],
+    source_learning_questions: local.source_learning_questions.length ? local.source_learning_questions : [{
+      question: "What is the first useful review step for this source?",
+      answer: "Open the processed source page, read the summary/excerpt, and rerun or revise analysis when the provider is responsive."
+    }],
+    open_learning_questions: local.open_learning_questions.length ? local.open_learning_questions : [{
+      question: "How should this source connect to broader learning goals?",
+      answer: "Connect it after its key concepts, claims, and evidence are reviewed."
+    }],
+    processing_notes: [`AI analysis fallback used: ${error?.message || error || "provider unavailable"}`]
+  };
+  parsed.learning_boost = fallbackLearningBoost(parsed, analysisContext(input, {
+    sourceTitle: input.sourceTitle,
+    processedRel: input.sourcePath,
+    sourceText,
+    evidence: input.processedSource?.evidence || [input.sourcePath].filter(Boolean),
+    mediaRefs: input.processedSource?.mediaRefs || []
+  }));
+  return parsed;
 }
 
 function parseJson(text, input = {}) {
-  const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
-  const data = JSON.parse(cleaned);
-  const parsed = {
+  const data = parseProviderJson(text);
+  const parsed = enrichParsedAnalysis({
     summary: String(data.summary || ""),
     language: String(data.language || ""),
     key_points: asArray(data.key_points),
@@ -498,11 +813,177 @@ function parseJson(text, input = {}) {
     source_learning_questions: asLearningItems(data.source_learning_questions),
     open_learning_questions: asLearningItems(data.open_learning_questions),
     processing_notes: asArray(data.processing_notes)
-  };
+  }, input, "Provider returned sparse JSON; local extracted text filled missing analysis fields.");
   parsed.learning_boost = data.learning_boost
     ? normalizeLearningBoost(data.learning_boost, { ...analysisContext(input), summary: parsed.summary, language: parsed.language })
     : fallbackLearningBoost(parsed, analysisContext(input));
   return parsed;
+}
+
+function parseProviderJson(text) {
+  const cleaned = String(text || "")
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (exactError) {
+    const objectText = firstBalancedJsonObject(cleaned);
+    if (!objectText) throw exactError;
+    return JSON.parse(objectText);
+  }
+}
+
+function firstBalancedJsonObject(text) {
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (start === -1) {
+      if (char === "{") {
+        start = i;
+        depth = 1;
+      }
+      continue;
+    }
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return "";
+}
+
+function enrichParsedAnalysis(parsed, input = {}, note = "") {
+  const local = localSourceAnalysis(input, note);
+  const merged = {
+    ...parsed,
+    summary: parsed.summary || local.summary,
+    language: parsed.language || local.language,
+    key_points: parsed.key_points.length ? parsed.key_points : local.key_points,
+    concepts: parsed.concepts.length ? parsed.concepts : local.concepts,
+    entities: parsed.entities.length ? parsed.entities : local.entities,
+    open_questions: parsed.open_questions.length ? parsed.open_questions : local.open_questions,
+    contradictions: parsed.contradictions,
+    source_learning_questions: parsed.source_learning_questions.length ? parsed.source_learning_questions : local.source_learning_questions,
+    open_learning_questions: parsed.open_learning_questions.length ? parsed.open_learning_questions : local.open_learning_questions,
+    processing_notes: parsed.processing_notes.length
+      ? parsed.processing_notes
+      : local.processing_notes
+  };
+  if (note && !parsed.summary && !merged.processing_notes.some((item) => item === note)) merged.processing_notes.push(note);
+  return merged;
+}
+
+function localSourceAnalysis(input = {}, note = "") {
+  const sourceText = String(input.sourceText || input.processedSource?.text || "").trim();
+  const sourceTitle = String(input.sourceTitle || "Untitled source").trim();
+  const sentences = meaningfulSentences(sourceText);
+  const headings = [...sourceText.matchAll(/^#{1,6}\s+(.+)$/gm)].map((match) => cleanLine(match[1])).filter(Boolean);
+  const keyPoints = uniqueStrings([
+    ...headings.slice(0, 4),
+    ...sentences.slice(0, 8)
+  ]).slice(0, 8);
+  const terms = uniqueStrings([
+    ...headings,
+    ...extractFrequentTerms(sourceText),
+    sourceTitle
+  ]).filter((item) => !genericSourceLabel(item)).slice(0, 8);
+  const concepts = terms.length
+    ? terms.map((term, index) => ({
+      name: term,
+      summary: keyPoints[index] || `A concept or topic extracted from ${sourceTitle}.`
+    }))
+    : [{ name: sourceTitle, summary: keyPoints[0] || "A locally extracted source topic awaiting richer analysis." }];
+  const summary = keyPoints.length
+    ? keyPoints.slice(0, 3).join(" ")
+    : (sourceText ? sourceText.replace(/\s+/g, " ").slice(0, 420) : `${sourceTitle} was preserved for learning analysis.`);
+  return {
+    summary,
+    language: "unknown",
+    key_points: keyPoints.length ? keyPoints : [`Source title: ${sourceTitle}.`],
+    concepts,
+    entities: [],
+    open_questions: [{
+      question: `What evidence would strengthen the understanding of ${concepts[0]?.name || sourceTitle}?`,
+      answer: "Compare this source with newer or broader sources, then update the linked concept page and learning cards."
+    }],
+    source_learning_questions: [{
+      question: `What is the key idea behind ${concepts[0]?.name || sourceTitle}?`,
+      answer: summary
+    }],
+    open_learning_questions: [{
+      question: `How does ${concepts[0]?.name || sourceTitle} connect to adjacent concepts or real workflows?`,
+      answer: "Use future sources and review notes to connect this idea without adding unsupported claims."
+    }],
+    processing_notes: note ? [note] : []
+  };
+}
+
+function meaningfulSentences(text) {
+  return String(text || "")
+    .replace(/^---[\s\S]*?---\s*/m, "")
+    .split(/(?<=[.!?؟])\s+|\n{2,}|\r?\n[-*]\s+/)
+    .map(cleanLine)
+    .filter((line) => line.length >= 24)
+    .filter((line) => !/^(metadata|source path|tags?|created|updated):/i.test(line))
+    .slice(0, 20);
+}
+
+function extractFrequentTerms(text) {
+  const candidates = [];
+  for (const match of String(text || "").matchAll(/\b[A-Z][A-Za-z0-9+#./-]{2,}(?:\s+[A-Z][A-Za-z0-9+#./-]{2,}){0,3}\b/g)) {
+    candidates.push(cleanLine(match[0]));
+  }
+  for (const match of String(text || "").matchAll(/[\p{Script=Arabic}]{3,}(?:\s+[\p{Script=Arabic}]{3,}){0,3}/gu)) {
+    candidates.push(cleanLine(match[0]));
+  }
+  return candidates
+    .filter((item) => item.length >= 3)
+    .filter((item) => !genericSourceLabel(item));
+}
+
+function cleanLine(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/^[#>*\-\s]+/, "")
+    .replace(/\[[^\]]+\]\([^)]*\)/g, "")
+    .trim()
+    .slice(0, 220);
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values.map(cleanLine).filter(Boolean)) {
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
+}
+
+function genericSourceLabel(value) {
+  return /^(browser clip|media from|transcript:?|pasted image|screenshot|source|untitled source)$/i.test(String(value || "").trim());
 }
 
 function analysisContext(input = {}, extra = {}) {
@@ -512,6 +993,7 @@ function analysisContext(input = {}, extra = {}) {
     sourceTitle: extra.sourceTitle || input.sourceTitle || "",
     processedRel: extra.processedRel || input.sourcePath || "",
     sourceLocation: input.sourcePath || extra.processedRel || "",
+    sourceText: extra.sourceText || input.sourceText || input.processedSource?.text || "",
     summary: extra.summary || "",
     language: extra.language || "",
     targetLanguages: ["AUTO"],
@@ -552,11 +1034,13 @@ function extractTitle(text, sourcePath) {
 function renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource = {} }) {
   return `---
 type: source
-status: active
+status: ${String(analysis.status || "").startsWith("pending_") ? "pending_content" : "active"}
 created: ${date}
 updated: ${date}
 language: ${yamlScalar(analysis.language || "unknown")}
 source_path: ${processedRel}
+provider_raw_file_sent: false
+provider_input_status: ${providerInputStatus(analysis, processedSource)}
 sources: []
 tags:
   - llm-wiki
@@ -573,7 +1057,7 @@ ${analysis.summary}
 
 ${bulletList(analysis.key_points)}
 
-${renderLearningBoostSection(analysis.learning_boost)}
+${analysis.learning_boost ? renderLearningBoostSection(analysis.learning_boost) : `## Learning Boost\n\nNo learning cards or bits were created because ${analysis.status === "pending_provider_analysis" ? "provider media analysis is still pending." : "source content extraction is still pending."}`}
 
 ## Source Processing
 
@@ -582,6 +1066,11 @@ ${renderLearningBoostSection(analysis.learning_boost)}
 - Evidence hints: ${(processedSource.evidence || [processedRel]).join(", ")}
 ${processedSource.mediaRefs?.length ? `- Media refs: ${processedSource.mediaRefs.join(", ")}` : "- Media refs: none"}
 ${processedSource.processingNotes?.length ? `- Processor notes: ${processedSource.processingNotes.join("; ")}` : "- Processor notes: none"}
+${analysis.processing_notes?.length ? `- Analysis notes: ${analysis.processing_notes.join("; ")}` : "- Analysis notes: none"}
+
+## Provider Input
+
+${renderProviderInputSection({ analysis, processedSource, rawLabel: "Raw source file" })}
 
 ## Source's Related Learning Questions
 
@@ -609,11 +1098,64 @@ ${bulletList(analysis.contradictions.length ? analysis.contradictions : ["None y
 `;
 }
 
+function providerInputStatus(analysis = {}, processedSource = {}) {
+  if (String(analysis.status || "").startsWith("pending_content")) return "not_sent_no_extracted_content";
+  if (hasMeaningfulExtractedContent(processedSource)) return "extracted_text_and_metadata_sent";
+  if (analysis.analyzed || analysis.status === "pending_provider_analysis") return "metadata_prompt_sent";
+  return "not_sent";
+}
+
+function renderProviderInputSection({ analysis = {}, processedSource = {}, rawLabel = "Raw source file", mediaKind = "" } = {}) {
+  const providerCalled = !String(analysis.status || "").startsWith("pending_content") && (analysis.analyzed || analysis.status === "pending_provider_analysis" || analysis.learning_boost);
+  const extracted = hasMeaningfulExtractedContent(processedSource);
+  const kind = String(mediaKind || processedSource.kind || "source").toLowerCase();
+  const next = providerInputNextAction(kind, extracted, analysis);
+  return [
+    `- ${rawLabel} sent to provider: no`,
+    `- Provider call attempted: ${providerCalled ? "yes" : "no"}`,
+    `- Extracted text/transcript/OCR sent: ${providerCalled && extracted ? "yes" : "no"}`,
+    `- Metadata sent: ${providerCalled ? "yes" : "no"}`,
+    "- Privacy boundary: Learning Boost keeps raw files in the local vault and sends providers text prompts only. Local file paths are evidence for you, not files the provider can open.",
+    `- Current blocker: ${providerInputBlocker(kind, extracted, analysis)}`,
+    `- Next action: ${next}`
+  ].join("\n");
+}
+
+function providerInputBlocker(kind, extracted, analysis = {}) {
+  if (analysis.analyzed) return "none; provider returned usable analysis.";
+  if (String(analysis.status || "").startsWith("pending_content")) {
+    if (kind === "image") return "no readable OCR text or manual image description was available.";
+    if (kind === "audio") return "no transcript sidecar or local ASR transcript was available.";
+    if (kind === "video") return "no transcript, local ASR transcript, or keyframe OCR text was available.";
+    if (kind === "pdf" || kind === "document") return "no readable document text was extracted.";
+    return "no readable content was extracted.";
+  }
+  if (analysis.status === "pending_provider_analysis") {
+    return extracted
+      ? "the selected provider received extracted text/metadata but did not return usable structured analysis."
+      : "the selected provider did not have meaningful extracted content to analyze.";
+  }
+  return "analysis is incomplete.";
+}
+
+function providerInputNextAction(kind, extracted, analysis = {}) {
+  if (analysis.analyzed) return "review the generated learning bits/cards and source evidence.";
+  if (analysis.status === "pending_provider_analysis" && extracted) {
+    return "refresh the selected provider, then reprocess this source. The raw media does not need to be recopied.";
+  }
+  if (kind === "image") return "install/configure Tesseract OCR, add a manual description, or use a future vision-capable adapter, then reprocess.";
+  if (kind === "audio") return "add a matching transcript sidecar or configure local Whisper ASR, then reprocess.";
+  if (kind === "video") return "add a matching transcript sidecar, enable local ASR/keyframe OCR tools, or clip a transcript, then reprocess.";
+  if (kind === "pdf") return "install/configure pdftotext or provide an OCR/text version of the PDF, then reprocess.";
+  if (kind === "document") return "install/configure the local document extractor or export the file to text/PDF with selectable text, then reprocess.";
+  return "provide readable text, a transcript, or a manual description, then reprocess.";
+}
+
 function renderMediaSourcePage({ date, sourceTitle, assetRel, mediaKind, ext, media, analysis, processedSource = {} }) {
   const preview = mediaKind === "image" ? `\n![[${assetRel}]]\n` : "";
   return `---
 type: source
-status: active
+status: ${String(analysis.status || "").startsWith("pending_") ? "pending_content" : "active"}
 created: ${date}
 updated: ${date}
 language: ${yamlScalar(analysis.language || "unknown")}
@@ -621,6 +1163,8 @@ source_path: ${assetRel}
 media_kind: ${mediaKind}
 media_analyzed: ${analysis.analyzed ? "true" : "false"}
 media_analysis_status: ${analysis.status || (analysis.analyzed ? "analyzed" : "fallback")}
+provider_raw_file_sent: false
+provider_input_status: ${providerInputStatus(analysis, processedSource)}
 sources: []
 tags:
   - llm-wiki
@@ -647,7 +1191,7 @@ ${media.width && media.height ? `- Dimensions: ${media.width} x ${media.height}`
 
 ${bulletList(analysis.key_points)}
 
-${renderLearningBoostSection(analysis.learning_boost)}
+${analysis.learning_boost ? renderLearningBoostSection(analysis.learning_boost) : `## Learning Boost\n\nNo learning cards or bits were created because ${analysis.status === "pending_provider_analysis" ? "provider media analysis is still pending." : "source content extraction is still pending."}`}
 
 ## Source's Related Learning Questions
 
@@ -660,6 +1204,10 @@ ${learningBlock(openLearningQuestions(analysis.open_learning_questions, sourceTi
 ## Processing Notes
 
 ${bulletList(analysis.processing_notes?.length ? analysis.processing_notes : ["Processed as a local media source."])}
+
+## Provider Input
+
+${renderProviderInputSection({ analysis, processedSource, rawLabel: "Raw media file", mediaKind })}
 
 ## Evidence
 
@@ -844,22 +1392,7 @@ Next:
 }
 
 function formatLocal(date) {
-  const zone = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" })
-    .formatToParts(date)
-    .find((part) => part.type === "timeZoneName")?.value || "";
-  return [
-    date.getFullYear(),
-    pad(date.getMonth() + 1),
-    pad(date.getDate())
-  ].join("-") + " " + [
-    pad(date.getHours()),
-    pad(date.getMinutes()),
-    pad(date.getSeconds())
-  ].join(":") + (zone ? ` ${zone}` : "");
-}
-
-function pad(value) {
-  return String(value).padStart(2, "0");
+  return formatLocalDateTime(date);
 }
 
 function bulletList(items) {
