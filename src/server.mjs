@@ -2216,7 +2216,8 @@ function renderMobileStudyHtml(url) {
     button, select { font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel); color: var(--ink); min-height: 42px; }
     button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 750; }
     main { padding: 14px; display: grid; gap: 14px; max-width: 980px; margin: 0 auto; }
-    .mobile-nav { position: sticky; top: 0; z-index: 20; display: flex; gap: 8px; overflow-x: auto; padding: 8px 0; background: color-mix(in srgb, var(--bg) 96%, white); border-bottom: 1px solid var(--line); }
+    header { position: sticky; top: 0; z-index: 30; box-shadow: 0 2px 10px rgb(48 40 32 / 10%); }
+    .mobile-nav { position: static; display: flex; gap: 8px; overflow-x: auto; padding: 8px 0 0; background: transparent; border-top: 1px solid color-mix(in srgb, var(--line) 62%, transparent); }
     .mobile-nav button { white-space: nowrap; min-height: 36px; padding: 7px 10px; }
     .toolbar, .summary, .legend, .session, .study-card, .quiz-card, .bit-card, .alert { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px; }
     .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -2256,13 +2257,6 @@ function renderMobileStudyHtml(url) {
   <header>
     <h1>Learning Boost</h1>
     <div id="generated" class="muted">Loading mobile study...</div>
-  </header>
-  <main>
-    <section class="toolbar">
-      <select id="vault"></select>
-      <button id="refresh" type="button">Refresh</button>
-      <button id="clear-focus" type="button">Clear focus</button>
-    </section>
     <nav class="mobile-nav" aria-label="Mobile study sections">
       <button type="button" data-mobile-jump="today-section">Today</button>
       <button type="button" data-mobile-jump="quiz-section">Quiz/Test</button>
@@ -2270,6 +2264,13 @@ function renderMobileStudyHtml(url) {
       <button type="button" data-mobile-jump="bits-section">Bits</button>
       <button type="button" data-mobile-jump="alerts-section">Alerts</button>
     </nav>
+  </header>
+  <main>
+    <section class="toolbar">
+      <select id="vault"></select>
+      <button id="refresh" type="button">Refresh</button>
+      <button id="clear-focus" type="button">Clear focus</button>
+    </section>
     <section id="notice" class="alert" hidden></section>
     <section id="summary" class="summary"></section>
     <section class="legend"><strong>Card and bit types</strong><span class="chip capture">capture/source</span><span class="chip bit">understanding/bit</span><span class="chip practice">practice/card</span><span class="chip alert">alert/provider</span></section>
@@ -2295,6 +2296,10 @@ function renderMobileStudyHtml(url) {
     document.querySelector("#refresh").addEventListener("click", () => loadStudy(vaultSelect.value));
     document.querySelector("#clear-focus").addEventListener("click", clearFocus);
     vaultSelect.addEventListener("change", () => loadStudy(vaultSelect.value));
+    document.addEventListener("pointerdown", (event) => {
+      if (event.target.closest("[data-study-kind], .session, .alert, button, select, input, textarea, a")) return;
+      clearFocus();
+    });
     document.addEventListener("click", async (event) => {
       const jump = event.target.closest("[data-mobile-jump]");
       if (jump) {
@@ -6340,7 +6345,7 @@ function renderHtml() {
               <label class="inline-toggle"><input id="auto-draft-plans-toggle" type="checkbox"> Auto-draft plans and goals</label>
               <label class="inline-toggle"><input id="auto-suggest-plan-updates-toggle" type="checkbox"> Auto-suggest plan updates</label>
               <label class="inline-toggle"><input id="native-mac-notifications-toggle" type="checkbox"> Native macOS notifications</label>
-              <label class="inline-toggle"><input id="reminders-notification-mirror-toggle" type="checkbox"> Sync alerts to Apple devices via Reminders</label>
+              <label class="inline-toggle" title="Creates privacy-safe alerts in Apple Reminders so iCloud can notify your iPhone, iPad, or other Macs."><input id="reminders-notification-mirror-toggle" type="checkbox"> Sync alerts to iPhone/iPad via Apple Reminders</label>
               <label class="inline-toggle"><input id="approval-gates-toggle" type="checkbox" checked disabled> Require approval for activation and external writes</label>
             </div>
             <div class="learning-button-row">
@@ -8347,7 +8352,8 @@ function renderHtml() {
       element.innerHTML =
         '<strong>' + escapeHtml(label) + '</strong>' +
         '<span class="summary-pill">' + escapeHtml(statusLabel(status)) + '</span>' +
-        '<span>' + escapeHtml("Showing " + visible.length + " of " + rows.length) + '</span>' +
+        '<span class="summary-pill">' + escapeHtml("Total: " + rows.length) + '</span>' +
+        '<span>' + escapeHtml("Showing: " + visible.length) + '</span>' +
         (detail ? '<span>' + escapeHtml(detail) + '</span>' : "") +
         vaults;
     }
@@ -8376,7 +8382,8 @@ function renderHtml() {
         .sort(([a], [b]) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" }))
         .slice(0, 8)
         .map(([vault, count]) => '<span class="summary-pill">' + escapeHtml(vault + ": " + count) + '</span>')
-        .join("");
+        .join("") +
+        (counts.size > 8 ? '<span class="summary-pill">' + escapeHtml("+" + (counts.size - 8) + " vaults") + '</span>' : "");
     }
 
     function updateSortHeaders(table) {
@@ -10975,9 +10982,9 @@ function renderHtml() {
       providerTabDot.title = [label || "Unknown", detail || ""].filter(Boolean).join(": ");
     }
 
-    async function refreshProviderTabDot() {
+    async function refreshProviderTabDot(options = {}) {
       try {
-        const response = await fetch("/api/provider-status");
+        const response = await fetch("/api/provider-status" + (options.force ? "?refresh=1" : ""));
         const data = await response.json();
         if (data.error) throw new Error(data.error);
         providerStatusCache = data;
@@ -11035,7 +11042,9 @@ function renderHtml() {
     }
 
     function applySideTopicsPayload(data) {
-      sideTopicsCache = (data.topics || []).filter((topic) => !isScaffoldTopic(topic));
+      sideTopicsCache = (data.topics || [])
+        .filter((topic) => !isScaffoldTopic(topic))
+        .filter((topic) => !isPendingMetadataOnlyTopic(topic));
       sideTopicsLoaded = true;
       sideTopicsUpdatedAt = data.updatedAt || new Date().toISOString();
       renderTopicTypeOptions();
@@ -11149,7 +11158,7 @@ function renderHtml() {
         const recentClass = recentTopicClass(group.topic);
         const duplicateBadge = group.count > 1 ? '<span class="side-topic-match-count">' + escapeHtml(group.count + " similar") + '</span>' : "";
         return '<button class="' + recentClass + '" type="button" data-title="' + escapeHtml(group.topic.title) + '" data-vault="' + escapeHtml(group.topic.vault) + '" data-path="' + escapeHtml(group.topic.path) + '" data-type="' + escapeHtml(group.topic.type || "") + '" data-updated="' + escapeHtml(group.updated || group.topic.updated || "") + '" data-tags="' + escapeHtml((group.tags || []).join(", ")) + '" title="' + escapeHtml(group.title) + '">' +
-          '<span class="side-topic-title-row"><span class="side-topic-title-text">' + escapeHtml(group.topic.title) + '</span>' + duplicateBadge + renderAnnotationBadges({ ...annotations, active }) + '</span>' +
+          '<span class="side-topic-title-row"><span class="side-topic-title-text">' + escapeHtml(group.displayTitle || group.topic.title) + '</span>' + duplicateBadge + renderAnnotationBadges({ ...annotations, active }) + '</span>' +
           '<span class="side-topic-meta">' + escapeHtml(group.meta) + '</span></button>';
     }
 
@@ -11206,8 +11215,10 @@ function renderHtml() {
         const dateAdded = sorted.map((item) => item.created || item.updated).filter(Boolean).sort().at(-1) || "";
         const duplicateText = items.length > 1 ? " | " + items.length + " matches" : "";
         const vaultText = vaults.length > 1 ? " | " + vaults.length + " vaults" : vaults[0] ? " | " + vaults[0] : "";
+        const displayTitle = sideTopicDisplayTitle(topic, items);
         return {
           topic,
+          displayTitle,
           count: items.length,
           updated,
           dateAdded,
@@ -11336,6 +11347,8 @@ function renderHtml() {
         .replace(/\\.md$/i, "")
         .replace(/^\\d{4}-\\d{2}-\\d{2}--/i, "")
         .replace(/\\d{4}-\\d{2}-\\d{2}t\\d{2}-\\d{2}-\\d{2}--/ig, ""));
+      const captureKey = captureSideTopicKey(topic, compactTitle, pathKey);
+      if (captureKey) return captureKey;
       const combined = normalizeTopicTitle(compactTitle + " " + pathKey)
         .replace(/\\b\\d+\\b/g, " ")
         .replace(/\\s+/g, " ")
@@ -11347,10 +11360,39 @@ function renderHtml() {
     function compactSideTopicText(value) {
       return normalizeTopicTitle(String(value || "")
         .replace(/[a-f0-9]{8,}/gi, " ")
-        .replace(/\\d{4}-\\d{2}-\\d{2}(?:t\\d{2}-\\d{2}-\\d{2})?/gi, " ")
+        .replace(/\\d{4}[ -]\\d{2}[ -]\\d{2}(?:[t ]\\d{2}[ -]\\d{2}[ -]\\d{2})?/gi, " ")
         .replace(/\\b(captured|downloaded?|browser|clip|media|image|screenshot|pasted|transcript|raw|input|processed|source|sources|wiki)\\b/gi, " ")
+        .replace(/\\b(download|capture|screen|shot|png|jpe?g|webp|gif|heic|tiff?)\\b/gi, " ")
         .replace(/[\\/_-]+/g, " ")
         .replace(/\\b\\d+\\b/g, " "));
+    }
+
+    function captureSideTopicKey(topic, compactTitle, pathKey) {
+      const haystack = normalizeTopicTitle([topic.title, topic.path, topic.summary].filter(Boolean).join(" "));
+      const sourceLike = String(topic.type || "").toLowerCase() === "source" || haystack.includes("wiki/sources/");
+      if (!sourceLike) return "";
+      const isCapture = /\\b(captured|download|browser clip|pasted image|screenshot|media from|transcript)\\b/i.test(haystack);
+      if (!isCapture) return "";
+      const extension = haystack.match(/\\.(png|jpe?g|webp|gif|heic|tiff?|pdf|mp4|mov|m4a|mp3|wav|webm|srt|vtt|txt|md)\\b/i)?.[1]?.toLowerCase() ||
+        haystack.match(/\\b(png|jpe?g|webp|gif|heic|tiff?|pdf|mp4|mov|m4a|mp3|wav|webm|srt|vtt)\\b/i)?.[1]?.toLowerCase() ||
+        "capture";
+      const vault = normalizeTopicTitle(topic.vault || "");
+      const day = String(topic.created || topic.updated || "").slice(0, 10);
+      const semantic = normalizeTopicTitle([compactTitle, pathKey].join(" ")).replace(/\\b\\w{1,2}\\b/g, " ").replace(/\\s+/g, " ").trim();
+      if (!semantic || semantic === extension) return ["capture", vault, day, extension].filter(Boolean).join(":");
+      return ["capture", vault, day, extension, semantic.slice(0, 80)].filter(Boolean).join(":");
+    }
+
+    function sideTopicDisplayTitle(topic, items = []) {
+      const haystack = normalizeTopicTitle([topic.title, topic.path, topic.summary].filter(Boolean).join(" "));
+      const isCapture = /\\b(captured|download|browser clip|pasted image|screenshot|media from|transcript)\\b/i.test(haystack);
+      if (!isCapture) return topic.title;
+      const count = items.length || 1;
+      const extension = haystack.match(/\\.(png|jpe?g|webp|gif|heic|tiff?|pdf|mp4|mov|m4a|mp3|wav|webm|srt|vtt|txt|md)\\b/i)?.[1]?.toUpperCase() ||
+        haystack.match(/\\b(png|jpe?g|webp|gif|heic|tiff?|pdf|mp4|mov|m4a|mp3|wav|webm|srt|vtt)\\b/i)?.[1]?.toUpperCase() ||
+        "captured";
+      const day = String(topic.created || topic.updated || "").slice(0, 10);
+      return extension + " capture" + (count > 1 ? " group" : "") + (day ? " from " + day : "");
     }
 
     function normalizeTopicTitle(title) {
@@ -11476,6 +11518,20 @@ function renderHtml() {
         title === "persistent synthesis" ||
         title === "wiki maintenance loop" ||
         title === "how should this vault operate?";
+    }
+
+    function isPendingMetadataOnlyTopic(topic) {
+      const sourceStatus = String(topic.sourceStatus || "").toLowerCase();
+      const mediaStatus = String(topic.mediaAnalysisStatus || "").toLowerCase();
+      const learningStatus = String(topic.learningOutputStatus || "").toLowerCase();
+      const providerInput = String(topic.providerInputStatus || "").toLowerCase();
+      const summary = String(topic.summary || "").toLowerCase();
+      return sourceStatus === "pending_content" ||
+        mediaStatus === "pending_provider_analysis" ||
+        learningStatus === "pending_learning_output" ||
+        providerInput === "metadata_prompt_sent" ||
+        summary.includes("provider media analysis") ||
+        summary.includes("no learning cards or bits were created");
     }
 
     async function loadStatus() {
@@ -13138,7 +13194,9 @@ function renderHtml() {
     loadChatVaults();
     loadAnnotations({ annotateResults: false });
     loadStatus();
-    refreshProviderTabDot();
+    refreshProviderTabDot({ force: true });
+    setTimeout(() => refreshProviderTabDot({ force: true }), 2500);
+    setTimeout(() => refreshProviderTabDot(), 7000);
     loadProviderStatus();
     loadLearning();
     setInterval(loadChatVaults, 10000);

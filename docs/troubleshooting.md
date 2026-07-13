@@ -115,7 +115,7 @@ The native wrapper also writes server stdout/stderr to `~/Library/Application Su
 
 ## iPhone Or iPad Alerts Do Not Appear
 
-Learning Boost sends native macOS notifications first. Apple may mirror those to iPhone or iPad only when macOS notification forwarding, iCloud, Focus, and device notification settings allow it. If native notifications appear on the Mac but not on other devices, enable `Sync alerts to Apple devices via Reminders` in Learning Autopilot. The app mirrors privacy-safe alert titles into an Apple Reminders list named `Learning Boost`; iCloud Reminders can then notify other Apple devices if Reminders sync, notification permission, and Focus settings allow it. You can still pause, snooze, or stop Learning Autopilot from the Learning tab without disabling the notification history.
+Learning Boost sends native macOS notifications first. Apple may mirror those to iPhone or iPad only when macOS notification forwarding, iCloud, Focus, and device notification settings allow it. If native notifications appear on the Mac but not on other devices, enable `Sync alerts to iPhone/iPad via Apple Reminders` in Learning Autopilot. The app mirrors privacy-safe alert titles into an Apple Reminders list named `Learning Boost`; iCloud Reminders can then notify other Apple devices if Reminders sync, notification permission, and Focus settings allow it. You can still pause, snooze, or stop Learning Autopilot from the Learning tab without disabling the notification history.
 
 Use `/mobile` for active study on iPhone or iPad. Use Reminders mirroring for cross-device alerts.
 

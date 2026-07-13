@@ -127,11 +127,17 @@ async function recordsFromLogForWorker(vaultPath) {
     const processedAt = matchFirst(section, /Processed at:\s*([^\n]+)/i);
     const processedAtMs = parseLocalDateMs(processedAt) || Date.parse(date) || 0;
     const receivedAtMs = parseLocalDateMs(receivedAt) || Date.parse(date) || processedAtMs;
+    const resolvedSourcePage = sourcePage || sourcePageFromProcessedRel(processedRel, title);
+    const sourceMeta = readSourcePageMeta(vaultPath, resolvedSourcePage);
     records.push({
       vault: vaultName(vaultPath),
       file: processedRel,
-      sourcePage: sourcePage || sourcePageFromProcessedRel(processedRel, title),
-      status: sourcePage ? "processed" : "processed from log",
+      sourcePage: resolvedSourcePage,
+      sourceStatus: sourceMeta.status,
+      mediaAnalysisStatus: sourceMeta.mediaAnalysisStatus,
+      providerInputStatus: sourceMeta.providerInputStatus,
+      learningOutputStatus: sourceMeta.learningOutputStatus,
+      status: fileHistoryStatus(sourcePage, sourceMeta),
       receivedAtMs,
       processedAtMs
     });
@@ -186,7 +192,8 @@ async function listTopicsFromIndexes(config) {
         updated: cells[3],
         tags: [],
         created: "",
-        element: cells[1]
+        element: cells[1],
+        ...sourceTopicMeta(vaultPath, link.path)
       });
     }
   }
@@ -201,7 +208,11 @@ async function listTopicsFromIndexes(config) {
       updated: dateFromLocal(record.processedAt) || dateFromLocal(record.receivedAt),
       tags: [],
       created: dateFromLocal(record.receivedAt),
-      element: "source"
+      element: "source",
+      sourceStatus: record.sourceStatus || "",
+      mediaAnalysisStatus: record.mediaAnalysisStatus || "",
+      providerInputStatus: record.providerInputStatus || "",
+      learningOutputStatus: record.learningOutputStatus || ""
     });
   }
   return [...topics.values()].sort((a, b) => a.title.localeCompare(b.title));
@@ -273,6 +284,67 @@ function matchFirst(text, pattern) {
 function sourcePageFromProcessedRel(processedRel, title) {
   const base = path.basename(processedRel, path.extname(processedRel));
   return `wiki/sources/${base || slugTitle(title)}.md`;
+}
+
+function sourceTopicMeta(vaultPath, pagePath) {
+  const rel = String(pagePath || "").replace(/\\/g, "/");
+  if (!rel.startsWith("wiki/sources/")) return {};
+  const meta = readSourcePageMeta(vaultPath, rel.endsWith(".md") ? rel : `${rel}.md`);
+  return {
+    sourceStatus: meta.status,
+    mediaAnalysisStatus: meta.mediaAnalysisStatus,
+    providerInputStatus: meta.providerInputStatus,
+    learningOutputStatus: meta.learningOutputStatus
+  };
+}
+
+function readSourcePageMeta(vaultPath, sourcePage) {
+  const rel = String(sourcePage || "").replace(/\\/g, "/");
+  if (!rel) return {};
+  const file = path.join(vaultPath, rel);
+  const text = readSourcePageHead(file);
+  if (!text) return {};
+  const status = frontmatterValue(text, "status");
+  const mediaAnalysisStatus = frontmatterValue(text, "media_analysis_status");
+  const providerInputStatus = frontmatterValue(text, "provider_input_status");
+  const learningOutputStatus = /No learning cards or bits were created because/i.test(text)
+    ? "pending_learning_output"
+    : /## Learning Boost/i.test(text)
+      ? "learning_output"
+      : "";
+  return { status, mediaAnalysisStatus, providerInputStatus, learningOutputStatus };
+}
+
+function readSourcePageHead(file) {
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile()) return "";
+    const fd = fs.openSync(file, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(Math.min(stat.size, 24 * 1024));
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+      return buffer.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
+}
+
+function frontmatterValue(text, key) {
+  return String(text || "").match(new RegExp(`^${key}:\\s*(.+)$`, "im"))?.[1]?.trim() || "";
+}
+
+function fileHistoryStatus(hasExplicitSourcePage, sourceMeta = {}) {
+  const status = String(sourceMeta.status || "").toLowerCase();
+  const mediaStatus = String(sourceMeta.mediaAnalysisStatus || "").toLowerCase();
+  const learningStatus = String(sourceMeta.learningOutputStatus || "").toLowerCase();
+  if (status === "pending_content" && mediaStatus === "pending_provider_analysis") return "pending provider analysis";
+  if (status === "pending_content") return "pending content extraction";
+  if (mediaStatus === "pending_provider_analysis") return "pending provider analysis";
+  if (learningStatus === "pending_learning_output") return "pending learning output";
+  return hasExplicitSourcePage ? "processed" : "processed from log";
 }
 
 function slugTitle(value) {

@@ -96,6 +96,11 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /learning-flow-step-button/);
   assert.match(serverSource, /LLM_WIKI_ENABLE_STARTUP_TAB_REFRESH !== "0"/);
   assert.match(serverSource, /compactSideTopicText/);
+  assert.match(serverSource, /captureSideTopicKey/);
+  assert.match(serverSource, /sideTopicDisplayTitle/);
+  assert.match(serverSource, /isPendingMetadataOnlyTopic/);
+  assert.match(serverSource, /pending_learning_output/);
+  assert.match(serverSource, /filter\(\(topic\) => !isPendingMetadataOnlyTopic\(topic\)\)/);
   assert.match(serverSource, /Skipped files by reason and extension/);
   assert.doesNotMatch(serverSource, /\.learning-jump, \.learning-target-button \{[^}]*overflow-wrap: anywhere/);
   assert.ok(!serverSource.includes(".learning-stepper li { position: relative; display: grid; grid-template-columns: 28px"));
@@ -146,7 +151,7 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /macOS delivered/);
   assert.match(serverSource, /macOS notifications blocked/);
   assert.match(serverSource, /Apple Reminders mirrored/);
-  assert.match(serverSource, /Sync alerts to Apple devices via Reminders/);
+  assert.match(serverSource, /Sync alerts to iPhone\/iPad via Apple Reminders/);
   assert.match(serverSource, /Sync alerts to Reminders/);
   assert.match(serverSource, /syncNotificationsToReminders/);
   assert.match(serverSource, /pollNow/);
@@ -173,6 +178,8 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /Provider timeout ms/);
   assert.match(serverSource, /main \{ max-width: none; margin: 0;/);
   assert.match(serverSource, /setSideTopicHidden\(savedSideTopicHidden !== "0"\)/);
+  assert.match(serverSource, /refreshProviderTabDot\(\{ force: true \}\)/);
+  assert.match(serverSource, /api\/provider-status" \+ \(options\.force \? "\?refresh=1" : ""\)/);
   assert.doesNotMatch(serverSource, /main \{ max-width: none; margin: 0 392px/);
   assert.doesNotMatch(serverSource, /providerForAutoIngest/);
   assert.doesNotMatch(serverSource, /openAiCompatForAutoIngest/);
@@ -239,6 +246,28 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /api\/local-ai-router-status/);
   assert.match(serverSource, /provider-details-table/);
   assert.match(serverSource, /table-layout: fixed/);
+});
+
+test("mobile study header keeps navigation visible and focus can be cleared outside cards", () => {
+  assert.match(serverSource, /header \{ position: sticky; top: 0; z-index: 30/);
+  assert.match(serverSource, /\.mobile-nav \{ position: static;/);
+  assert.match(serverSource, /<header>[\s\S]*<nav class="mobile-nav"/);
+  assert.doesNotMatch(serverSource, /<main>[\s\S]{0,220}<nav class="mobile-nav"/);
+  assert.match(serverSource, /document\.addEventListener\("pointerdown"/);
+  assert.match(serverSource, /clearFocus\(\);/);
+});
+
+test("file list summaries expose explicit totals and tab worker classifies pending media separately", () => {
+  const workerSource = fs.readFileSync(path.resolve("src/tab-data-worker.mjs"), "utf8");
+  assert.match(serverSource, /Total: " \+ rows\.length/);
+  assert.match(serverSource, /vault \+ ": " \+ count/);
+  assert.match(workerSource, /readSourcePageMeta/);
+  assert.match(workerSource, /mediaAnalysisStatus/);
+  assert.match(workerSource, /providerInputStatus/);
+  assert.match(workerSource, /learningOutputStatus/);
+  assert.match(workerSource, /pending provider analysis/);
+  assert.match(workerSource, /pending content extraction/);
+  assert.match(workerSource, /pending learning output/);
 });
 
 test("Chat tab exposes controlled remote research controls", () => {
