@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 export const LOCAL_PROVIDER_PRIORITY = [
   "mlx_lm_server",
   "ollama",
+  "mesh_llm",
   "mlx_lm_cli",
   "openai_compat",
   "openai_subscription",
@@ -11,7 +12,7 @@ export const LOCAL_PROVIDER_PRIORITY = [
   "anthropic"
 ];
 
-export const LOCAL_PROVIDER_NAMES = new Set(["mlx_lm_server", "ollama", "mlx_lm_cli", "openai_compat"]);
+export const LOCAL_PROVIDER_NAMES = new Set(["mlx_lm_server", "ollama", "mesh_llm", "mlx_lm_cli", "openai_compat"]);
 export const CLOUD_PROVIDER_NAMES = new Set(["openai_subscription", "openai", "gemini", "anthropic"]);
 
 export function parseProviderPriority(value) {
@@ -72,6 +73,7 @@ export async function checkLocalProviders(config, deps = {}) {
 export async function checkLocalProvider(config, provider, deps = {}) {
   if (provider === "mlx_lm_server") return checkMlxServer(config, deps);
   if (provider === "ollama") return checkOllama(config, deps);
+  if (provider === "mesh_llm") return checkMeshLlm(config, deps);
   if (provider === "mlx_lm_cli") return checkMlxCli(config, deps);
   if (provider === "openai_compat") return checkOpenAiCompat(config, deps);
   return health(provider, false, "Unsupported local provider.", {});
@@ -100,6 +102,21 @@ function checkOllama(config, deps) {
     url: joinUrl(baseUrl, "/api/tags"),
     baseUrl,
     model: config.ollama.model,
+    timeoutMs: config.localAI.healthTimeoutMs,
+    allowLan: config.localAI.allowLan,
+    deps
+  });
+}
+
+function checkMeshLlm(config, deps) {
+  const baseUrl = config.meshLlm.baseUrl;
+  return httpHealth({
+    provider: "mesh_llm",
+    label: "Mesh LLM",
+    url: joinUrl(baseUrl, "/models"),
+    baseUrl,
+    model: config.meshLlm.model,
+    headers: openAiCompatHealthHeaders(config.meshLlm),
     timeoutMs: config.localAI.healthTimeoutMs,
     allowLan: config.localAI.allowLan,
     deps
@@ -198,6 +215,7 @@ function health(provider, ok, detail, extra) {
 export function localProviderTip(provider) {
   if (provider === "ollama") return "Ollama is not reachable. Start it or switch provider.";
   if (provider === "mlx_lm_server") return "MLX-LM Server is not reachable. Start `mlx_lm.server --host 0.0.0.0 --port 8080 --model <model>` on your Mac/LAN model host.";
+  if (provider === "mesh_llm") return "Mesh LLM is not reachable. Start `mesh-llm serve --model <model>` for a private mesh or update MESH_LLM_BASE_URL.";
   if (provider === "mlx_lm_cli") return "MLX-LM CLI is not available. Install mlx-lm or set MLX_LM_COMMAND to the correct executable.";
   if (provider === "openai_compat") return "OpenAI-compatible local endpoint is not reachable. Start the local server or update OPENAI_COMPAT_BASE_URL.";
   return "Local AI is unavailable. Start a local provider or configure another endpoint.";
