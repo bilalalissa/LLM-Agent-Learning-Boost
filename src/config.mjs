@@ -32,6 +32,10 @@ export const PROVIDER_CONFIG_KEYS = [
   "LOCAL_AI_ROUTER_AUTO_START_PROVIDER",
   "LOCAL_AI_ROUTER_AUTO_INSTALL",
   "LOCAL_AI_ROUTER_TIMEOUT_MS",
+  "MESH_LLM_BASE_URL",
+  "MESH_LLM_MODEL",
+  "MESH_LLM_AUTH_METHOD",
+  "MESH_LLM_TIMEOUT_MS",
   "OLLAMA_BASE_URL",
   "OLLAMA_MODEL",
   "OLLAMA_EMBED_MODEL",
@@ -58,6 +62,8 @@ export const PROVIDER_CONFIG_KEYS = [
 ];
 
 export const PROVIDER_SECRET_KEYS = [
+  "MESH_LLM_API_KEY",
+  "MESH_LLM_BEARER_TOKEN",
   "MLX_LM_SERVER_API_KEY",
   "OPENAI_API_KEY",
   "ANTHROPIC_API_KEY",
@@ -85,7 +91,7 @@ const PROVIDER_DEFAULTS = {
   AI_ACCESS_METHOD: "local_first",
   DEFAULT_AI_PROVIDER: "local_auto",
   DEFAULT_AI_MODEL: "qwen3:8b",
-  LOCAL_AI_PROVIDER_PRIORITY: "mlx_lm_server,ollama,mlx_lm_cli,openai_compat,openai_subscription,openai,gemini,anthropic",
+  LOCAL_AI_PROVIDER_PRIORITY: "mlx_lm_server,ollama,mesh_llm,mlx_lm_cli,openai_compat,openai_subscription,openai,gemini,anthropic",
   LOCAL_AI_ALLOW_LAN: "true",
   LOCAL_AI_HEALTH_TIMEOUT_MS: "2500",
   LOCAL_AI_REQUIRE_CONFIRM_CLOUD_FALLBACK: "true",
@@ -97,6 +103,10 @@ const PROVIDER_DEFAULTS = {
   LOCAL_AI_ROUTER_AUTO_START_PROVIDER: "true",
   LOCAL_AI_ROUTER_AUTO_INSTALL: "false",
   LOCAL_AI_ROUTER_TIMEOUT_MS: "12000",
+  MESH_LLM_BASE_URL: "http://127.0.0.1:9337/v1",
+  MESH_LLM_MODEL: "Qwen3-8B-Q4_K_M",
+  MESH_LLM_AUTH_METHOD: "none",
+  MESH_LLM_TIMEOUT_MS: "180000",
   OLLAMA_BASE_URL: "http://127.0.0.1:11434",
   OLLAMA_MODEL: "qwen3:8b",
   OLLAMA_EMBED_MODEL: "all-minilm",
@@ -123,24 +133,25 @@ const PROVIDER_DEFAULTS = {
 };
 
 export const PROVIDER_CONFIG_OPTIONS = {
-  providers: ["local_auto", "ollama", "mlx_lm_server", "mlx_lm_cli", "openai_compat", "openai_subscription", "chatgpt", "openai", "gemini", "anthropic"],
+  providers: ["local_auto", "mesh_llm", "ollama", "mlx_lm_server", "mlx_lm_cli", "openai_compat", "openai_subscription", "chatgpt", "openai", "gemini", "anthropic"],
   authMethods: ["api_key", "bearer", "oauth", "subscription", "none"],
-  models: ["qwen3:8b", "llama3.2", "mistral", "gpt-5.5", "gpt-4.1-mini", "gpt-4.1", "claude-3-5-sonnet-latest", "gemini-1.5-flash"],
+  models: ["qwen3:8b", "Qwen3-8B-Q4_K_M", "GLM-4.7-Flash-Q4_K_M", "mesh", "llama3.2", "mistral", "gpt-5.5", "gpt-4.1-mini", "gpt-4.1", "claude-3-5-sonnet-latest", "gemini-1.5-flash"],
   modelsByProvider: {
-    local_auto: ["qwen3:8b", "llama3.2", "mistral", "mlx-community/Llama-3.2-3B-Instruct-4bit"],
+    local_auto: ["qwen3:8b", "Qwen3-8B-Q4_K_M", "llama3.2", "mistral", "mlx-community/Llama-3.2-3B-Instruct-4bit"],
+    mesh_llm: ["Qwen3-8B-Q4_K_M", "GLM-4.7-Flash-Q4_K_M", "mesh"],
     ollama: ["qwen3:8b", "llama3.2", "mistral", "phi4"],
     mlx_lm_server: ["default_model", "mlx-community/Llama-3.2-3B-Instruct-4bit"],
     mlx_lm_cli: ["mlx-community/Llama-3.2-3B-Instruct-4bit", "mlx-community/Qwen2.5-7B-Instruct-4bit"],
-    openai_compat: ["local-model", "gpt-oss", "qwen3:8b"],
+    openai_compat: ["local-model", "gpt-oss", "qwen3:8b", "Qwen3-8B-Q4_K_M"],
     openai_subscription: ["gpt-5.5", "gpt-4.1-mini", "gpt-4.1"],
     chatgpt: ["gpt-5.5", "gpt-4.1-mini", "gpt-4.1"],
     openai: ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"],
     gemini: ["gemini-1.5-flash", "gemini-1.5-pro"],
     anthropic: ["claude-3-5-sonnet-latest", "claude-3-haiku-20240307"]
   },
-  endpoints: ["http://127.0.0.1:17640", "http://127.0.0.1:17640/v1", "http://127.0.0.1:11434", "http://127.0.0.1:8080", "http://localhost:1234/v1", "https://api.openai.com/v1", "https://api.anthropic.com", "https://generativelanguage.googleapis.com"],
+  endpoints: ["http://127.0.0.1:17640", "http://127.0.0.1:17640/v1", "http://127.0.0.1:9337/v1", "http://127.0.0.1:11434", "http://127.0.0.1:8080", "http://localhost:1234/v1", "https://api.openai.com/v1", "https://api.anthropic.com", "https://generativelanguage.googleapis.com"],
   commands: ["codex", "mlx_lm.generate"],
-  priorities: ["mlx_lm_server,ollama,mlx_lm_cli,openai_compat,openai_subscription,openai,gemini,anthropic", "ollama,mlx_lm_server,mlx_lm_cli,openai_compat", "mlx_lm_cli,ollama,openai_compat"]
+  priorities: ["mlx_lm_server,ollama,mesh_llm,mlx_lm_cli,openai_compat,openai_subscription,openai,gemini,anthropic", "ollama,mesh_llm,mlx_lm_server,mlx_lm_cli,openai_compat", "mesh_llm,ollama,openai_compat", "mlx_lm_cli,ollama,openai_compat"]
 };
 
 export function configPointerFile() {
@@ -230,6 +241,14 @@ export function getConfig() {
       autoStartProvider: env.LOCAL_AI_ROUTER_AUTO_START_PROVIDER !== "false",
       autoInstall: env.LOCAL_AI_ROUTER_AUTO_INSTALL === "true",
       timeoutMs: Number(env.LOCAL_AI_ROUTER_TIMEOUT_MS || 12000)
+    },
+    meshLlm: {
+      authMethod: env.MESH_LLM_AUTH_METHOD || "none",
+      apiKey: env.MESH_LLM_API_KEY || "",
+      bearerToken: env.MESH_LLM_BEARER_TOKEN || "",
+      baseUrl: env.MESH_LLM_BASE_URL || "http://127.0.0.1:9337/v1",
+      model: env.MESH_LLM_MODEL || "Qwen3-8B-Q4_K_M",
+      timeoutMs: Number(env.MESH_LLM_TIMEOUT_MS || env.AI_PROVIDER_TIMEOUT_MS || 180000)
     },
     ollama: {
       baseUrl: env.OLLAMA_BASE_URL || "http://127.0.0.1:11434",
@@ -406,6 +425,7 @@ function providerOptionsFromEnv(env) {
     env.DEFAULT_AI_PROVIDER,
     ...parseProviderPriority(env.LOCAL_AI_PROVIDER_PRIORITY)
   ];
+  if (env.MESH_LLM_BASE_URL || env.MESH_LLM_MODEL || env.MESH_LLM_API_KEY || env.MESH_LLM_BEARER_TOKEN) options.push("mesh_llm");
   if (env.OLLAMA_BASE_URL || env.OLLAMA_MODEL) options.push("ollama");
   if (env.MLX_LM_SERVER_BASE_URL || env.MLX_LM_SERVER_MODEL) options.push("mlx_lm_server");
   if (env.MLX_LM_COMMAND || env.MLX_LM_MODEL) options.push("mlx_lm_cli");
