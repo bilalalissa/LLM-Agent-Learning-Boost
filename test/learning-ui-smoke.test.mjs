@@ -97,6 +97,10 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /LLM_WIKI_ENABLE_STARTUP_TAB_REFRESH !== "0"/);
   assert.match(serverSource, /compactSideTopicText/);
   assert.match(serverSource, /captureSideTopicKey/);
+  assert.match(serverSource, /captureSequenceSideTopicKey/);
+  assert.match(serverSource, /captured-download/);
+  assert.match(serverSource, /provider did not return a media analysis/);
+  assert.match(serverSource, /records metadata and keeps the source available/);
   assert.match(serverSource, /sideTopicDisplayTitle/);
   assert.match(serverSource, /isPendingMetadataOnlyTopic/);
   assert.match(serverSource, /pending_learning_output/);
@@ -246,14 +250,22 @@ test("Learning Boost UI includes Stage 8 sections and working-memory panels", ()
   assert.match(serverSource, /api\/local-ai-router-status/);
   assert.match(serverSource, /provider-details-table/);
   assert.match(serverSource, /table-layout: fixed/);
+  assert.match(serverSource, /providerDotForcePolls/);
+  assert.match(serverSource, /visibilitychange/);
+  assert.match(serverSource, /window\.addEventListener\("focus"/);
 });
 
 test("mobile study header keeps navigation visible and focus can be cleared outside cards", () => {
   assert.match(serverSource, /header \{ position: sticky; top: 0; z-index: 30/);
+  assert.match(serverSource, /--mobile-header-height/);
+  assert.match(serverSource, /scroll-padding-top: calc\(var\(--mobile-header-height\) \+ 76px\)/);
   assert.match(serverSource, /\.mobile-nav \{ position: static;/);
+  assert.match(serverSource, /\.toolbar \{ position: sticky; top: var\(--mobile-header-height\)/);
+  assert.match(serverSource, /scroll-margin-top: calc\(var\(--mobile-header-height\) \+ 76px\)/);
   assert.match(serverSource, /<header>[\s\S]*<nav class="mobile-nav"/);
   assert.doesNotMatch(serverSource, /<main>[\s\S]{0,220}<nav class="mobile-nav"/);
-  assert.match(serverSource, /document\.addEventListener\("pointerdown"/);
+  assert.match(serverSource, /document\.addEventListener\("pointerdown"[\s\S]*true\);/);
+  assert.match(serverSource, /syncMobileHeaderHeight/);
   assert.match(serverSource, /clearFocus\(\);/);
 });
 

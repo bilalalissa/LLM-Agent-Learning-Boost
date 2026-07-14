@@ -2207,21 +2207,22 @@ function renderMobileStudyHtml(url) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Learning Boost Mobile Study</title>
   <style>
-    :root { color-scheme: light; --bg: #f4ead8; --panel: #fffaf0; --ink: #302820; --muted: #766852; --line: #d9c49b; --accent: #98620f; --capture: #0f766e; --practice: #7c3aed; --bit: #2563eb; --alert: #be123c; }
+    :root { color-scheme: light; --bg: #f4ead8; --panel: #fffaf0; --ink: #302820; --muted: #766852; --line: #d9c49b; --accent: #98620f; --capture: #0f766e; --practice: #7c3aed; --bit: #2563eb; --alert: #be123c; --mobile-header-height: 128px; }
     * { box-sizing: border-box; }
+    html { scroll-padding-top: calc(var(--mobile-header-height) + 76px); }
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); line-height: 1.45; }
-    header { position: static; background: color-mix(in srgb, var(--bg) 94%, white); border-bottom: 1px solid var(--line); padding: 14px 16px; }
+    header { position: sticky; top: 0; z-index: 30; background: color-mix(in srgb, var(--bg) 94%, white); border-bottom: 1px solid var(--line); padding: 14px 16px; box-shadow: 0 2px 10px rgb(48 40 32 / 10%); }
     h1 { margin: 0 0 4px; font-size: clamp(24px, 8vw, 34px); }
     h2 { margin: 20px 0 8px; font-size: 21px; }
     button, select { font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel); color: var(--ink); min-height: 42px; }
     button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 750; }
     main { padding: 14px; display: grid; gap: 14px; max-width: 980px; margin: 0 auto; }
-    header { position: sticky; top: 0; z-index: 30; box-shadow: 0 2px 10px rgb(48 40 32 / 10%); }
     .mobile-nav { position: static; display: flex; gap: 8px; overflow-x: auto; padding: 8px 0 0; background: transparent; border-top: 1px solid color-mix(in srgb, var(--line) 62%, transparent); }
     .mobile-nav button { white-space: nowrap; min-height: 36px; padding: 7px 10px; }
     .toolbar, .summary, .legend, .session, .study-card, .quiz-card, .bit-card, .alert { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px; }
-    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .toolbar { position: sticky; top: var(--mobile-header-height); z-index: 24; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; box-shadow: 0 8px 18px rgb(48 40 32 / 12%); }
     .toolbar select { flex: 1 1 180px; min-width: 0; }
+    #today-section, #quiz-section, #cards-section, #bits-section, #alerts-section { scroll-margin-top: calc(var(--mobile-header-height) + 76px); }
     .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; }
     .metric { display: grid; gap: 2px; padding: 8px; border-radius: 8px; background: #efe2ca; }
     .metric strong { font-size: 22px; color: var(--accent); }
@@ -2293,13 +2294,16 @@ function renderMobileStudyHtml(url) {
     const cards = document.querySelector("#cards");
     const bits = document.querySelector("#bits");
     const alerts = document.querySelector("#alerts");
+    const mobileHeader = document.querySelector("header");
     document.querySelector("#refresh").addEventListener("click", () => loadStudy(vaultSelect.value));
     document.querySelector("#clear-focus").addEventListener("click", clearFocus);
     vaultSelect.addEventListener("change", () => loadStudy(vaultSelect.value));
     document.addEventListener("pointerdown", (event) => {
       if (event.target.closest("[data-study-kind], .session, .alert, button, select, input, textarea, a")) return;
       clearFocus();
-    });
+    }, true);
+    window.addEventListener("resize", syncMobileHeaderHeight);
+    window.addEventListener("orientationchange", syncMobileHeaderHeight);
     document.addEventListener("click", async (event) => {
       const jump = event.target.closest("[data-mobile-jump]");
       if (jump) {
@@ -2392,6 +2396,11 @@ function renderMobileStudyHtml(url) {
       cards.innerHTML = (data.cards || []).map(renderCard).join("") || '<p class="muted">No cards yet. Process one source first.</p>';
       bits.innerHTML = (data.bits || []).map(renderBit).join("") || '<p class="muted">No bits yet. Process one source first.</p>';
       alerts.innerHTML = (data.notifications || []).map(renderAlert).join("") || '<p class="muted">No active learning alerts.</p>';
+      syncMobileHeaderHeight();
+    }
+    function syncMobileHeaderHeight() {
+      const height = Math.ceil(mobileHeader?.getBoundingClientRect?.().height || 128);
+      document.documentElement.style.setProperty("--mobile-header-height", height + "px");
     }
     function formatCachedTime(value) {
       try { return new Date(value).toLocaleString(); } catch { return "the last successful load"; }
@@ -10982,6 +10991,7 @@ function renderHtml() {
       providerTabDot.title = [label || "Unknown", detail || ""].filter(Boolean).join(": ");
     }
 
+    let providerDotForcePolls = 0;
     async function refreshProviderTabDot(options = {}) {
       try {
         const response = await fetch("/api/provider-status" + (options.force ? "?refresh=1" : ""));
@@ -10989,8 +10999,24 @@ function renderHtml() {
         if (data.error) throw new Error(data.error);
         providerStatusCache = data;
         updateProviderTabStatus(data.statusColor, data.status, data.statusDetail);
+        const statusText = [data.status, data.statusDetail, data.activeProvider, data.model].filter(Boolean).join(" ").toLowerCase();
+        const stillSettling = data.loading === true ||
+          data.statusColor === "grey" ||
+          statusText.includes("checking") ||
+          statusText.includes("unknown") ||
+          statusText.includes("loading");
+        if (stillSettling && providerDotForcePolls < 8) {
+          providerDotForcePolls += 1;
+          setTimeout(() => refreshProviderTabDot({ force: true }), 1800);
+        } else if (data.statusColor === "green" || data.statusColor === "red") {
+          providerDotForcePolls = 0;
+        }
       } catch (error) {
         updateProviderTabStatus("orange", "Provider status unknown", error.message);
+        if (providerDotForcePolls < 5) {
+          providerDotForcePolls += 1;
+          setTimeout(() => refreshProviderTabDot({ force: true }), 2200);
+        }
       }
     }
 
@@ -11378,9 +11404,26 @@ function renderHtml() {
         "capture";
       const vault = normalizeTopicTitle(topic.vault || "");
       const day = String(topic.created || topic.updated || "").slice(0, 10);
-      const semantic = normalizeTopicTitle([compactTitle, pathKey].join(" ")).replace(/\\b\\w{1,2}\\b/g, " ").replace(/\\s+/g, " ").trim();
+      const sequenceKey = captureSequenceSideTopicKey(haystack, extension);
+      if (sequenceKey) return ["capture", vault, day, sequenceKey].filter(Boolean).join(":");
+      const semantic = normalizeTopicTitle([compactTitle, pathKey].join(" "))
+        .replace(/\\b[a-f0-9]{6,}\\b/g, " ")
+        .replace(/\\b\\d+\\b/g, " ")
+        .replace(/\\b(png|jpe?g|webp|gif|heic|tiff?|pdf|mp4|mov|m4a|mp3|wav|webm|srt|vtt|txt|md)\\b/g, " ")
+        .replace(/\\b\\w{1,2}\\b/g, " ")
+        .replace(/\\s+/g, " ")
+        .trim();
       if (!semantic || semantic === extension) return ["capture", vault, day, extension].filter(Boolean).join(":");
       return ["capture", vault, day, extension, semantic.slice(0, 80)].filter(Boolean).join(":");
+    }
+
+    function captureSequenceSideTopicKey(haystack, extension) {
+      const text = normalizeTopicTitle(haystack);
+      const capturedDownload = text.match(/\\bcaptured\\s+download\\s+(\\d+)\\s+(png|jpe?g|webp|gif|heic|tiff?)\\b/i);
+      if (capturedDownload) return ["captured-download", capturedDownload[1], capturedDownload[2].toLowerCase()].join(":");
+      if (/\\bpasted\\s+image\\s+\\d{8,}\\b/i.test(text)) return ["pasted-image", extension || "image"].join(":");
+      if (/\\b(?:screenshot|screen\\s+shot)\\b/i.test(text) && extension) return ["screenshot", extension].join(":");
+      return "";
     }
 
     function sideTopicDisplayTitle(topic, items = []) {
@@ -11526,12 +11569,26 @@ function renderHtml() {
       const learningStatus = String(topic.learningOutputStatus || "").toLowerCase();
       const providerInput = String(topic.providerInputStatus || "").toLowerCase();
       const summary = String(topic.summary || "").toLowerCase();
+      const haystack = [topic.title, topic.path, topic.summary].filter(Boolean).join(" ").toLowerCase();
+      const metadataOnlyText =
+        summary.includes("provider media analysis") ||
+        summary.includes("provider analysis is pending") ||
+        summary.includes("provider did not return a media analysis") ||
+        summary.includes("records metadata and keeps the source available") ||
+        summary.includes("source preserved as a local asset") ||
+        summary.includes("metadata-only") ||
+        summary.includes("raw media bytes were not sent") ||
+        summary.includes("no learning cards or bits were created");
+      const fallbackCapture = mediaStatus === "fallback" &&
+        learningStatus === "learning_output" &&
+        /\\b(captured|download|browser clip|pasted image|screenshot|media from|transcript)\\b/i.test(haystack) &&
+        metadataOnlyText;
       return sourceStatus === "pending_content" ||
         mediaStatus === "pending_provider_analysis" ||
         learningStatus === "pending_learning_output" ||
         providerInput === "metadata_prompt_sent" ||
-        summary.includes("provider media analysis") ||
-        summary.includes("no learning cards or bits were created");
+        metadataOnlyText ||
+        fallbackCapture;
     }
 
     async function loadStatus() {
@@ -13202,6 +13259,10 @@ function renderHtml() {
     setInterval(loadChatVaults, 10000);
     setInterval(loadStatus, 5000);
     setInterval(refreshProviderTabDot, 15000);
+    window.addEventListener("focus", () => refreshProviderTabDot({ force: true }));
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refreshProviderTabDot({ force: true });
+    });
   </script>
 </body>
 </html>`;

@@ -94,7 +94,7 @@ LEARNING_BOOST_MOBILE_STUDY=true
 
 Then open `http://<your-mac-lan-ip>:8789/mobile?token=choose-a-long-local-token` from Safari, Arc, or another browser on the device. The mobile page is for study, quiz/test, and review only; it does not expose Provider settings or file/export controls.
 
-The mobile page keeps the title, generated time, and jump buttons for Today, Quiz/Test, Cards, Bits, and Alerts in one sticky top area. Tapping a card, bit, quiz, session, or alert enters focus mode: the selected item stays clear while surrounding content is visually de-emphasized. Use Clear focus, Escape, or tap empty page space outside the selected item to return to the full page. Mixed Arabic/English prompts and answers use automatic direction and plaintext bidi handling so RTL/LTR text wraps naturally.
+The mobile page keeps the title, generated time, jump buttons, vault selector, Refresh, and Clear focus controls sticky at the top without covering the section you jump to. Tapping a card, bit, quiz, session, or alert enters focus mode: the selected item stays clear while surrounding content is visually de-emphasized. Use Clear focus, Escape, or tap empty page space outside the selected item to return to the full page. Mixed Arabic/English prompts and answers use automatic direction and plaintext bidi handling so RTL/LTR text wraps naturally.
 
 The Help/notice area reports the local Mac URL and, when configured, the trusted-LAN mobile URL. Non-local devices must use the tokenized URL. If the page opens on the Mac but not on another device, confirm `MAC_BRIDGE_HOST=0.0.0.0`, `CHAT_HOST=0.0.0.0`, a long `LEARNING_BOOST_MOBILE_TOKEN`, and the correct Mac LAN address such as `http://172.16.1.117:8789/mobile?token=...`.
 
