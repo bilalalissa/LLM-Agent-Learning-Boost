@@ -8,7 +8,7 @@ For `bilalalissa/Ai-Local-Models-Router` specifically, see [Connect Local AI Rou
 
 ```text
 DEFAULT_AI_PROVIDER=local_auto
-LOCAL_AI_PROVIDER_PRIORITY=mlx_lm_server,ollama,mlx_lm_cli,openai_compat,openai_subscription,openai,gemini,anthropic
+LOCAL_AI_PROVIDER_PRIORITY=mlx_lm_server,ollama,mlx_lm_cli,openai_compat,mesh_llm,openai_subscription,openai,gemini,anthropic
 LOCAL_AI_REQUIRE_CONFIRM_CLOUD_FALLBACK=true
 ```
 
@@ -18,6 +18,7 @@ LOCAL_AI_REQUIRE_CONFIRM_CLOUD_FALLBACK=true
 2. Ollama
 3. MLX-LM CLI
 4. OpenAI-compatible endpoint
+5. Mesh LLM
 
 If no local provider is reachable, configured cloud providers are treated as fallbacks. Cloud fallback is blocked unless the caller explicitly confirms it.
 
@@ -60,6 +61,39 @@ MLX_LM_TIMEOUT_MS=180000
 
 The CLI fallback runs locally on the Mac and does not expose a network service.
 
+## Mesh LLM
+
+Mesh LLM is treated as an OpenAI-compatible local provider. Learning Boost talks to its `/v1` API and does not manage Mesh LLM nodes, publish meshes, or join public meshes by itself.
+
+```text
+MESH_LLM_BASE_URL=http://127.0.0.1:9337/v1
+MESH_LLM_MODEL=Qwen3-8B-Q4_K_M
+MESH_LLM_AUTH_METHOD=none
+MESH_LLM_TIMEOUT_MS=180000
+```
+
+Private same-Mac start command:
+
+```bash
+mesh-llm serve --model Qwen3-8B-Q4_K_M --headless
+```
+
+Controlled LAN/private mesh pattern:
+
+```bash
+mesh-llm serve --model Qwen3-8B-Q4_K_M --headless
+mesh-llm serve --join <invite-token> --headless
+```
+
+Safety rules:
+
+- Prefer localhost or private invite-token meshes for Learning Boost source processing.
+- Do not use `mesh-llm serve --auto` for private notes, medical records, school documents, credentials, customer data, or sensitive screenshots.
+- Do not use `--publish` for Learning Boost unless all prompts are non-sensitive.
+- Do not use `--listen-all` unless the host is on a trusted LAN behind a firewall.
+- Use a specific model id from `/v1/models`; avoid `model=mesh` for stable learning workflows because it is experimental upstream.
+- Configure owner/trust policy outside Learning Boost when using a private multi-node mesh.
+
 ## LAN Safety
 
 - Do not expose local model servers to the public internet.
@@ -75,4 +109,4 @@ The Provider tab shows:
 - Local provider health.
 - Endpoint host without tokens.
 - LAN/privacy warnings.
-- Fallback suggestions such as starting Ollama, starting MLX-LM Server, or confirming cloud fallback.
+- Fallback suggestions such as starting Ollama, starting MLX-LM Server, starting Mesh LLM, or confirming cloud fallback.
