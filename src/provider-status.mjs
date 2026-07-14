@@ -49,6 +49,7 @@ export async function providerStatus(config) {
       "Only configured/not configured flags are shown for API keys and tokens.",
       "Do not expose local model servers to the public internet.",
       "Prefer LAN-only firewall rules for LAN model hosts.",
+      "Use Mesh LLM public meshes only for non-sensitive prompts.",
       "If a provider supports auth, configure it before exposing the service beyond this Mac."
     ]
   };
@@ -58,6 +59,7 @@ function providerAuthMethod(config) {
   if (config.provider === "local_auto") return "local_auto";
   if (config.provider === "ollama") return config.ollama.openAiCompat ? "none_openai_compatible" : "none_native";
   if (config.provider === "mlx_lm_server") return hasRealKey(config.mlxLmServer.apiKey) ? "api_key" : "none";
+  if (config.provider === "mesh_llm") return config.meshLlm.authMethod || "none";
   if (config.provider === "mlx_lm_cli") return "local_cli";
   if (config.provider === "openai") return config.openai.authMethod;
   if (config.provider === "anthropic") return config.anthropic.authMethod;
@@ -71,6 +73,12 @@ function providerAuthMethod(config) {
 function credentialConfigured(config) {
   if (config.provider === "local_auto") return true;
   if (["ollama", "mlx_lm_server", "mlx_lm_cli"].includes(config.provider)) return true;
+  if (config.provider === "mesh_llm") {
+    if ((config.meshLlm.authMethod || "none") === "none") return true;
+    return config.meshLlm.authMethod === "bearer"
+      ? hasRealKey(config.meshLlm.bearerToken)
+      : hasRealKey(config.meshLlm.apiKey);
+  }
   if (config.provider === "openai") return hasRealKey(config.openai.apiKey);
   if (config.provider === "anthropic") return hasRealKey(config.anthropic.apiKey);
   if (config.provider === "openai_compat") {
@@ -92,7 +100,7 @@ function credentialConfigured(config) {
 
 async function liveStatus(config) {
   if (config.provider === "local_auto") return localAutoStatus(config);
-  if (["ollama", "mlx_lm_server", "mlx_lm_cli"].includes(config.provider)) return directLocalStatus(config, config.provider);
+  if (["ollama", "mlx_lm_server", "mesh_llm", "mlx_lm_cli"].includes(config.provider)) return directLocalStatus(config, config.provider);
   if (config.provider === "openai_compat" && isLocalEndpoint(config.openaiCompat.baseUrl)) {
     if (isLocalAiRouterEndpoint(config.openaiCompat.baseUrl)) return localAiRouterStatus(config);
     return directLocalStatus(config, "openai_compat");
@@ -553,6 +561,9 @@ function providerDetails(config) {
       field("Ollama host", safeEndpoint(config.ollama.baseUrl)),
       field("Ollama model", config.ollama.model),
       field("Ollama OpenAI-compatible mode", config.ollama.openAiCompat ? "enabled" : "disabled"),
+      field("Mesh LLM host", safeEndpoint(config.meshLlm.baseUrl)),
+      field("Mesh LLM model", config.meshLlm.model),
+      field("Mesh LLM auth", config.meshLlm.authMethod || "none"),
       field("MLX-LM Server host", safeEndpoint(config.mlxLmServer.baseUrl)),
       field("MLX-LM Server model", config.mlxLmServer.model),
       field("MLX-LM Server API key", configured(hasRealKey(config.mlxLmServer.apiKey))),
@@ -574,6 +585,15 @@ function providerDetails(config) {
       field("MLX-LM Server host", safeEndpoint(config.mlxLmServer.baseUrl)),
       field("MLX-LM Server model", config.mlxLmServer.model),
       field("MLX-LM Server API key", configured(hasRealKey(config.mlxLmServer.apiKey)))
+    ];
+  }
+  if (config.provider === "mesh_llm") {
+    return [
+      field("Mesh LLM host", safeEndpoint(config.meshLlm.baseUrl)),
+      field("Mesh LLM model", config.meshLlm.model),
+      field("Mesh LLM auth", config.meshLlm.authMethod || "none"),
+      field("Mesh LLM API key", configured(hasRealKey(config.meshLlm.apiKey))),
+      field("Mesh LLM bearer token", configured(hasRealKey(config.meshLlm.bearerToken)))
     ];
   }
   if (config.provider === "mlx_lm_cli") {
@@ -626,19 +646,20 @@ function providerDetails(config) {
 function providerTransport(config, live) {
   if (config.provider === "local_auto") {
     if (live.activeProvider === "mlx_lm_cli") return "local_cli";
-    if (["mlx_lm_server", "ollama", "openai_compat"].includes(live.activeProvider)) return "local_http";
+    if (["mlx_lm_server", "ollama", "mesh_llm", "openai_compat"].includes(live.activeProvider)) return "local_http";
     return "local_auto";
   }
   if (config.provider === "mlx_lm_cli") return "local_cli";
-  if (["ollama", "mlx_lm_server"].includes(config.provider)) return "local_http";
+  if (["ollama", "mlx_lm_server", "mesh_llm"].includes(config.provider)) return "local_http";
   if (config.provider === "openai_compat" && isLocalEndpoint(config.openaiCompat.baseUrl)) return "local_http";
   return ["openai_subscription", "openai_oauth", "chatgpt"].includes(config.provider) ? "mac_bridge" : "direct_api";
 }
 
 function localWarnings(config, localHealth) {
-  if (!["local_auto", "ollama", "mlx_lm_server", "mlx_lm_cli"].includes(config.provider)) return [];
+  if (!["local_auto", "ollama", "mlx_lm_server", "mesh_llm", "mlx_lm_cli"].includes(config.provider)) return [];
   const endpointWarnings = [
     ["local_auto", "ollama"].includes(config.provider) ? endpointWarning(config.ollama.baseUrl) : "",
+    ["local_auto", "mesh_llm"].includes(config.provider) ? endpointWarning(config.meshLlm.baseUrl) : "",
     ["local_auto", "mlx_lm_server"].includes(config.provider) ? endpointWarning(config.mlxLmServer.baseUrl) : "",
     config.provider === "local_auto" ? endpointWarning(config.openaiCompat.baseUrl) : ""
   ].filter(Boolean);
@@ -649,7 +670,7 @@ function localWarnings(config, localHealth) {
 }
 
 function localFallbackSuggestions(config, localHealth, live) {
-  if (!["local_auto", "ollama", "mlx_lm_server", "mlx_lm_cli"].includes(config.provider)) return [];
+  if (!["local_auto", "ollama", "mlx_lm_server", "mesh_llm", "mlx_lm_cli"].includes(config.provider)) return [];
   const suggestions = localHealth
     .filter((item) => !item.ok)
     .map((item) => localProviderTip(item.provider));
