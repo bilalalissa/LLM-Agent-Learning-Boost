@@ -3,9 +3,9 @@ import { spawn } from "node:child_process";
 export const LOCAL_PROVIDER_PRIORITY = [
   "mlx_lm_server",
   "ollama",
-  "mesh_llm",
   "mlx_lm_cli",
   "openai_compat",
+  "mesh_llm",
   "openai_subscription",
   "openai",
   "gemini",
