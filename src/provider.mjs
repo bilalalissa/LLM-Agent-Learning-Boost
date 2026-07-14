@@ -20,7 +20,7 @@ export function createProvider(config = getConfig()) {
 }
 
 function createDirectProvider(config, provider) {
-  if (["ollama", "mlx_lm_server", "mlx_lm_cli"].includes(provider)) {
+  if (["ollama", "mesh_llm", "mlx_lm_server", "mlx_lm_cli"].includes(provider)) {
     return providerForResolvedLocal(config, { provider });
   }
   if (provider === "openai") return openAiProvider(config.openai, config.model);
@@ -45,7 +45,7 @@ function localAutoProvider(config) {
         return providerForResolvedLocal(config, resolved).complete(messages, options);
       }
       const tips = (config.localAI.priority || [])
-        .filter((provider) => ["mlx_lm_server", "ollama", "mlx_lm_cli", "openai_compat"].includes(provider))
+        .filter((provider) => ["mlx_lm_server", "ollama", "mesh_llm", "mlx_lm_cli", "openai_compat"].includes(provider))
         .map(localProviderTip);
       const fallback = cloudFallbackProviders(config).find((provider) => isCloudFallbackConfigured(config, provider));
       if (!fallback) {
@@ -73,7 +73,7 @@ function providerForResolvedLocal(config, resolved) {
       apiKey: config.mlxLmServer.apiKey,
       baseUrl: `${config.mlxLmServer.baseUrl.replace(/\/$/, "")}/v1`,
       timeoutMs: config.providerTimeoutMs || 60000
-    }, config.mlxLmServer.model, { apiKeyOptional: true });
+    }, config.mlxLmServer.model, { apiKeyOptional: true, providerName: "MLX-LM Server" });
   }
   if (resolved.provider === "ollama") {
     if (config.ollama.openAiCompat) {
@@ -82,9 +82,15 @@ function providerForResolvedLocal(config, resolved) {
         apiKey: "",
         baseUrl: `${config.ollama.baseUrl.replace(/\/$/, "")}/v1`,
         timeoutMs: config.ollama.timeoutMs || config.providerTimeoutMs || 60000
-      }, config.ollama.model, { apiKeyOptional: true });
+      }, config.ollama.model, { apiKeyOptional: true, providerName: "Ollama" });
     }
     return ollamaNativeProvider(config.ollama);
+  }
+  if (resolved.provider === "mesh_llm") {
+    return openAiProvider(config.meshLlm, config.meshLlm.model, {
+      apiKeyOptional: config.meshLlm.authMethod === "none" || isLocalish(config.meshLlm.baseUrl),
+      providerName: "Mesh LLM"
+    });
   }
   if (resolved.provider === "mlx_lm_cli") return mlxLmCliProvider(config.mlxLmCli);
   if (resolved.provider === "openai_compat") {
@@ -125,11 +131,11 @@ function codexCliProvider(options, model) {
   };
 }
 
-function openAiProvider(options, model, { apiKeyOptional = false } = {}) {
+function openAiProvider(options, model, { apiKeyOptional = false, providerName = "OpenAI-compatible" } = {}) {
   return {
     name: "openai-compatible",
     async complete(messages, { temperature = 0.2 } = {}) {
-      const headers = openAiHeaders(options, { apiKeyOptional });
+      const headers = openAiHeaders(options, { apiKeyOptional, providerName });
       const response = await fetchWithTimeout(`${options.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers: {
@@ -142,8 +148,8 @@ function openAiProvider(options, model, { apiKeyOptional = false } = {}) {
           temperature,
           stream: false
         })
-      }, options.timeoutMs || 60000, "OpenAI-compatible");
-      if (!response.ok) throw await providerErrorFromResponse(response, "OpenAI-compatible");
+      }, options.timeoutMs || 60000, providerName);
+      if (!response.ok) throw await providerErrorFromResponse(response, providerName);
       const data = await response.json();
       return data.choices?.[0]?.message?.content || "";
     }
@@ -402,7 +408,7 @@ function geminiProvider(options, model) {
   };
 }
 
-function openAiHeaders(options, { apiKeyOptional = false } = {}) {
+function openAiHeaders(options, { apiKeyOptional = false, providerName = "OpenAI/OpenAI-compatible" } = {}) {
   const authMethod = options.authMethod || "api_key";
   if (authMethod === "oauth") {
     throw new ProviderError("OpenAI API calls require API keys. ChatGPT Plus/Pro/Team subscription login cannot be used as OAuth for this local API client.");
@@ -410,11 +416,11 @@ function openAiHeaders(options, { apiKeyOptional = false } = {}) {
   if (authMethod === "none") return {};
   if (authMethod === "bearer") {
     if (apiKeyOptional && !hasRealKey(options.bearerToken)) return {};
-    assertKey(options.bearerToken, "OpenAI-compatible bearer token");
+    assertKey(options.bearerToken, `${providerName} bearer token`);
     return { authorization: `Bearer ${options.bearerToken}` };
   }
   if (apiKeyOptional && !hasRealKey(options.apiKey)) return {};
-  assertKey(options.apiKey, "OpenAI/OpenAI-compatible");
+  assertKey(options.apiKey, providerName);
   const headers = { authorization: `Bearer ${options.apiKey}` };
   if (options.organization) headers["OpenAI-Organization"] = options.organization;
   if (options.project) headers["OpenAI-Project"] = options.project;
