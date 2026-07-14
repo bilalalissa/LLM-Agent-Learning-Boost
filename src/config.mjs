@@ -91,7 +91,7 @@ const PROVIDER_DEFAULTS = {
   AI_ACCESS_METHOD: "local_first",
   DEFAULT_AI_PROVIDER: "local_auto",
   DEFAULT_AI_MODEL: "qwen3:8b",
-  LOCAL_AI_PROVIDER_PRIORITY: "mlx_lm_server,ollama,mesh_llm,mlx_lm_cli,openai_compat,openai_subscription,openai,gemini,anthropic",
+  LOCAL_AI_PROVIDER_PRIORITY: "mlx_lm_server,ollama,mlx_lm_cli,openai_compat,openai_subscription,openai,gemini,anthropic",
   LOCAL_AI_ALLOW_LAN: "true",
   LOCAL_AI_HEALTH_TIMEOUT_MS: "2500",
   LOCAL_AI_REQUIRE_CONFIRM_CLOUD_FALLBACK: "true",
@@ -151,7 +151,7 @@ export const PROVIDER_CONFIG_OPTIONS = {
   },
   endpoints: ["http://127.0.0.1:17640", "http://127.0.0.1:17640/v1", "http://127.0.0.1:9337/v1", "http://127.0.0.1:11434", "http://127.0.0.1:8080", "http://localhost:1234/v1", "https://api.openai.com/v1", "https://api.anthropic.com", "https://generativelanguage.googleapis.com"],
   commands: ["codex", "mlx_lm.generate"],
-  priorities: ["mlx_lm_server,ollama,mesh_llm,mlx_lm_cli,openai_compat,openai_subscription,openai,gemini,anthropic", "ollama,mesh_llm,mlx_lm_server,mlx_lm_cli,openai_compat", "mesh_llm,ollama,openai_compat", "mlx_lm_cli,ollama,openai_compat"]
+  priorities: ["mlx_lm_server,ollama,mlx_lm_cli,openai_compat,openai_subscription,openai,gemini,anthropic", "mlx_lm_server,ollama,mesh_llm,mlx_lm_cli,openai_compat,openai_subscription,openai,gemini,anthropic", "ollama,mesh_llm,mlx_lm_server,mlx_lm_cli,openai_compat", "mesh_llm,ollama,openai_compat", "mlx_lm_cli,ollama,openai_compat"]
 };
 
 export function configPointerFile() {
