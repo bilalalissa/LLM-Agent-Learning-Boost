@@ -147,6 +147,7 @@ test("provider config UI reader hides secrets and writer preserves unrelated con
     "OPENAI_SUBSCRIPTION_CLIENT=codex",
     "OPENAI_CODEX_COMMAND=codex",
     "OPENAI_API_KEY=sk-existing",
+    "LEARNING_BOOST_MOBILE_TOKEN=mobile-secret-existing",
     "UNRELATED_VALUE=keep-me",
     ""
   ].join("\n"));
@@ -154,10 +155,13 @@ test("provider config UI reader hides secrets and writer preserves unrelated con
     const before = readProviderConfigForUi(file);
     assert.equal(before.values.DEFAULT_AI_PROVIDER, "local_auto");
     assert.equal(before.secrets.OPENAI_API_KEY.configured, true);
+    assert.equal(before.secrets.LEARNING_BOOST_MOBILE_TOKEN.configured, true);
+    assert.equal("LEARNING_BOOST_MOBILE_TOKEN" in before.values, false);
     assert.equal(before.values.AUTO_INGEST_ON_START, "true");
     assert.equal(before.values.WATCH_INTERVAL_MS, "5000");
     assert.equal(before.values.AI_PROVIDER_TIMEOUT_MS, "60000");
     assert.equal(JSON.stringify(before).includes("sk-existing"), false);
+    assert.equal(JSON.stringify(before).includes("mobile-secret-existing"), false);
     assert.ok(before.options.providers.includes("openai_subscription"));
     assert.ok(before.options.providers.includes("chatgpt"));
 
@@ -546,4 +550,41 @@ test("openai_subscription Codex pipe failures reject without crashing the provid
       && /Codex CLI (exited|timed out)/.test(error.message)
       && !/Failed to send prompt to Codex CLI/.test(error.message)
   );
+});
+
+test("openai_subscription isolates bounded background analysis from interactive Codex plugins", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "learning-boost-codex-automation-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fakeCodex = path.join(root, "fake-codex");
+  const argsFile = path.join(root, "args.txt");
+  fs.writeFileSync(fakeCodex, `#!/bin/sh
+printf '%s\n' "$@" > '${argsFile}'
+output=''
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = '--output-last-message' ]; then output="$argument"; fi
+  previous="$argument"
+done
+cat >/dev/null
+printf '%s' '{"ok":true}' > "$output"
+`);
+  fs.chmodSync(fakeCodex, 0o755);
+  const provider = createProvider(baseConfig({
+    provider: "openai_subscription",
+    model: "gpt-test",
+    openai: {
+      ...baseConfig().openai,
+      codexCommand: fakeCodex,
+      codexTimeoutMs: 5000,
+      codexAutomationTimeoutMs: 2000,
+      codexAutomationReasoningEffort: "low"
+    }
+  }));
+
+  assert.equal(await provider.complete([{ role: "user", content: "analyze" }], { automation: true }), '{"ok":true}');
+  const args = fs.readFileSync(argsFile, "utf8");
+  assert.match(args, /--ignore-user-config/);
+  assert.match(args, /--ignore-rules/);
+  assert.match(args, /plugins/);
+  assert.match(args, /model_reasoning_effort="low"/);
 });

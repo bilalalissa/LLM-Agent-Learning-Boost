@@ -23,6 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var notificationPollTimer: Timer?
     private var navigationRetryCounts: [ObjectIdentifier: Int] = [:]
     private var serverHealthFailures = 0
+    private var activeVaultAccessURL: URL?
+    private var vaultAccessPromptShown = false
     private weak var snapBoxView: NSView?
     private weak var snapTextView: WKWebView?
     private let closeBehaviorKey = "closeButtonKeepsRunning"
@@ -37,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var defaultConfigURL: URL { appSupport.appendingPathComponent("config.env") }
     private var configPointerURL: URL { appSupport.appendingPathComponent("config-path.txt") }
     private var serverLogURL: URL { appSupport.appendingPathComponent("server.log") }
+    private var vaultAccessBookmarkURL: URL { appSupport.appendingPathComponent("vault-access.bookmark") }
     private var configURL: URL { selectedConfigURL() }
     private var agentURL: URL { Bundle.main.resourceURL!.appendingPathComponent("agent", isDirectory: true) }
 
@@ -47,7 +50,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         removeLegacyLoginItems()
         installStatusItem()
         makeWindow()
+        let vaultAccessReady = restoreVaultAccess() || configuredVaultRootIsAccessible()
         startServer()
+        if !vaultAccessReady {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.promptForVaultAccessIfNeeded()
+            }
+        }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             self?.runStartupChecks()
         }
@@ -86,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         isTerminating = true
         notificationPollTimer?.invalidate()
         closeNativeSnap()
+        activeVaultAccessURL?.stopAccessingSecurityScopedResource()
         terminateServerProcess()
     }
 
@@ -93,6 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.add(self, name: "snap")
         configuration.userContentController.add(self, name: "learningNotification")
+        configuration.userContentController.add(self, name: "openExternal")
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -123,7 +134,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         if message.name == "learningNotification" {
             handleLearningNotificationMessage(body)
+            return
         }
+        if message.name == "openExternal" {
+            openExternalMobileStudyURL(body)
+        }
+    }
+
+    private func openExternalMobileStudyURL(_ body: [String: Any]) {
+        guard let value = body["url"] as? String,
+              let url = URL(string: value),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              url.port == Int(port),
+              url.path == "/mobile" else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private func configureNotifications() {
@@ -342,6 +366,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(menuItem("Open Config", #selector(openConfig), ","))
         menu.addItem(menuItem("Choose Config File...", #selector(chooseConfigFile), ""))
         menu.addItem(menuItem("Open Vaults Folder", #selector(openVaults), "v"))
+        menu.addItem(menuItem("Grant Vault Access...", #selector(grantVaultAccess), ""))
         menu.addItem(NSMenuItem.separator())
         startAtLoginItem = menuItem("Start at Login", #selector(toggleLoginItem), "")
         dockIconItem = menuItem("Show Dock Icon", #selector(toggleDockIcon), "")
@@ -492,6 +517,118 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc private func openVaults() {
         let root = readConfigValue("VAULTS_ROOT") ?? "~/Documents/Obsidian-Vaults"
         NSWorkspace.shared.open(URL(fileURLWithPath: expandTilde(root)))
+    }
+
+    @objc private func grantVaultAccess() {
+        presentVaultAccessPanel()
+    }
+
+    private func promptForVaultAccessIfNeeded() {
+        guard !vaultAccessPromptShown, !configuredVaultRootIsAccessible() else { return }
+        vaultAccessPromptShown = true
+        let alert = NSAlert()
+        alert.messageText = "Allow access to your Obsidian vaults"
+        alert.informativeText = "Learning Boost can load lists, notes, topics, and pending sources only after macOS grants access to the folder that contains your vaults. Select the configured vaults folder once; the app remembers it for future launches."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Grant Access")
+        alert.addButton(withTitle: "Later")
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertFirstButtonReturn {
+                self.presentVaultAccessPanel()
+            }
+        }
+    }
+
+    private func presentVaultAccessPanel() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose the folder containing your Obsidian vaults"
+        panel.message = "Select Obsidian-Vaults, not an individual file. Learning Boost needs read/write access to process pending sources and update the wiki."
+        panel.prompt = "Grant Access"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.directoryURL = configuredVaultRootURL()
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let selected = panel.url else { return }
+            let startedAccess = selected.startAccessingSecurityScopedResource()
+            guard self.hasAnyVault(in: selected.path) else {
+                if startedAccess { selected.stopAccessingSecurityScopedResource() }
+                self.showAlert(
+                    "No Obsidian vaults found",
+                    "Choose the Obsidian-Vaults folder that directly contains Arb-vault, Eng-vault, Mixed-vault, or another Obsidian vault. The current configuration was not changed."
+                )
+                return
+            }
+            if startedAccess { selected.stopAccessingSecurityScopedResource() }
+            self.persistVaultAccess(selected)
+            self.writeConfigValue("VAULTS_ROOT", value: selected.path)
+            self.vaultAccessPromptShown = false
+            self.restartServerAndReload()
+        }
+    }
+
+    private func configuredVaultRootURL() -> URL {
+        let configured = readConfigValue("VAULTS_ROOT") ?? "~/Documents/Obsidian-Vaults"
+        return URL(fileURLWithPath: expandTilde(configured), isDirectory: true)
+    }
+
+    private func configuredVaultRootIsAccessible() -> Bool {
+        hasAnyVault(in: configuredVaultRootURL().path)
+    }
+
+    private func persistVaultAccess(_ url: URL) {
+        activeVaultAccessURL?.stopAccessingSecurityScopedResource()
+        _ = url.startAccessingSecurityScopedResource()
+        activeVaultAccessURL = url
+        do {
+            let data = try url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
+            try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+            try data.write(to: vaultAccessBookmarkURL, options: .atomic)
+        } catch {
+            do {
+                let data = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+                try data.write(to: vaultAccessBookmarkURL, options: .atomic)
+            } catch {
+                appendServerLog(Data("[native] could not persist vault access bookmark: \(error.localizedDescription)\n".utf8))
+            }
+        }
+    }
+
+    private func restoreVaultAccess() -> Bool {
+        guard let data = try? Data(contentsOf: vaultAccessBookmarkURL) else { return false }
+        var stale = false
+        let scoped = try? URL(
+            resolvingBookmarkData: data,
+            options: [.withSecurityScope],
+            relativeTo: nil,
+            bookmarkDataIsStale: &stale
+        )
+        let resolved = scoped ?? (try? URL(
+            resolvingBookmarkData: data,
+            options: [],
+            relativeTo: nil,
+            bookmarkDataIsStale: &stale
+        ))
+        guard let resolved else { return false }
+        _ = resolved.startAccessingSecurityScopedResource()
+        activeVaultAccessURL = resolved
+        if stale { persistVaultAccess(resolved) }
+        return hasAnyVault(in: resolved.path)
+    }
+
+    private func writeConfigValue(_ key: String, value: String) {
+        guard var text = try? String(contentsOf: configURL, encoding: .utf8) else { return }
+        var lines = text.components(separatedBy: .newlines)
+        let prefix = "\(key)="
+        let safeValue = value.replacingOccurrences(of: "\n", with: "").replacingOccurrences(of: "\r", with: "")
+        if let index = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix(prefix) }) {
+            lines[index] = "\(prefix)\(safeValue)"
+        } else {
+            lines.append("\(prefix)\(safeValue)")
+        }
+        text = lines.joined(separator: "\n")
+        try? text.write(to: configURL, atomically: true, encoding: .utf8)
     }
 
     @objc private func toggleLoginItem() {
@@ -813,6 +950,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             appendServerLog(Data("[native] using existing healthy server on 127.0.0.1:\(port)\n".utf8))
             serverRestartAttempts = 0
             serverHealthFailures = 0
+            scheduleServerHealthWatchdog(after: 30)
             return
         }
         stopServerOnConfiguredPort()
@@ -846,8 +984,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.serverProcess = nil
                 }
                 guard !self.isTerminating else { return }
-                guard terminatedProcess.terminationStatus != 0 else { return }
                 guard self.serverRestartAttempts < 2 else { return }
+                self.appendServerLog(Data("[native] server exited unexpectedly with status \(terminatedProcess.terminationStatus); restarting\n".utf8))
                 self.serverRestartAttempts += 1
                 self.startServer()
                 self.loadAppWhenReady()
@@ -858,7 +996,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             try process.run()
             serverRestartAttempts = 0
             serverHealthFailures = 0
-            scheduleServerHealthWatchdog(after: 45)
+            scheduleServerHealthWatchdog(after: 30)
         } catch {
             showAlert("Node.js required", "Install Node.js, then restart LLM Agent Learning Boost.\n\nThe app checks /opt/homebrew/bin/node, /usr/local/bin/node, and PATH.\n\nError: \(error.localizedDescription)")
         }
@@ -887,7 +1025,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func checkServerHealthAndRestartIfNeeded() {
-        guard !isTerminating, serverProcess?.isRunning == true,
+        guard !isTerminating,
               let statusURL = URL(string: "http://127.0.0.1:\(port)/api/status") else { return }
         var request = URLRequest(url: statusURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
         request.timeoutInterval = 5
@@ -902,7 +1040,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
                 self.serverHealthFailures += 1
                 self.appendServerLog(Data("[native] server health check failed \(self.serverHealthFailures) time(s)\n".utf8))
-                if self.serverHealthFailures >= 2 {
+                if self.serverHealthFailures >= 3 {
                     self.serverHealthFailures = 0
                     self.terminateServerProcess()
                     self.startServer()

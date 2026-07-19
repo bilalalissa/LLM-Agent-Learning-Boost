@@ -8,11 +8,13 @@ import test from "node:test";
 
 const serverSource = fs.readFileSync(path.resolve("src/server.mjs"), "utf8");
 const automationSource = fs.readFileSync(path.resolve("src/learning-automation.mjs"), "utf8");
+const tabDataWorkerSource = fs.readFileSync(path.resolve("src/tab-data-worker.mjs"), "utf8");
 const clipperPopupSource = fs.readFileSync(path.resolve("extension/arc-clipper/popup.js"), "utf8");
 const clipperPopupHtml = fs.readFileSync(path.resolve("extension/arc-clipper/popup.html"), "utf8");
 const clipperBackgroundSource = fs.readFileSync(path.resolve("extension/arc-clipper/background.js"), "utf8");
 const clipperContentSource = fs.readFileSync(path.resolve("extension/arc-clipper/content.js"), "utf8");
 const macosWrapperSource = fs.readFileSync(path.resolve("native/macos/LLMWikiAgent/Sources/LLMWikiAgent/main.swift"), "utf8");
+const buildScriptSource = fs.readFileSync(path.resolve("scripts/build_macos_app.sh"), "utf8");
 const macosInstallScript = fs.readFileSync(path.resolve("scripts/install_macos_app.sh"), "utf8");
 
 test("Learning Boost UI includes Stage 8 sections and working-memory panels", () => {
@@ -270,16 +272,15 @@ test("mobile study header keeps navigation visible and focus can be cleared outs
 });
 
 test("file list summaries expose explicit totals and tab worker classifies pending media separately", () => {
-  const workerSource = fs.readFileSync(path.resolve("src/tab-data-worker.mjs"), "utf8");
   assert.match(serverSource, /Total: " \+ rows\.length/);
   assert.match(serverSource, /vault \+ ": " \+ count/);
-  assert.match(workerSource, /readSourcePageMeta/);
-  assert.match(workerSource, /mediaAnalysisStatus/);
-  assert.match(workerSource, /providerInputStatus/);
-  assert.match(workerSource, /learningOutputStatus/);
-  assert.match(workerSource, /pending provider analysis/);
-  assert.match(workerSource, /pending content extraction/);
-  assert.match(workerSource, /pending learning output/);
+  assert.match(tabDataWorkerSource, /readSourcePageMeta/);
+  assert.match(tabDataWorkerSource, /mediaAnalysisStatus/);
+  assert.match(tabDataWorkerSource, /providerInputStatus/);
+  assert.match(tabDataWorkerSource, /learningOutputStatus/);
+  assert.match(tabDataWorkerSource, /pending provider analysis/);
+  assert.match(tabDataWorkerSource, /pending content extraction/);
+  assert.match(tabDataWorkerSource, /pending learning output/);
 });
 
 test("Chat tab exposes controlled remote research controls", () => {
@@ -315,6 +316,9 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
     "Learning Profile Summary",
     "Mobile Study",
     "Learning Boost Mobile Study",
+    "Open on other devices",
+    "Open in browser",
+    "Each displayed link includes the private mobile token",
     "Short Quiz/Test",
     "Card and bit types",
     "Clear focus",
@@ -339,6 +343,20 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /renderMobileStudyHtml/);
   assert.match(serverSource, /mobileStudyPayload/);
   assert.match(serverSource, /mobileStudyAccessSummary/);
+  assert.match(serverSource, /addMobileTokenToUrl/);
+  assert.match(serverSource, /exposeMobileToken: requestTargetsLoopback\(request\)/);
+  assert.match(serverSource, /hostname === "localhost"/);
+  assert.match(serverSource, /device-url-copy/);
+  assert.match(serverSource, /messageHandlers\?\.openExternal/);
+  assert.match(macosWrapperSource, /name: "openExternal"/);
+  assert.match(macosWrapperSource, /openExternalMobileStudyURL/);
+  assert.match(macosWrapperSource, /Grant Vault Access/);
+  assert.match(macosWrapperSource, /vault-access\.bookmark/);
+  assert.match(macosWrapperSource, /startAccessingSecurityScopedResource/);
+  assert.match(macosWrapperSource, /writeConfigValue\("VAULTS_ROOT"/);
+  assert.match(buildScriptSource, /NSDocumentsFolderUsageDescription/);
+  assert.match(buildScriptSource, /NSDownloadsFolderUsageDescription/);
+  assert.match(macosWrapperSource, /url\.path == "\/mobile"/);
   assert.match(serverSource, /localLanAddresses/);
   assert.match(serverSource, /recommendedUrl/);
   assert.match(serverSource, /lanUrls/);
@@ -379,12 +397,38 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /automationControlText/);
   assert.match(automationSource, /recoveredFromStaleRuntime/);
   assert.match(serverSource, /autoIngestVaultCursor/);
-  assert.match(serverSource, /Learning Autopilot is checking/);
+  assert.match(serverSource, /Learning Autopilot is processing one pending item/);
   assert.match(serverSource, /const pendingRawCount = safeRawCandidateCount\(vaultPath\);/);
   assert.match(serverSource, /const pendingResourceCount = safeQueueableResourceCount\(vaultPath\);/);
-  assert.match(serverSource, /const pendingMediaCount = safePendingProviderMediaCount\(vaultPath\);/);
-  assert.match(serverSource, /if \(!pendingRawCount && !pendingResourceCount && !pendingMediaCount\) continue;/);
+  assert.match(serverSource, /const primary = candidates\.find\(\(item\) =>[\s\S]*?Date\.now\(\) >= item\.retryAfter/);
+  assert.match(serverSource, /if \(primary\) \{/);
+  assert.match(serverSource, /for \(const candidate of candidates\) \{/);
+  assert.match(serverSource, /const canRetryMedia = Date\.now\(\) >= Number\(pendingMediaRetryAfter\.get\(vaultPath\) \|\| 0\);/);
+  assert.match(serverSource, /const pendingMediaCount = canRetryMedia \? safePendingProviderMediaCount\(vaultPath\) : 0;/);
+  assert.match(serverSource, /if \(!pendingMediaCount\) continue;/);
   assert.match(serverSource, /reprocessPendingMedia: pendingVault\.pendingMediaCount > 0/);
+  assert.match(serverSource, /pendingMediaRetryAfter\.set\(pendingVault\.vaultPath, Date\.now\(\) \+ 10 \* 60 \* 1000\)/);
+  assert.match(serverSource, /skipProviderReadinessProbe: true/);
+  assert.match(serverSource, /autoIngestRetryAfter\.set/);
+  assert.match(serverSource, /const noProgress = count === 0 && remainingTotal > 0 && !madeQueueProgress/);
+  assert.match(serverSource, /return listRawCandidates\(vaultPath\)/);
+  assert.match(serverSource, /terminateWorkerTree\(worker, "SIGTERM"\)/);
+  assert.match(serverSource, /process\.kill\(-worker\.pid, signal\)/);
+  assert.match(serverSource, /installWorkerShutdownHandlers\(\)/);
+  assert.match(serverSource, /providerBusy = ingestRunning \|\| Boolean\(autoIngestWorker\)/);
+  assert.match(serverSource, /data-config-key="INGEST_ANALYSIS_PROMPT_MAX_CHARS"/);
+  assert.match(serverSource, /data-config-key="OPENAI_CODEX_AUTOMATION_TIMEOUT_MS"/);
+  assert.match(serverSource, /data-config-key="OPENAI_CODEX_AUTOMATION_REASONING_EFFORT"/);
+  assert.match(serverSource, /A duplicate readiness probe was not started/);
+  assert.match(serverSource, /notesLoadRetryCount <= 4/);
+  assert.match(serverSource, /showNotesRetry/);
+  assert.match(serverSource, /annotationRefreshDue/);
+  assert.match(serverSource, /topicContentCache/);
+  assert.match(serverSource, /refreshCachedLearningNotifications\(vaultPath\)/);
+  assert.match(serverSource, /autoRefreshTabs && !ingestRunning/);
+  assert.match(serverSource, /kind === "learning"[\s\S]*?600000/);
+  assert.doesNotMatch(serverSource, /updateLearningNotificationAction[\s\S]{0,500}refreshTabData\("learning"\)/);
+  assert.match(serverSource, /Selecting a topic does not call an AI provider or reprocess its source/);
   assert.match(serverSource, /Resume/);
   assert.match(serverSource, /Snooze 1 hour/);
   assert.match(serverSource, /Automatic learning stopped/);
@@ -392,6 +436,10 @@ test("Learning tab has timeline, bounded tab loading, read-state, and verified e
   assert.match(serverSource, /tabPayloadStatus/);
   assert.match(serverSource, /loading: status === "loading"/);
   assert.match(serverSource, /scheduleTabDataRefresh/);
+  assert.match(serverSource, /const resultFile = tempWorkerResultFile\("llm-learning-tab-data-result", kind\);/);
+  assert.match(serverSource, /tab-data-worker\.mjs"\), kinds\.join\(","\), resultFile/);
+  assert.match(serverSource, /cleanupWorkerResult\(resultFile\)/);
+  assert.match(tabDataWorkerSource, /if \(resultFile\) process\.exit\(0\)/);
   assert.match(serverSource, /state\.items\.length && state\.loading/);
   assert.doesNotMatch(serverSource, /state\.items\.length && stale\) return "stale_refreshing"/);
   assert.doesNotMatch(serverSource, /refreshTabData\(kind\);/);

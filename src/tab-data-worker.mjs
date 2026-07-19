@@ -1,10 +1,10 @@
 import { getConfig } from "./config.mjs";
 import { listArchiveHistory, listFileHistory } from "./history.mjs";
-import { coachingSummary, writeBehaviorPages } from "./learning-coach.mjs";
+import { coachingSummary } from "./learning-coach.mjs";
 import { learningAutomationStatus, readLearningNotifications } from "./learning-automation.mjs";
 import { learningPlanningState } from "./learning-planner.mjs";
 import { readLearningState } from "./learning-store.mjs";
-import { listHighlights, listNotes } from "./notes.mjs";
+import { listAnnotations } from "./notes.mjs";
 import { readPlanUpdateSuggestions } from "./plan-update-suggester.mjs";
 import { readRemoteResearchSettings } from "./remote-research.mjs";
 import { groupedResourceInbox, readSourceCaptureSettings } from "./source-capture.mjs";
@@ -24,8 +24,11 @@ try {
   if (includeAll || requested.has("files")) result.files = await listFileHistoryForWorker(config);
   if (includeAll || requested.has("archives")) result.archives = await listArchiveHistoryForWorker(config);
   if (includeAll || requested.has("topics")) result.topics = await listTopicsFromIndexes(config);
-  if (includeAll || requested.has("notes")) result.notes = listNotes(config);
-  if (includeAll || requested.has("highlights")) result.highlights = listHighlights(config);
+  if (includeAll || requested.has("notes") || requested.has("highlights")) {
+    const annotations = listAnnotations(config);
+    result.notes = annotations.notes;
+    result.highlights = annotations.highlights;
+  }
   if (includeAll || requested.has("learning")) result.learning = enrichedLearningState(config);
   writeResult({ ok: true, result });
   if (resultFile) process.exit(0);
@@ -58,7 +61,6 @@ function enrichedLearningState(config) {
     const vaultPath = vaultPaths.find((candidate) => vaultName(candidate) === item.vault);
     if (!vaultPath) return item;
     const behaviorCoach = coachingSummary(vaultPath, { learningProfile: item.learningProfile });
-    writeBehaviorPages(vaultPath, behaviorCoach);
     return {
       ...item,
       behaviorCoach,
@@ -112,7 +114,7 @@ async function listArchiveHistoryForWorker(config) {
 async function recordsFromLogForWorker(vaultPath) {
   const log = await readTextWithTimeout(path.join(vaultPath, "log.md"));
   if (!log) return [];
-  const records = [];
+  const records = new Map();
   const sections = log.split(/\n(?=## \[\d{4}-\d{2}-\d{2}\] )/);
   for (const section of sections) {
     const header = section.match(/^## \[(\d{4}-\d{2}-\d{2})\]\s+ingest\s+\|\s+(.+)$/m);
@@ -128,21 +130,29 @@ async function recordsFromLogForWorker(vaultPath) {
     const processedAtMs = parseLocalDateMs(processedAt) || Date.parse(date) || 0;
     const receivedAtMs = parseLocalDateMs(receivedAt) || Date.parse(date) || processedAtMs;
     const resolvedSourcePage = sourcePage || sourcePageFromProcessedRel(processedRel, title);
-    const sourceMeta = readSourcePageMeta(vaultPath, resolvedSourcePage);
-    records.push({
+    const key = `${vaultName(vaultPath)}|${processedRel}`;
+    const previous = records.get(key);
+    if (previous && previous.processedAtMs >= processedAtMs) continue;
+    records.set(key, {
       vault: vaultName(vaultPath),
       file: processedRel,
       sourcePage: resolvedSourcePage,
-      sourceStatus: sourceMeta.status,
-      mediaAnalysisStatus: sourceMeta.mediaAnalysisStatus,
-      providerInputStatus: sourceMeta.providerInputStatus,
-      learningOutputStatus: sourceMeta.learningOutputStatus,
-      status: fileHistoryStatus(sourcePage, sourceMeta),
+      sourcePagePresent: Boolean(sourcePage),
       receivedAtMs,
       processedAtMs
     });
   }
-  return dedupeBy(records, (record) => `${record.vault}|${record.file}`);
+  return [...records.values()].map((record) => {
+    const sourceMeta = readSourcePageMeta(vaultPath, record.sourcePage);
+    return {
+      ...record,
+      sourceStatus: sourceMeta.status,
+      mediaAnalysisStatus: sourceMeta.mediaAnalysisStatus,
+      providerInputStatus: sourceMeta.providerInputStatus,
+      learningOutputStatus: sourceMeta.learningOutputStatus,
+      status: fileHistoryStatus(record.sourcePagePresent ? record.sourcePage : "", sourceMeta)
+    };
+  }).map(({ sourcePagePresent, ...record }) => record);
 }
 
 async function archiveRecordsFromLogForWorker(vaultPath) {
@@ -192,28 +202,9 @@ async function listTopicsFromIndexes(config) {
         updated: cells[3],
         tags: [],
         created: "",
-        element: cells[1],
-        ...sourceTopicMeta(vaultPath, link.path)
+        element: cells[1]
       });
     }
-  }
-  for (const record of await listFileHistoryForWorker(config)) {
-    if (!record.sourcePage) continue;
-    addTopic(topics, {
-      vault: record.vault,
-      title: titleFromPath(record.sourcePage),
-      path: record.sourcePage.replace(/\.md$/i, ""),
-      type: "source",
-      summary: record.file || record.sourcePage,
-      updated: dateFromLocal(record.processedAt) || dateFromLocal(record.receivedAt),
-      tags: [],
-      created: dateFromLocal(record.receivedAt),
-      element: "source",
-      sourceStatus: record.sourceStatus || "",
-      mediaAnalysisStatus: record.mediaAnalysisStatus || "",
-      providerInputStatus: record.providerInputStatus || "",
-      learningOutputStatus: record.learningOutputStatus || ""
-    });
   }
   return [...topics.values()].sort((a, b) => a.title.localeCompare(b.title));
 }

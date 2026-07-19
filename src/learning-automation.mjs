@@ -151,7 +151,9 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
     };
   }
 
-  const readiness = await providerReadiness(options.provider, options.config);
+  const readiness = options.skipProviderReadinessProbe === true
+    ? { ready: true, detail: "The source analysis request is the provider readiness check for this processing run." }
+    : await providerReadiness(options.provider, options.config);
   if (!readiness.ready) {
     const detail = `Provider is not ready for Learning Autopilot: ${readiness.detail}`;
     recordLearningNotification(vaultPath, {
@@ -191,6 +193,7 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
   });
   const marked = markResourceIngestResults(vaultPath, results);
   const completedResults = results.filter((result) =>
+    !result.duplicateSkipped &&
     !(result.pendingContent || result.pendingProviderAnalysis || result.learning?.pendingContent || result.learning?.pendingProviderAnalysis)
   );
   if (completedResults.length) {
@@ -199,7 +202,7 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
     });
   }
   for (const result of results) {
-    if (result.pendingContent || result.pendingProviderAnalysis || result.learning?.pendingContent || result.learning?.pendingProviderAnalysis) continue;
+    if (result.duplicateSkipped || result.pendingContent || result.pendingProviderAnalysis || result.learning?.pendingContent || result.learning?.pendingProviderAnalysis) continue;
     recordLearningNotification(vaultPath, {
       type: "source_processed",
       severity: "info",
@@ -213,7 +216,7 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
   }
 
   let planDraft = { plans: [], goals: [] };
-  if (settings.autoDraftPlans && shouldDraftPlans(vaultPath, results)) {
+  if (settings.autoDraftPlans && shouldDraftPlans(vaultPath, completedResults)) {
     planDraft = draftLearningPlans(vaultPath, { limit: 3 });
     if ((planDraft.plans || []).length) {
       recordLearningNotification(vaultPath, {
@@ -246,12 +249,15 @@ export async function runLearningAutomationForVault(vaultPath, options = {}) {
 
   return {
     skipped: false,
-    status: "processed",
-    detail: `Processed ${results.length} source(s), updated ${marked.updated} captured resource(s).`,
+    status: completedResults.length ? "processed" : "deduplicated",
+    providerReady: true,
+    detail: completedResults.length
+      ? `Processed ${completedResults.length} source(s), updated ${marked.updated} captured resource(s).`
+      : `No new source analysis was needed; ${results.filter((item) => item.duplicateSkipped).length} duplicate source(s) were archived.`,
     startedAt: started.toISOString(),
     finishedAt: new Date().toISOString(),
     staged: staged.staged,
-    processed: results.length,
+    processed: completedResults.length,
     results,
     resourcesUpdated: marked.updated,
     planDraft,

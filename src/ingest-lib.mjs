@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { formatLocalDateTime } from "./time.mjs";
 import { execFileSync } from "node:child_process";
 import { createProvider } from "./provider.mjs";
@@ -54,8 +55,33 @@ export async function ingestVault(vaultPath, config, provider = createProvider(c
 
 export async function ingestFile(vaultPath, sourcePath, config, provider = createProvider(config)) {
   const receivedAt = new Date();
+  const sourceFingerprint = await fingerprintSourceFile(sourcePath);
+  const duplicate = findIngestDuplicate(vaultPath, sourcePath, sourceFingerprint);
+  if (duplicate) {
+    const archivedRel = archiveDuplicateSource(vaultPath, sourcePath, sourceFingerprint.digest);
+    appendIngestLedger(vaultPath, {
+      digest: sourceFingerprint.digest,
+      size: sourceFingerprint.size,
+      sourceRel: path.relative(vaultPath, sourcePath).replace(/\\/g, "/"),
+      processedRel: archivedRel,
+      sourcePage: duplicate.sourcePage || "",
+      status: "duplicate_archived",
+      duplicateOf: duplicate.sourcePage || duplicate.processedRel || "",
+      recordedAt: new Date().toISOString()
+    });
+    return {
+      vault: vaultName(vaultPath),
+      source: path.relative(vaultPath, sourcePath),
+      sourcePage: duplicate.sourcePage || "",
+      processed: archivedRel,
+      conceptPages: [],
+      learning: { cardsCreated: 0, bitsCreated: 0 },
+      duplicateSkipped: true,
+      duplicateOf: duplicate.sourcePage || duplicate.processedRel || ""
+    };
+  }
   if (isMediaRawFile(sourcePath)) {
-    return ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, config);
+    return ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, config, sourceFingerprint);
   }
   const processedSource = processSourceFile(sourcePath, { ingestMaxChars: config.ingestMaxChars });
   const sourceText = String(processedSource.text || "").slice(0, config.ingestMaxChars);
@@ -76,13 +102,14 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
     sourceText,
     processedSource,
     vault: vaultName(vaultPath),
+    promptSourceMaxChars: config.ingestAnalysisPromptMaxChars || 24000,
     allowBaselineFallback: config.allowBaselineAnalysis === true || config.ingestAllowBaselineFallback === true
   };
   if (sourceRequiresExtractedContent(processedSource) && !hasMeaningfulExtractedContent(processedSource)) {
     const analysis = pendingFileAnalysis(processedSource, analysisInput);
     ensureDir(path.join(vaultPath, "wiki/sources"));
     ensureDir(path.join(vaultPath, "raw/processed"));
-    fs.writeFileSync(path.join(vaultPath, sourceRel), renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource }));
+    fs.writeFileSync(path.join(vaultPath, sourceRel), renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource, sourceFingerprint }));
     updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages: [] });
     appendLog(vaultPath, {
       date,
@@ -98,7 +125,7 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
     if (path.resolve(sourcePath) !== path.resolve(processedPath)) {
       fs.renameSync(sourcePath, processedPath);
     }
-    return {
+    const result = {
       vault: vaultName(vaultPath),
       source: path.relative(vaultPath, sourcePath),
       sourcePage: sourceRel,
@@ -107,6 +134,8 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
       learning: { cardsCreated: 0, bitsCreated: 0, pendingContent: true },
       pendingContent: true
     };
+    recordSuccessfulIngest(vaultPath, sourcePath, sourceFingerprint, result, "pending_content");
+    return result;
   }
   const analysis = await analyzeSource(provider, analysisInput);
 
@@ -115,7 +144,7 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
   ensureDir(path.join(vaultPath, "raw/processed"));
 
   const sourcePagePath = path.join(vaultPath, sourceRel);
-  fs.writeFileSync(sourcePagePath, renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource }));
+  fs.writeFileSync(sourcePagePath, renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource, sourceFingerprint }));
 
   const conceptPages = [];
   for (const concept of analysis.concepts.slice(0, 8)) {
@@ -143,7 +172,7 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
     fs.renameSync(sourcePath, processedPath);
   }
 
-  return {
+  const result = {
     vault: vaultName(vaultPath),
     source: path.relative(vaultPath, sourcePath),
     sourcePage: sourceRel,
@@ -151,9 +180,11 @@ export async function ingestFile(vaultPath, sourcePath, config, provider = creat
     conceptPages,
     learning: learningResult
   };
+  recordSuccessfulIngest(vaultPath, sourcePath, sourceFingerprint, result, "analyzed");
+  return result;
 }
 
-async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, config = {}) {
+async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, config = {}, sourceFingerprint = {}) {
   const date = today();
   const ext = path.extname(sourcePath).toLowerCase();
   const sourceTitle = path.basename(sourcePath, ext);
@@ -180,7 +211,8 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
       ext,
       media,
       analysis,
-      processedSource
+      processedSource,
+      sourceFingerprint
     }));
     updateIndex(vaultPath, { date, sourceRel, sourceTitle, analysis, conceptPages: [] });
     appendLog(vaultPath, {
@@ -193,7 +225,7 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
       receivedAt,
       sourceKind: `${mediaKind} pending_content`
     });
-    return {
+    const result = {
       vault: vaultName(vaultPath),
       source: path.relative(vaultPath, sourcePath),
       sourcePage: sourceRel,
@@ -202,6 +234,8 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
       learning: { cardsCreated: 0, bitsCreated: 0, pendingContent: true },
       pendingContent: true
     };
+    recordSuccessfulIngest(vaultPath, sourcePath, sourceFingerprint, result, "pending_content");
+    return result;
   }
   const analysis = await analyzeMediaSource(provider, {
     sourceTitle,
@@ -219,7 +253,8 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
     ext,
     media,
     analysis,
-    processedSource
+    processedSource,
+    sourceFingerprint
   }));
 
   const learningReady = Boolean(analysis.learning_boost);
@@ -247,7 +282,7 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
     sourceKind: learningReady ? mediaKind : `${mediaKind} pending_provider_analysis`
   });
 
-  return {
+  const result = {
     vault: vaultName(vaultPath),
     source: path.relative(vaultPath, sourcePath),
     sourcePage: sourceRel,
@@ -255,6 +290,8 @@ async function ingestMediaFile(vaultPath, sourcePath, receivedAt, provider, conf
     conceptPages,
     learning: learningResult
   };
+  recordSuccessfulIngest(vaultPath, sourcePath, sourceFingerprint, result, learningReady ? "analyzed" : "pending_provider_analysis");
+  return result;
 }
 
 export function countPendingMediaPages(vaultPath, options = {}) {
@@ -478,7 +515,7 @@ Return strict JSON with this shape:
     const text = await provider.complete([
       { role: "system", content: "Return only valid JSON. Preserve source traceability. Do not invent visual, audio, or document facts. Write generated content in the source's primary language when the content is known. Open questions must include current answers or state why they remain unresolved." },
       { role: "user", content: prompt }
-    ], { allowTools: true });
+    ], { allowTools: true, automation: true });
     return parseMediaJson(text, input.media, input);
   } catch (error) {
     return fallbackMediaAnalysis(input.media, error, input);
@@ -686,6 +723,92 @@ function uniqueRel(vaultPath, initialRel) {
   return rel.replace(/\\/g, "/");
 }
 
+async function fingerprintSourceFile(file) {
+  const stat = fs.statSync(file);
+  const digest = await new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = fs.createReadStream(file);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+  return { digest, size: stat.size };
+}
+
+function ingestLedgerPath(vaultPath) {
+  return path.join(vaultPath, ".llm-wiki", "ingest-ledger.jsonl");
+}
+
+function findIngestDuplicate(vaultPath, sourcePath, fingerprint) {
+  const records = readIngestLedger(vaultPath);
+  const byDigest = records.find((item) => item.digest === fingerprint.digest && item.status !== "provider_failed");
+  if (byDigest) return byDigest;
+  return findLegacyRepeatedSource(vaultPath, sourcePath);
+}
+
+function readIngestLedger(vaultPath) {
+  try {
+    return fs.readFileSync(ingestLedgerPath(vaultPath), "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => {
+        try { return JSON.parse(line); } catch { return null; }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function findLegacyRepeatedSource(vaultPath, sourcePath) {
+  const sourceRel = path.relative(vaultPath, sourcePath).replace(/\\/g, "/");
+  let log = "";
+  try {
+    log = fs.readFileSync(path.join(vaultPath, "log.md"), "utf8");
+  } catch {
+    return null;
+  }
+  const matches = log.split(/\n(?=## \[\d{4}-\d{2}-\d{2}\] ingest \| )/)
+    .filter((section) => section.includes(`source from \`${sourceRel}\``))
+    .map((section) => ({
+      sourcePage: section.match(/source summary \`([^`]+)\`/i)?.[1] || "",
+      processedRel: section.match(/Sources:\s*\n-\s*\`([^`]+)\`/i)?.[1] || ""
+    }));
+  if (matches.length < 2) return null;
+  return [...matches].reverse().find((item) => item.sourcePage && fs.existsSync(path.join(vaultPath, item.sourcePage))) || null;
+}
+
+function archiveDuplicateSource(vaultPath, sourcePath, digest) {
+  const parsed = path.parse(sourcePath);
+  const stamp = today();
+  const rel = uniqueRel(
+    vaultPath,
+    `raw/processed/archive/duplicates/${stamp}--${slugify(parsed.name)}--${String(digest).slice(0, 10)}${parsed.ext}`
+  );
+  const destination = path.join(vaultPath, rel);
+  ensureDir(path.dirname(destination));
+  fs.renameSync(sourcePath, destination);
+  return rel;
+}
+
+function recordSuccessfulIngest(vaultPath, originalSourcePath, fingerprint, result, status) {
+  appendIngestLedger(vaultPath, {
+    digest: fingerprint.digest,
+    size: fingerprint.size,
+    sourceRel: path.relative(vaultPath, originalSourcePath).replace(/\\/g, "/"),
+    processedRel: result.processed || "",
+    sourcePage: result.sourcePage || "",
+    status,
+    recordedAt: new Date().toISOString()
+  });
+}
+
+function appendIngestLedger(vaultPath, record) {
+  const file = ingestLedgerPath(vaultPath);
+  ensureDir(path.dirname(file));
+  fs.appendFileSync(file, `${JSON.stringify(record)}\n`, "utf8");
+}
+
 function mediaKindFor(ext) {
   if ([".png", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".heif"].includes(ext)) return "image";
   if ([".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp"].includes(ext)) return "video";
@@ -695,13 +818,33 @@ function mediaKindFor(ext) {
 }
 
 async function analyzeSource(provider, input) {
-  const prompt = `You are maintaining an Obsidian LLM Wiki.
+  const prompt = buildSourceAnalysisPrompt(input);
+
+  try {
+    const text = await provider.complete([
+      { role: "system", content: "Return only valid JSON. Preserve source traceability. Do not invent facts. Write generated content in the source's primary language unless the source is meaningfully multilingual. Open questions must include current answers or state why they remain unresolved." },
+      { role: "user", content: prompt }
+    ], { automation: true });
+    return parseJson(text, input);
+  } catch (error) {
+    if (!input.allowBaselineFallback) {
+      throw error;
+    }
+    return fallbackSourceAnalysis(error, input);
+  }
+}
+
+export function buildSourceAnalysisPrompt(input = {}) {
+  const contract = compactPromptText(input.contract, 3000, "vault contract");
+  const index = compactVaultIndexForPrompt(input.index, input.sourceTitle, input.sourceText, 3000);
+  const sourceText = compactPromptText(input.sourceText, normalizedPromptLimit(input.promptSourceMaxChars), "source text");
+  return `You are maintaining an Obsidian LLM Wiki.
 
 Vault contract:
-${input.contract}
+${contract}
 
 Current index:
-${input.index}
+${index}
 
 Source path: ${input.sourcePath}
 Source title: ${input.sourceTitle}
@@ -712,7 +855,8 @@ Language rule:
 - If the source is meaningfully multilingual, preserve the source languages where they carry meaning.
 - Keep JSON keys exactly as requested.
 - Learning card quality rules: ${learningBoostCardQualityRules()}
-- Technical reference rule: extract every included step, instruction, command, code block, solution, quality, property, formula, equation, parameter, endpoint, configuration value, constraint, and caveat into learning_boost.technical_reference and details_to_keep. Create learning_bits and general_cards that help recall or apply those exact details. Preserve exact code, commands, formulas, equations, variable names, settings, and values. Do not invent missing technical details.
+- Technical reference rule: prioritize the most reusable included steps, instructions, commands, code blocks, solutions, properties, formulas, equations, parameters, endpoints, configuration values, constraints, and caveats. Preserve exact code, formulas, variable names, settings, and values. Do not invent missing details. Keep at most 16 technical-reference entries total in this pass; the raw source remains available for later focused study.
+- Response budget: return 3-5 key points, 3-5 concepts, 4-6 learning bits, 6-8 general cards, at most 2 target-language cards, and at most 2 items in each other optional list. Prefer distinct source-grounded items instead of repeating similar content.
 
 Return strict JSON with this shape:
 {
@@ -740,20 +884,60 @@ Processor notes:
 ${(input.processedSource?.processingNotes || []).join("\n")}
 
 Source text:
-${input.sourceText}`;
+${sourceText}`;
+}
 
-  try {
-    const text = await provider.complete([
-      { role: "system", content: "Return only valid JSON. Preserve source traceability. Do not invent facts. Write generated content in the source's primary language unless the source is meaningfully multilingual. Open questions must include current answers or state why they remain unresolved." },
-      { role: "user", content: prompt }
-    ]);
-    return parseJson(text, input);
-  } catch (error) {
-    if (!input.allowBaselineFallback) {
-      throw error;
+export function compactVaultIndexForPrompt(index, sourceTitle = "", sourceText = "", maxChars = 3000) {
+  const value = String(index || "");
+  if (value.length <= maxChars) return value;
+  const lines = value.split(/\r?\n/);
+  const terms = promptSearchTerms(`${sourceTitle} ${String(sourceText || "").slice(0, 1200)}`);
+  const selected = [];
+  const seen = new Set();
+  const add = (line) => {
+    const text = String(line || "");
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    selected.push(text);
+  };
+  lines.slice(0, 24).forEach(add);
+  if (terms.length) {
+    for (const line of lines) {
+      const lower = line.toLowerCase();
+      if (terms.some((term) => lower.includes(term))) add(line);
+      if (selected.join("\n").length >= Math.floor(maxChars * 0.7)) break;
     }
-    return fallbackSourceAnalysis(error, input);
   }
+  lines.slice(-100).forEach(add);
+  const compacted = selected.join("\n");
+  return compactPromptText(
+    `[Vault index compacted from ${value.length} characters. Relevant, header, and recent entries follow.]\n${compacted}`,
+    maxChars,
+    "vault index"
+  );
+}
+
+function normalizedPromptLimit(value) {
+  const number = Number(value || 24000);
+  if (!Number.isFinite(number)) return 24000;
+  return Math.max(4000, Math.min(number, 60000));
+}
+
+function compactPromptText(value, maxChars, label) {
+  const text = String(value || "");
+  if (text.length <= maxChars) return text;
+  const marker = `\n[${label} compacted from ${text.length} characters; middle omitted.]\n`;
+  const available = Math.max(0, maxChars - marker.length);
+  const head = Math.floor(available * 0.72);
+  return `${text.slice(0, head)}${marker}${text.slice(-(available - head))}`;
+}
+
+function promptSearchTerms(value) {
+  const ignored = new Set(["about", "after", "before", "captured", "document", "from", "learning", "source", "that", "this", "with"]);
+  return [...new Set(String(value || "").toLowerCase().match(/[\p{L}\p{N}_.:+-]{4,}/gu) || [])]
+    .filter((term) => !ignored.has(term))
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 16);
 }
 
 function fallbackSourceAnalysis(error, input = {}) {
@@ -1031,7 +1215,7 @@ function extractTitle(text, sourcePath) {
   return path.basename(sourcePath, path.extname(sourcePath));
 }
 
-function renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource = {} }) {
+function renderSourcePage({ date, sourceTitle, processedRel, analysis, processedSource = {}, sourceFingerprint = {} }) {
   return `---
 type: source
 status: ${String(analysis.status || "").startsWith("pending_") ? "pending_content" : "active"}
@@ -1039,6 +1223,8 @@ created: ${date}
 updated: ${date}
 language: ${yamlScalar(analysis.language || "unknown")}
 source_path: ${processedRel}
+source_content_sha256: ${yamlScalar(sourceFingerprint.digest || "")}
+source_dedupe_key: ${yamlScalar(sourceFingerprint.digest ? `sha256:${sourceFingerprint.digest}` : "")}
 provider_raw_file_sent: false
 provider_input_status: ${providerInputStatus(analysis, processedSource)}
 sources: []
@@ -1151,7 +1337,7 @@ function providerInputNextAction(kind, extracted, analysis = {}) {
   return "provide readable text, a transcript, or a manual description, then reprocess.";
 }
 
-function renderMediaSourcePage({ date, sourceTitle, assetRel, mediaKind, ext, media, analysis, processedSource = {} }) {
+function renderMediaSourcePage({ date, sourceTitle, assetRel, mediaKind, ext, media, analysis, processedSource = {}, sourceFingerprint = {} }) {
   const preview = mediaKind === "image" ? `\n![[${assetRel}]]\n` : "";
   return `---
 type: source
@@ -1160,6 +1346,8 @@ created: ${date}
 updated: ${date}
 language: ${yamlScalar(analysis.language || "unknown")}
 source_path: ${assetRel}
+source_content_sha256: ${yamlScalar(sourceFingerprint.digest || "")}
+source_dedupe_key: ${yamlScalar(sourceFingerprint.digest ? `sha256:${sourceFingerprint.digest}` : "")}
 media_kind: ${mediaKind}
 media_analyzed: ${analysis.analyzed ? "true" : "false"}
 media_analysis_status: ${analysis.status || (analysis.analyzed ? "analyzed" : "fallback")}

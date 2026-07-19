@@ -299,6 +299,36 @@ test("provider failure leaves raw files pending and records a blocker notificati
   assert.match(readLearningNotifications(vault)[0].title, /provider needs attention/i);
 });
 
+test("processing can use its source analysis request as the readiness check", async () => {
+  const { vault } = makeVault();
+  fs.mkdirSync(path.join(vault, "raw", "input"), { recursive: true });
+  const pending = path.join(vault, "raw", "input", "source.md");
+  fs.writeFileSync(pending, "# Retrieval practice\n\nRecall strengthens durable memory.");
+  let calls = 0;
+
+  const result = await runLearningAutomationForVault(vault, {
+    config: { provider: "openai_subscription", providerTimeoutMs: 1000, ingestMaxChars: 4000 },
+    provider: {
+      async complete() {
+        calls += 1;
+        return JSON.stringify({
+          summary: "Retrieval practice strengthens durable memory.",
+          key_points: ["Recall supports retention."],
+          concepts: [{ name: "Retrieval practice", summary: "Recall used as a learning method." }]
+        });
+      }
+    },
+    force: true,
+    resourceLimit: 1,
+    skipProviderReadinessProbe: true
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(result.status, "processed");
+  assert.equal(result.processed, 1);
+  assert.equal(fs.existsSync(pending), false);
+});
+
 test("automation retries pending media source pages when provider is ready", async () => {
   const { root, vault } = makeVault();
   const fakeTesseract = path.join(root, "fake-tesseract.sh");

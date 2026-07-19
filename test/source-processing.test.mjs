@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { normalizeLearningBoost, renderLearningBoostSection } from "../src/learning-extraction.mjs";
-import { ingestFile } from "../src/ingest-lib.mjs";
+import { buildSourceAnalysisPrompt, compactVaultIndexForPrompt, ingestFile } from "../src/ingest-lib.mjs";
 import { learningPaths } from "../src/learning-store.mjs";
 import { processSourceFile } from "../src/source-processors/index.mjs";
 import { extractSchemaOrg } from "../src/web-schema-extractor.mjs";
@@ -118,6 +118,50 @@ test("processor routes expanded learning source formats to best-effort extractor
   }
 });
 
+test("source analysis prompt bounds large vault context while preserving relevant evidence", () => {
+  const indexLines = ["# Index", ...Array.from({ length: 3200 }, (_, index) => `| unrelated-${index} | source | summary ${index} |`), "| Quantum Mango routing | concept | Relevant provider evidence |", "| recent-entry | source | Keep recent context |"];
+  const index = indexLines.join("\n");
+  const sourceText = `SOURCE_HEAD Quantum Mango\n${"middle source detail\n".repeat(5000)}SOURCE_TAIL retained conclusion`;
+  const compactedIndex = compactVaultIndexForPrompt(index, "Quantum Mango", sourceText, 6000);
+  const prompt = buildSourceAnalysisPrompt({
+    contract: `CONTRACT_HEAD\n${"contract detail\n".repeat(2000)}CONTRACT_TAIL`,
+    index,
+    sourcePath: "raw/input/quantum-mango.md",
+    sourceTitle: "Quantum Mango",
+    sourceText,
+    promptSourceMaxChars: 24000,
+    processedSource: { kind: "text", metadata: {}, evidence: ["raw/input/quantum-mango.md"], processingNotes: [] }
+  });
+
+  assert.ok(compactedIndex.length <= 6000);
+  assert.match(compactedIndex, /Vault index compacted/);
+  assert.match(compactedIndex, /Quantum Mango routing/);
+  assert.match(compactedIndex, /recent-entry/);
+  assert.ok(prompt.length < 56000, `prompt length was ${prompt.length}`);
+  assert.match(prompt, /vault contract compacted/);
+  assert.match(prompt, /source text compacted/);
+  assert.match(prompt, /SOURCE_HEAD Quantum Mango/);
+  assert.match(prompt, /SOURCE_TAIL retained conclusion/);
+  assert.match(prompt, /Response budget: return 3-5 key points/);
+});
+
+test("source analysis identifies background provider work as automation", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "input", "automation.md");
+  fs.writeFileSync(source, "# Automation\n\nBackground analysis should use the bounded provider mode.");
+  const delegate = fakeProvider();
+  let completionOptions = null;
+
+  await ingestFile(vault, source, config(root), {
+    async complete(messages, options) {
+      completionOptions = options;
+      return delegate.complete(messages, options);
+    }
+  });
+
+  assert.equal(completionOptions?.automation, true);
+});
+
 test("learning_boost normalization preserves cards, evidence, media, and staging", () => {
   const boost = normalizeLearningBoost({
     source_language: "English",
@@ -220,13 +264,55 @@ test("ingestFile renders Learning Boost sections and writes learning JSONL outpu
   assert.match(sourceLinks, /Retrieval Practice/);
   assert.match(behavior, /source_processed/);
   assert.match(behavior, /source_linked_to_learning/);
-  assert.match(remnote, /# RemNote Import/);
+  assert.equal(remnote, "");
   assert.match(sourceMap, /Retrieval Practice/);
-  assert.doesNotMatch(remnote, /RemNote Import Draft/);
   assert.equal(result.learning.cardsCreated >= 4, true);
   assert.equal(result.learning.bitsCreated >= 3, true);
   assert.equal(result.learning.sourceLink.cardsCreated >= 4, true);
   assert.equal(fs.existsSync(path.join(vault, result.processed)), true);
+  assert.match(page, /source_content_sha256: "[a-f0-9]{64}"/);
+  assert.equal(fs.existsSync(path.join(vault, ".llm-wiki", "ingest-ledger.jsonl")), true);
+});
+
+test("ingestFile archives a resurrected source by content hash without another provider call", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "input", "retrieval.md");
+  fs.writeFileSync(source, "# Retrieval Practice\n\nRecall beats rereading.");
+  const first = await ingestFile(vault, source, config(root), fakeProvider());
+  fs.copyFileSync(path.join(vault, first.processed), source);
+  let providerCalls = 0;
+  const duplicate = await ingestFile(vault, source, config(root), {
+    async complete() {
+      providerCalls += 1;
+      throw new Error("duplicate should not reach provider");
+    }
+  });
+
+  assert.equal(providerCalls, 0);
+  assert.equal(duplicate.duplicateSkipped, true);
+  assert.match(duplicate.processed, /^raw\/processed\/archive\/duplicates\//);
+  assert.equal(fs.existsSync(path.join(vault, duplicate.processed)), true);
+  assert.equal(fs.existsSync(source), false);
+});
+
+test("ingestFile recognizes repeated legacy log origins before a ledger exists", async () => {
+  const { root, vault } = makeVault();
+  const source = path.join(vault, "raw", "inbox", "legacy.md");
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.writeFileSync(source, "# Legacy source\n\nAlready processed more than once.");
+  const sourcePage = "wiki/sources/2026-07-17--legacy-source.md";
+  fs.mkdirSync(path.dirname(path.join(vault, sourcePage)), { recursive: true });
+  fs.writeFileSync(path.join(vault, sourcePage), "# Legacy source\n");
+  const entry = (date) => `\n## [${date}] ingest | Legacy source\n\nChanged:\n- Added source summary \`${sourcePage}\`.\n\nSources:\n- \`raw/processed/${date}--legacy.md\`\n\nNotes:\n- Ingested text source from \`raw/inbox/legacy.md\` and moved to \`raw/processed/${date}--legacy.md\`.\n`;
+  fs.writeFileSync(path.join(vault, "log.md"), `# Log\n${entry("2026-07-16")}${entry("2026-07-17")}`);
+  let providerCalls = 0;
+  const result = await ingestFile(vault, source, config(root), {
+    async complete() { providerCalls += 1; return "{}"; }
+  });
+
+  assert.equal(providerCalls, 0);
+  assert.equal(result.duplicateSkipped, true);
+  assert.equal(result.duplicateOf, sourcePage);
 });
 
 test("ingestFile accepts provider JSON wrapped in prose and fills sparse learning fields", async () => {
