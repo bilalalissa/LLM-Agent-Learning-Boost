@@ -5,7 +5,6 @@ import { deriveLearningTopic, topicQuestion } from "./learning-card-display.mjs"
 import { normalizeLearningBit, normalizeLearningCard, normalizeLearningProfile } from "./learning-model.mjs";
 import { linkProcessedSourceToLearning } from "./learning-planner.mjs";
 import { ensureLearningScaffold, learningPaths } from "./learning-store.mjs";
-import { exportRemnoteBundle } from "./remnote-export.mjs";
 import { slugify, vaultName } from "./vaults.mjs";
 
 export const LEARNING_BOOST_SECTIONS = [
@@ -296,7 +295,7 @@ ${evidenceMap(data)}
 `;
 }
 
-export function appendLearningOutputs(vaultPath, { sourceRel, sourceTitle, processedRel, boost, sourceKind = "source", processingNotes = [], skipRemnoteExport = false }, config = {}) {
+export function appendLearningOutputs(vaultPath, { sourceRel, sourceTitle, processedRel, boost, sourceKind = "source", processingNotes = [] }, config = {}) {
   ensureLearningScaffold(vaultPath, config);
   const paths = learningPaths(vaultPath);
   const normalized = normalizeLearningBoost(boost, { vault: vaultName(vaultPath), sourceRel, sourceTitle });
@@ -358,7 +357,6 @@ export function appendLearningOutputs(vaultPath, { sourceRel, sourceTitle, proce
       suggestedAction: "Review the source manually or configure the relevant local extraction tool."
     });
   }
-  if (!skipRemnoteExport) exportRemnoteBundle(vaultPath, readJsonl(path.join(paths.dir, "cards.jsonl")));
   return {
     bitsCreated: normalized.learning_bits.length,
     cardsCreated: normalized.cards.length,
@@ -573,17 +571,6 @@ function firstConcept(card) {
 function appendJsonl(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.appendFileSync(file, `${JSON.stringify(value)}\n`);
-}
-
-function readJsonl(file) {
-  if (!fs.existsSync(file)) return [];
-  return fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean).map((line) => {
-    try {
-      return JSON.parse(line);
-    } catch {
-      return null;
-    }
-  }).filter(Boolean);
 }
 
 function renderCardLine(card) {

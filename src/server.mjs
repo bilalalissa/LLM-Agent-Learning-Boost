@@ -40,7 +40,7 @@ import {
 } from "./learning-store.mjs";
 import { answerLocallyAsync } from "./local-answer.mjs";
 import { createLocalAiRouterSupervisor } from "./local-ai-router-supervisor.mjs";
-import { addHighlight, addNote, deleteNote, listNotes, saveNoteMedia, updateNote } from "./notes.mjs";
+import { addHighlight, addNote, deleteNote, saveNoteMedia, updateNote } from "./notes.mjs";
 import { createProvider } from "./provider.mjs";
 import { providerStatus } from "./provider-status.mjs";
 import { recordPlanUpdateChoice, suggestPlanUpdates } from "./plan-update-suggester.mjs";
@@ -120,6 +120,8 @@ const providerStatusCache = {
   updatedAt: ""
 };
 const listTabKinds = new Set(["files", "archives", "topics"]);
+const persistedTabKinds = new Set(["files", "archives", "topics", "notes", "highlights"]);
+const annotationTabKinds = new Set(["notes", "highlights"]);
 const tabCacheDir = path.join(os.homedir(), "Library", "Application Support", "LLM Agent Learning Boost", "tab-cache");
 const startupTabRefreshDelayMs = positiveEnvNumber("LLM_WIKI_STARTUP_TAB_REFRESH_DELAY_MS", 12000);
 const startupAutoIngestDelayMs = positiveEnvNumber("LLM_WIKI_STARTUP_AUTO_INGEST_DELAY_MS", 30000);
@@ -130,8 +132,12 @@ let vaultPathCache = [];
 let vaultPathCacheRoot = "";
 const captureScanRuntime = new Map();
 const captureScanWorkers = new Map();
+const pendingMediaRetryAfter = new Map();
+const autoIngestRetryAfter = new Map();
+const topicContentCache = new Map();
 installSyncReadDirTrace();
 installSyncReadFileTrace();
+installWorkerShutdownHandlers();
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
@@ -144,7 +150,7 @@ const server = http.createServer(async (request, response) => {
 
   if (request.method === "GET" && url.pathname === "/") {
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    response.end(renderHtml());
+    response.end(renderHtml({ exposeMobileToken: requestTargetsLoopback(request) }));
     return;
   }
 
@@ -555,7 +561,11 @@ const server = http.createServer(async (request, response) => {
       setAutomationRuntime(vaultPath, { running: true, status: "processing", detail: "Processing pending learning sources..." });
       const workerResult = await runAutoIngestWorker({
         vaultPath,
-        options: { force: payload.force === true, resourceLimit: payload.limit || 1 },
+        options: {
+          force: payload.force === true,
+          resourceLimit: payload.limit || 1,
+          skipProviderReadinessProbe: true
+        },
         timeoutMs: autoIngestWorkerTimeoutMs()
       });
       const result = workerResult.vaults?.[0]?.automationResult || {
@@ -633,7 +643,7 @@ const server = http.createServer(async (request, response) => {
       const result = updateLearningNotificationAction(vaultPath, payload.id, payload.action || "read", {
         nativeError: payload.nativeError || payload.error || ""
       });
-      refreshTabData("learning");
+      refreshCachedLearningNotifications(vaultPath);
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ vault: vaultName(vaultPath), ...result }));
     } catch (error) {
@@ -656,7 +666,8 @@ const server = http.createServer(async (request, response) => {
         detail: "This is a privacy-safe test notification.",
         actions: ["Open Learning", "Review alerts"]
       });
-      void syncNotificationReminderMirrorIfEnabled(vaultPath).then(() => refreshTabData("learning")).catch((error) => {
+      refreshCachedLearningNotifications(vaultPath);
+      void syncNotificationReminderMirrorIfEnabled(vaultPath).then(() => refreshCachedLearningNotifications(vaultPath)).catch((error) => {
         console.error(`[learning-reminders] ${error.stack || error.message}`);
       });
       response.writeHead(200, { "content-type": "application/json" });
@@ -1404,6 +1415,7 @@ const server = http.createServer(async (request, response) => {
     try {
       const body = await readBody(request);
       const highlight = addHighlight(config, JSON.parse(body || "{}"));
+      invalidateAnnotationCache();
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ highlight }));
     } catch (error) {
@@ -1457,7 +1469,7 @@ const server = http.createServer(async (request, response) => {
     try {
       const body = await readBody(request);
       const result = updateNote(config, JSON.parse(body || "{}"));
-      refreshNotesCache();
+      invalidateAnnotationCache();
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(result));
     } catch (error) {
@@ -1564,7 +1576,7 @@ server.listen(config.chatPort, config.bridgeHost, () => {
 async function startAutoIngest() {
   if (autoIngestTimer) return;
   void runAutoIngest();
-  autoIngestIntervalMs = config.watchIntervalMs;
+  autoIngestIntervalMs = Math.max(15000, Number(config.watchIntervalMs || 0));
   autoIngestTimer = setInterval(runAutoIngest, autoIngestIntervalMs);
 }
 
@@ -1585,21 +1597,21 @@ async function runStartupLearningBackfill() {
     return;
   }
   const started = Date.now();
-  const worker = spawn(process.execPath, [script], {
+  const worker = spawn(process.execPath, [script], workerSpawnOptions({
     cwd: agentRoot,
     env: {
       ...process.env,
       LLM_WIKI_ENV_FILE: config.configFile
     },
     stdio: ["ignore", "pipe", "pipe"]
-  });
+  }));
   startupLearningBackfillWorker = worker;
   let stdout = "";
   let stderr = "";
   const timeoutMs = positiveEnvNumber("LLM_WIKI_STARTUP_LEARNING_BACKFILL_TIMEOUT_MS", 120000);
   const timeout = setTimeout(() => {
     if (startupLearningBackfillWorker === worker) {
-      worker.kill("SIGTERM");
+      terminateWorkerTree(worker, "SIGTERM");
       console.warn(`[backfill] startup worker timed out after ${timeoutMs}ms`);
     }
   }, timeoutMs);
@@ -1859,8 +1871,9 @@ function cachedTabPayload(kind) {
   const state = tabDataCache[kind] || cacheState();
   hydratePersistedTabCache(kind, state);
   recoverStuckTabLoading(kind, state);
-  const stale = isTabCacheStale(state);
-  if (autoRefreshTabs && (!state.ready || stale) && !state.loading) scheduleTabDataRefresh(kind);
+  const stale = isTabCacheStale(state, kind);
+  const refreshAllowed = !annotationTabKinds.has(kind) || annotationRefreshDue(state);
+  if ((autoRefreshTabs || annotationTabKinds.has(kind)) && (!state.ready || stale) && !state.loading && refreshAllowed) scheduleTabDataRefresh(kind);
   if (!autoRefreshTabs && listTabKinds.has(kind) && !state.ready && !state.loading) {
     state.ready = true;
     state.error = state.error || "No cached rows are available yet. Use Refresh to scan this tab.";
@@ -1881,9 +1894,16 @@ function cachedTabPayload(kind) {
   };
 }
 
+function annotationRefreshDue(state) {
+  if (!state?.error || !state.lastFinishedAt) return true;
+  const finished = Date.parse(state.lastFinishedAt);
+  return !Number.isFinite(finished) || Date.now() - finished >= 60000;
+}
+
 function recoverStuckTabLoading(kind, state) {
   if (!state.loading || !state.lastStartedAt) return;
-  const worker = tabDataWorkers.get(kind);
+  const workerKind = normalizeTabWorkerKind(kind);
+  const worker = tabDataWorkers.get(workerKind);
   if (!worker) {
     state.loading = false;
     state.lastFinishedAt = new Date().toISOString();
@@ -1895,20 +1915,20 @@ function recoverStuckTabLoading(kind, state) {
     return;
   }
   const started = Date.parse(state.lastStartedAt);
-  if (!Number.isFinite(started) || Date.now() - started < 15000) return;
+  if (!Number.isFinite(started) || Date.now() - started < tabDataWorkerTimeoutMs(workerKind) + 5000) return;
   state.loading = false;
   if (!state.items.length) {
     state.error = "Tab data scan did not finish. Cached rows will stay visible when available; this usually means iCloud or a vault scan is still busy.";
   }
   state.lastFinishedAt = new Date().toISOString();
   if (worker) {
-    worker.kill?.("SIGTERM");
-    tabDataWorkers.delete(kind);
+    terminateWorkerTree(worker, "SIGTERM");
+    tabDataWorkers.delete(workerKind);
   }
 }
 
 function hydratePersistedTabCache(kind, state) {
-  if (!listTabKinds.has(kind) || state.items.length) return;
+  if (!persistedTabKinds.has(kind) || state.items.length) return;
   const persisted = readPersistedTabCache(kind);
   if (!persisted?.items?.length) return;
   state.items = persisted.items;
@@ -1919,7 +1939,7 @@ function hydratePersistedTabCache(kind, state) {
 }
 
 function hydratePersistedTabCachesAtStartup() {
-  for (const kind of listTabKinds) {
+  for (const kind of persistedTabKinds) {
     hydratePersistedTabCache(kind, tabDataCache[kind]);
   }
   const learning = readPersistedLearningCache();
@@ -2016,8 +2036,8 @@ function cachedLearningPayload() {
       state.updatedAt = state.updatedAt || new Date().toISOString();
     }
   }
-  const stale = isTabCacheStale(state);
-  if (autoRefreshTabs && (!state.ready || stale) && !state.loading) scheduleTabDataRefresh("learning");
+  const stale = isTabCacheStale(state, "learning");
+  if (autoRefreshTabs && !ingestRunning && (!state.ready || stale) && !state.loading) scheduleTabDataRefresh("learning");
   const data = state.data ? enrichLearningRuntime(state.data) : { vaults: [], appProfileIndex: { schemaVersion: 1, profiles: [] } };
   return {
     ...data,
@@ -2185,6 +2205,63 @@ function mobileStudyAccessSummary() {
   };
 }
 
+function renderDeviceAccessPanel(options = {}) {
+  const access = mobileStudyAccessSummary();
+  const exposeMobileToken = options.exposeMobileToken === true;
+  if (!exposeMobileToken) {
+    return `
+      <details id="learning-device-access" class="learning-section learning-scroll-target">
+        <summary>Open on other devices</summary>
+        <div class="learning-device-access">
+          <p class="muted">Open this section in the native Mac app to reveal and copy private device-access links.</p>
+        </div>
+      </details>`;
+  }
+  const lanUrls = access.lanUrls || [];
+  const sameMacUrl = access.localUrl || `http://127.0.0.1:${config.chatPort}/mobile`;
+  const mobileToken = String(config.mobileStudy?.token || "").trim();
+  const lanRows = lanUrls.length
+    ? lanUrls.map((url) => renderDeviceAccessUrlRow("Same network", url, mobileToken)).join("")
+    : `<p class="muted">No private LAN address was detected. Connect this Mac to Wi-Fi or Ethernet and refresh.</p>`;
+  const bindHint = access.host === "0.0.0.0"
+    ? "Learning Boost is listening on local network interfaces."
+    : "If another device cannot connect, set MAC_BRIDGE_HOST=0.0.0.0 and CHAT_HOST=0.0.0.0 in config.env, then restart Learning Boost.";
+  const tokenHint = access.tokenConfigured
+    ? "Each displayed link includes the private mobile token and is ready to copy or share. Treat the link like a password."
+    : "Set LEARNING_BOOST_MOBILE_TOKEN to a long private value before copying a same-network link.";
+  return `
+    <details id="learning-device-access" class="learning-section learning-scroll-target">
+      <summary>Open on other devices</summary>
+      <div class="learning-device-access">
+        <p class="muted">Use these hidden LAN links only on a trusted local network. The mobile page is optimized for study, reviews, and notifications.</p>
+        <div class="device-url-list">
+          ${renderDeviceAccessUrlRow("This Mac", sameMacUrl, mobileToken)}
+          ${lanRows}
+        </div>
+        <p class="muted">${serverEscapeHtml(bindHint)}</p>
+        <p class="muted">${serverEscapeHtml(tokenHint)}</p>
+      </div>
+    </details>`;
+}
+
+function renderDeviceAccessUrlRow(label, url, mobileToken = "") {
+  const usableUrl = mobileToken ? addMobileTokenToUrl(url, mobileToken) : url;
+  return `
+    <div class="device-url-row">
+      <strong>${serverEscapeHtml(label)}</strong>
+      <input class="device-url-input" type="text" value="${serverEscapeHtml(usableUrl)}" readonly spellcheck="false" autocomplete="off" aria-label="${serverEscapeHtml(label)} mobile study link">
+      <button class="secondary device-url-copy" type="button">Copy</button>
+      <button class="secondary device-url-open" type="button">Open in browser</button>
+      <span class="device-url-feedback muted" aria-live="polite"></span>
+    </div>`;
+}
+
+function addMobileTokenToUrl(value, token) {
+  const url = new URL(String(value));
+  url.searchParams.set("token", String(token));
+  return url.toString();
+}
+
 function localLanAddresses() {
   const addresses = [];
   for (const entries of Object.values(os.networkInterfaces())) {
@@ -2207,20 +2284,22 @@ function renderMobileStudyHtml(url) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Learning Boost Mobile Study</title>
   <style>
-    :root { color-scheme: light; --bg: #f4ead8; --panel: #fffaf0; --ink: #302820; --muted: #766852; --line: #d9c49b; --accent: #98620f; --capture: #0f766e; --practice: #7c3aed; --bit: #2563eb; --alert: #be123c; }
+    :root { color-scheme: light; --bg: #f4ead8; --panel: #fffaf0; --ink: #302820; --muted: #766852; --line: #d9c49b; --accent: #98620f; --capture: #0f766e; --practice: #7c3aed; --bit: #2563eb; --alert: #be123c; --mobile-header-height: 128px; }
     * { box-sizing: border-box; }
+    html { scroll-padding-top: calc(var(--mobile-header-height) + 76px); }
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); line-height: 1.45; }
-    header { position: static; background: color-mix(in srgb, var(--bg) 94%, white); border-bottom: 1px solid var(--line); padding: 14px 16px; }
+    header { position: sticky; top: 0; z-index: 30; background: color-mix(in srgb, var(--bg) 94%, white); border-bottom: 1px solid var(--line); padding: 14px 16px; box-shadow: 0 2px 10px rgb(48 40 32 / 10%); }
     h1 { margin: 0 0 4px; font-size: clamp(24px, 8vw, 34px); }
     h2 { margin: 20px 0 8px; font-size: 21px; }
     button, select { font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel); color: var(--ink); min-height: 42px; }
     button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 750; }
     main { padding: 14px; display: grid; gap: 14px; max-width: 980px; margin: 0 auto; }
-    .mobile-nav { position: sticky; top: 0; z-index: 20; display: flex; gap: 8px; overflow-x: auto; padding: 8px 0; background: color-mix(in srgb, var(--bg) 96%, white); border-bottom: 1px solid var(--line); }
+    .mobile-nav { position: static; display: flex; gap: 8px; overflow-x: auto; padding: 8px 0 0; background: transparent; border-top: 1px solid color-mix(in srgb, var(--line) 62%, transparent); }
     .mobile-nav button { white-space: nowrap; min-height: 36px; padding: 7px 10px; }
     .toolbar, .summary, .legend, .session, .study-card, .quiz-card, .bit-card, .alert { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px; }
-    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .toolbar { position: sticky; top: var(--mobile-header-height); z-index: 24; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; box-shadow: 0 8px 18px rgb(48 40 32 / 12%); }
     .toolbar select { flex: 1 1 180px; min-width: 0; }
+    #today-section, #quiz-section, #cards-section, #bits-section, #alerts-section { scroll-margin-top: calc(var(--mobile-header-height) + 76px); }
     .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; }
     .metric { display: grid; gap: 2px; padding: 8px; border-radius: 8px; background: #efe2ca; }
     .metric strong { font-size: 22px; color: var(--accent); }
@@ -2256,13 +2335,6 @@ function renderMobileStudyHtml(url) {
   <header>
     <h1>Learning Boost</h1>
     <div id="generated" class="muted">Loading mobile study...</div>
-  </header>
-  <main>
-    <section class="toolbar">
-      <select id="vault"></select>
-      <button id="refresh" type="button">Refresh</button>
-      <button id="clear-focus" type="button">Clear focus</button>
-    </section>
     <nav class="mobile-nav" aria-label="Mobile study sections">
       <button type="button" data-mobile-jump="today-section">Today</button>
       <button type="button" data-mobile-jump="quiz-section">Quiz/Test</button>
@@ -2270,6 +2342,13 @@ function renderMobileStudyHtml(url) {
       <button type="button" data-mobile-jump="bits-section">Bits</button>
       <button type="button" data-mobile-jump="alerts-section">Alerts</button>
     </nav>
+  </header>
+  <main>
+    <section class="toolbar">
+      <select id="vault"></select>
+      <button id="refresh" type="button">Refresh</button>
+      <button id="clear-focus" type="button">Clear focus</button>
+    </section>
     <section id="notice" class="alert" hidden></section>
     <section id="summary" class="summary"></section>
     <section class="legend"><strong>Card and bit types</strong><span class="chip capture">capture/source</span><span class="chip bit">understanding/bit</span><span class="chip practice">practice/card</span><span class="chip alert">alert/provider</span></section>
@@ -2292,9 +2371,16 @@ function renderMobileStudyHtml(url) {
     const cards = document.querySelector("#cards");
     const bits = document.querySelector("#bits");
     const alerts = document.querySelector("#alerts");
+    const mobileHeader = document.querySelector("header");
     document.querySelector("#refresh").addEventListener("click", () => loadStudy(vaultSelect.value));
     document.querySelector("#clear-focus").addEventListener("click", clearFocus);
     vaultSelect.addEventListener("change", () => loadStudy(vaultSelect.value));
+    document.addEventListener("pointerdown", (event) => {
+      if (event.target.closest("[data-study-kind], .session, .alert, button, select, input, textarea, a")) return;
+      clearFocus();
+    }, true);
+    window.addEventListener("resize", syncMobileHeaderHeight);
+    window.addEventListener("orientationchange", syncMobileHeaderHeight);
     document.addEventListener("click", async (event) => {
       const jump = event.target.closest("[data-mobile-jump]");
       if (jump) {
@@ -2387,6 +2473,11 @@ function renderMobileStudyHtml(url) {
       cards.innerHTML = (data.cards || []).map(renderCard).join("") || '<p class="muted">No cards yet. Process one source first.</p>';
       bits.innerHTML = (data.bits || []).map(renderBit).join("") || '<p class="muted">No bits yet. Process one source first.</p>';
       alerts.innerHTML = (data.notifications || []).map(renderAlert).join("") || '<p class="muted">No active learning alerts.</p>';
+      syncMobileHeaderHeight();
+    }
+    function syncMobileHeaderHeight() {
+      const height = Math.ceil(mobileHeader?.getBoundingClientRect?.().height || 128);
+      document.documentElement.style.setProperty("--mobile-header-height", height + "px");
     }
     function formatCachedTime(value) {
       try { return new Date(value).toLocaleString(); } catch { return "the last successful load"; }
@@ -2500,7 +2591,13 @@ function fastLearningAutomationStatusForVault(vaultPath) {
 
 function fastPendingRawCandidates(vaultPath) {
   const runtime = automationRuntimeFor(vaultPath);
-  return Array.isArray(runtime.pendingRaw) ? runtime.pendingRaw.slice(0, 50) : [];
+  try {
+    return listRawCandidates(vaultPath)
+      .slice(0, 50)
+      .map((file) => path.relative(vaultPath, file).replace(/\\/g, "/"));
+  } catch {
+    return Array.isArray(runtime.pendingRaw) ? runtime.pendingRaw.slice(0, 50) : [];
+  }
 }
 
 function fastResourceInboxStats(learningDir) {
@@ -3149,8 +3246,8 @@ function safeReadJsonl(file) {
 
 function cachedLearningNotifications(options = {}) {
   const state = tabDataCache.learning || cacheState();
-  const stale = isTabCacheStale(state);
-  if ((!state.ready || stale) && !state.loading) scheduleTabDataRefresh("learning");
+  const stale = isTabCacheStale(state, "learning");
+  if (!ingestRunning && (!state.ready || stale) && !state.loading) scheduleTabDataRefresh("learning");
   const limit = Number(options.limit || 50);
   const pendingNativeOnly = options.pendingNativeOnly === true;
   const notifications = (state.data?.vaults || [])
@@ -3175,6 +3272,23 @@ function cachedLearningNotifications(options = {}) {
   };
 }
 
+function refreshCachedLearningNotifications(vaultPath) {
+  const state = tabDataCache.learning || cacheState();
+  if (!state.data?.vaults?.length) return;
+  const vault = vaultName(vaultPath);
+  state.data = {
+    ...state.data,
+    vaults: state.data.vaults.map((item) => item.vault === vault
+      ? { ...item, notifications: readLearningNotifications(vaultPath, { limit: 30 }) }
+      : item)
+  };
+  state.ready = true;
+  state.loading = false;
+  state.error = "";
+  state.updatedAt = new Date().toISOString();
+  writePersistedLearningCache(state.data, state.updatedAt);
+}
+
 function enrichLearningRuntime(data) {
   return {
     ...data,
@@ -3196,11 +3310,16 @@ function enrichLearningRuntime(data) {
   };
 }
 
-function isTabCacheStale(state) {
+function isTabCacheStale(state, kind = "") {
   if (!state?.updatedAt) return false;
   const updated = Date.parse(state.updatedAt);
   if (!Number.isFinite(updated)) return false;
-  return Date.now() - updated > 30000;
+  const ttl = kind === "files"
+    ? 60000
+    : kind === "learning"
+      ? 600000
+      : 300000;
+  return Date.now() - updated > ttl;
 }
 
 function tabPayloadStatus(state, stale) {
@@ -3216,13 +3335,13 @@ function tabPayloadStatus(state, stale) {
 
 function addNoteToCache(note) {
   const state = tabDataCache.notes;
-  refreshNotesCache();
   if (!state.items.some((item) => item.id === note.id)) {
     state.items = [note, ...state.items.filter((item) => item.id !== note.id)];
     state.ready = true;
     state.loading = false;
     state.error = "";
     state.updatedAt = new Date().toISOString();
+    writePersistedTabCache("notes", state.items, state.updatedAt);
   }
 }
 
@@ -3233,21 +3352,15 @@ function removeNoteFromCache(id) {
   state.loading = false;
   state.error = "";
   state.updatedAt = new Date().toISOString();
+  writePersistedTabCache("notes", state.items, state.updatedAt);
 }
 
-function refreshNotesCache() {
-  const state = tabDataCache.notes;
-  try {
-    state.items = listNotes(config);
-    state.ready = true;
-    state.loading = false;
-    state.error = "";
-    state.updatedAt = new Date().toISOString();
-  } catch (error) {
-    state.ready = false;
-    state.loading = false;
-    state.error = error.message;
+function invalidateAnnotationCache() {
+  for (const kind of annotationTabKinds) {
+    tabDataCache[kind].ready = false;
+    tabDataCache[kind].error = "";
   }
+  scheduleTabDataRefresh("notes");
 }
 
 function invalidateTabData() {
@@ -3260,12 +3373,14 @@ function invalidateTabData() {
 }
 
 function refreshChangedTabsAfterIngest() {
+  clearTopicContentCache();
   scheduleTabDataRefresh("files");
   scheduleTabDataRefresh("topics");
   scheduleTabDataRefresh("learning");
 }
 
 function scheduleTabDataRefresh(kind, options = {}) {
+  kind = normalizeTabWorkerKind(kind);
   if (tabDataRefreshScheduled.has(kind) && !options.force) return;
   tabDataRefreshScheduled.add(kind);
   setImmediate(() => {
@@ -3279,20 +3394,12 @@ function refreshTabData(kind = "all", options = {}) {
     for (const item of Object.keys(tabDataCache)) refreshTabData(item, options);
     return;
   }
+  kind = normalizeTabWorkerKind(kind);
   if (!tabDataCache[kind]) return;
   tabDataRefreshScheduled.delete(kind);
-  if (options.force && listTabKinds.has(kind)) {
-    for (const activeKind of listTabKinds) {
-      const activeWorker = tabDataWorkers.get(activeKind);
-      if (!activeWorker) continue;
-      activeWorker.kill?.("SIGTERM");
-      tabDataWorkers.delete(activeKind);
-      if (activeKind !== kind) tabDataCache[activeKind].loading = false;
-    }
-  }
   if (tabDataWorkers.has(kind)) {
     if (!options.force) return;
-    tabDataWorkers.get(kind)?.kill?.("SIGTERM");
+    terminateWorkerTree(tabDataWorkers.get(kind), "SIGTERM");
     tabDataWorkers.delete(kind);
   }
   if (hasConflictingTabWorker(kind)) {
@@ -3305,7 +3412,7 @@ function refreshTabData(kind = "all", options = {}) {
     }
     return;
   }
-  const kinds = [kind];
+  const kinds = kind === "notes" ? ["notes", "highlights"] : [kind];
   const started = Date.now();
   for (const item of kinds) {
     tabDataCache[item].loading = true;
@@ -3316,6 +3423,7 @@ function refreshTabData(kind = "all", options = {}) {
   const traceFile = process.env.LLM_WIKI_ENABLE_WORKER_TRACE === "1"
     ? `${tempWorkerResultFile("llm-learning-tab-data", kind)}.trace`
     : "";
+  const resultFile = tempWorkerResultFile("llm-learning-tab-data-result", kind);
   const workerEnv = {
     ...process.env,
     LLM_WIKI_ENV_FILE: config.configFile
@@ -3326,11 +3434,11 @@ function refreshTabData(kind = "all", options = {}) {
   }
   const knownVaultPaths = cachedVaultPaths(config);
   if (knownVaultPaths.length) workerEnv.LLM_WIKI_VAULT_PATHS = JSON.stringify(knownVaultPaths);
-  const worker = spawn(process.execPath, [path.join(agentRoot, "src", "tab-data-worker.mjs"), kind], {
+  const worker = spawn(process.execPath, [path.join(agentRoot, "src", "tab-data-worker.mjs"), kinds.join(","), resultFile], workerSpawnOptions({
     cwd: agentRoot,
     env: workerEnv,
     stdio: ["ignore", "pipe", "pipe"]
-  });
+  }));
   let workerStdout = "";
   let workerStderr = "";
   let workerFinalized = false;
@@ -3348,17 +3456,20 @@ function refreshTabData(kind = "all", options = {}) {
     workerFinalized = true;
     tabDataWorkers.delete(kind);
     workerTimedOut = true;
-    tabDataCache[kind].loading = false;
     const lastRead = traceFile ? lastWorkerTraceLine(traceFile) : "";
-    tabDataCache[kind].error = `Tab data scan is taking too long${lastRead ? ` while reading ${lastRead}` : ""}. Try again after iCloud finishes syncing this vault.`;
-    tabDataCache[kind].lastFinishedAt = new Date().toISOString();
+    for (const item of kinds) {
+      tabDataCache[item].loading = false;
+      tabDataCache[item].error = `Tab data scan is taking too long${lastRead ? ` while reading ${lastRead}` : ""}. Try again after iCloud finishes syncing this vault.`;
+      tabDataCache[item].lastFinishedAt = new Date().toISOString();
+    }
     console.warn(`[tab-data] ${kind} refresh timed out after ${Date.now() - started}ms.`);
-    worker.kill("SIGTERM");
+    terminateWorkerTree(worker, "SIGTERM");
     setTimeout(() => {
-      if (tabDataWorkers.get(kind) === worker) worker.kill("SIGKILL");
+      terminateWorkerTree(worker, "SIGKILL");
     }, 1000);
     cleanupWorkerResult(traceFile);
-  }, 45000);
+    cleanupWorkerResult(resultFile);
+  }, tabDataWorkerTimeoutMs(kind));
   tabDataWorkers.set(kind, worker);
   const applyWorkerMessage = (message) => {
       if (!message?.ok) {
@@ -3397,7 +3508,7 @@ function refreshTabData(kind = "all", options = {}) {
         lastFinishedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
-      if (listTabKinds.has(item) && result[item].length) writePersistedTabCache(item, tabDataCache[item].items, tabDataCache[item].updatedAt);
+      if (persistedTabKinds.has(item)) writePersistedTabCache(item, tabDataCache[item].items, tabDataCache[item].updatedAt);
     }
   };
   const finishWorker = (message, { code = 0, early = false } = {}) => {
@@ -3417,10 +3528,11 @@ function refreshTabData(kind = "all", options = {}) {
     }
     if (message && !workerTimedOut) applyWorkerMessage(message);
     cleanupWorkerResult(traceFile);
+    cleanupWorkerResult(resultFile);
     if (early) {
       console.log(`[tab-data] ${kind} refresh result accepted in ${elapsed}ms.`);
-      worker.kill("SIGTERM");
-      setTimeout(() => worker.kill("SIGKILL"), 1000);
+      terminateWorkerTree(worker, "SIGTERM");
+      setTimeout(() => terminateWorkerTree(worker, "SIGKILL"), 1000);
     } else if (code) {
       console.warn(`[tab-data] ${kind} refresh exited with code ${code} after ${elapsed}ms.`);
     } else {
@@ -3444,6 +3556,8 @@ function refreshTabData(kind = "all", options = {}) {
     workerFinalized = true;
     clearTimeout(timeout);
     tabDataWorkers.delete(kind);
+    cleanupWorkerResult(traceFile);
+    cleanupWorkerResult(resultFile);
     console.warn(`[tab-data] ${kind} refresh failed after ${Date.now() - started}ms: ${error.message}`);
     for (const item of kinds) {
       tabDataCache[item].loading = false;
@@ -3458,6 +3572,16 @@ function hasConflictingTabWorker(kind) {
     return [...tabDataWorkers.keys()].some((activeKind) => listTabKinds.has(activeKind));
   }
   return tabDataWorkers.size > 0;
+}
+
+function normalizeTabWorkerKind(kind) {
+  return annotationTabKinds.has(kind) ? "notes" : kind;
+}
+
+function tabDataWorkerTimeoutMs(kind) {
+  if (kind === "learning") return 60000;
+  if (kind === "notes") return 45000;
+  return 30000;
 }
 
 function lastWorkerTraceLine(file) {
@@ -3484,8 +3608,10 @@ function parseWorkerStdout(output) {
 
 async function cachedProviderStatus(options = {}) {
   healStaleProviderStatusWorker();
-  const stale = !providerStatusCache.updatedAt || Date.now() - Date.parse(providerStatusCache.updatedAt) > 30000;
-  if ((options.force || stale) && !providerStatusCache.loading) {
+  const cacheTtl = ["openai_subscription", "openai_oauth", "chatgpt"].includes(config.provider) ? 120000 : 60000;
+  const stale = !providerStatusCache.updatedAt || Date.now() - Date.parse(providerStatusCache.updatedAt) > cacheTtl;
+  const providerBusy = ingestRunning || Boolean(autoIngestWorker);
+  if ((options.force || stale) && !providerStatusCache.loading && !providerBusy) {
     const refresh = runProviderStatusWorker({ timeoutMs: providerStatusWorkerTimeoutMs(config) }).catch((error) => {
       providerStatusCache.error = error.message;
       if (!providerStatusCache.data) {
@@ -3500,10 +3626,25 @@ async function cachedProviderStatus(options = {}) {
   const payload = {
     ...data,
     loading: providerStatusCache.loading,
+    busy: providerBusy,
     stale: Boolean(providerStatusCache.updatedAt && stale),
     error: providerStatusCache.error,
     updatedAt: providerStatusCache.updatedAt
   };
+  if (providerBusy) {
+    const wasReady = payload.statusColor === "green";
+    return {
+      ...payload,
+      status: wasReady ? "Connected and processing" : "Provider check deferred",
+      statusColor: wasReady ? "green" : "orange",
+      statusDetail: wasReady
+        ? "The selected provider is processing a Learning Autopilot source. A duplicate readiness probe was not started."
+        : "Learning Autopilot is using the selected provider. Readiness will be checked after the current source finishes.",
+      detail: wasReady
+        ? "The selected provider is processing a Learning Autopilot source. A duplicate readiness probe was not started."
+        : "Learning Autopilot is using the selected provider. Readiness will be checked after the current source finishes."
+    };
+  }
   if (payload.stale && payload.loading && payload.statusColor === "green") {
     const when = payload.updatedAt ? formatLocal(new Date(payload.updatedAt)) : "an earlier check";
     return {
@@ -3538,11 +3679,11 @@ function runProviderStatusWorker(options = {}) {
   providerStatusCache.startedAt = new Date().toISOString();
   providerStatusCache.error = "";
   return new Promise((resolve) => {
-    const worker = spawn(process.execPath, [path.join(agentRoot, "src", "provider-status-worker.mjs")], {
+    const worker = spawn(process.execPath, [path.join(agentRoot, "src", "provider-status-worker.mjs")], workerSpawnOptions({
       cwd: agentRoot,
       env: { ...process.env, LLM_WIKI_ENV_FILE: config.configFile },
       stdio: ["ignore", "pipe", "pipe"]
-    });
+    }));
     providerStatusWorker = worker;
     let finalized = false;
     let workerStdout = "";
@@ -3574,8 +3715,8 @@ function runProviderStatusWorker(options = {}) {
       resolve(providerStatusCache.data);
     };
     const timeout = setTimeout(() => {
-      worker.kill("SIGTERM");
-      setTimeout(() => worker.kill("SIGKILL"), 1000);
+      terminateWorkerTree(worker, "SIGTERM");
+      setTimeout(() => terminateWorkerTree(worker, "SIGKILL"), 1000);
       finish({ ok: false, error: "Provider status check timed out. The UI remains available; retry after local provider tools finish responding." });
     }, Math.max(2000, Number(options.timeoutMs || 7000)));
     worker.on("exit", () => finish(parseWorkerStdout(workerStdout)));
@@ -3597,7 +3738,7 @@ function healStaleProviderStatusWorker() {
   const maxAge = Math.max(5000, providerStatusWorkerTimeoutMs(config) + 3000);
   if (Number.isFinite(started) && Date.now() - started <= maxAge) return;
   try {
-    providerStatusWorker?.kill?.("SIGKILL");
+    terminateWorkerTree(providerStatusWorker, "SIGKILL");
   } catch {
     // Best-effort cleanup only.
   }
@@ -3633,6 +3774,22 @@ function providerStatusFallback(detail) {
     statusDetail: detail || "Provider status is loading in a background worker.",
     details: {}
   };
+}
+
+function markProviderReadyFromIngest() {
+  const current = providerStatusCache.data || providerStatusFallback("");
+  providerStatusCache.data = {
+    ...current,
+    status: "Connected and ready",
+    statusColor: "green",
+    provider: config.provider,
+    activeProvider: config.provider,
+    model: config.model,
+    statusDetail: "The selected provider completed a Learning Autopilot readiness check and source-processing request.",
+    detail: "The selected provider completed a Learning Autopilot readiness check and source-processing request."
+  };
+  providerStatusCache.error = "";
+  providerStatusCache.updatedAt = new Date().toISOString();
 }
 
 function updateVaultCacheFromRows(rows = []) {
@@ -4387,10 +4544,14 @@ function runOsascript(lines, options = {}) {
 
 async function runAutoIngest() {
   if (Date.now() < autoIngestBackoffUntil) return;
-  if (ingestRunning) return;
+  if (ingestRunning || providerStatusWorker) return;
   const pendingVault = nextAutoIngestVault();
   if (!pendingVault) {
-    lastIngestMessage = reportStatus(`Operation progress: 100%. No pending files at ${formatLocal(new Date())}.`);
+    const deferredRetryAt = nextAutoIngestRetryAt();
+    const detail = deferredRetryAt
+      ? `Operation progress: 100%. Pending learning work is cooling down after a no-progress provider run. Next retry after ${formatLocal(new Date(deferredRetryAt))}.`
+      : `Operation progress: 100%. No pending files at ${formatLocal(new Date())}.`;
+    lastIngestMessage = reportStatus(detail);
     ingestProgress = progressState({
       completed: 1,
       total: 1,
@@ -4401,15 +4562,14 @@ async function runAutoIngest() {
   }
   ingestRunning = true;
   const batchSize = 1;
+  const changedKinds = new Set();
   try {
     ingestProgress = {
       percent: 0,
       completed: 0,
-      total: Math.max(pendingVault.pendingRawCount || 1, 1),
+      total: Math.max(pendingVault.totalPendingCount || 1, 1),
       vault: vaultName(pendingVault.vaultPath),
-      detail: pendingVault.pendingRawCountKnown
-        ? `Learning Autopilot is processing ${Math.min(pendingVault.pendingRawCount, batchSize)} of ${pendingVault.pendingRawCount} pending file(s) in ${vaultName(pendingVault.vaultPath)}.`
-        : `Learning Autopilot is checking ${vaultName(pendingVault.vaultPath)} for pending sources in a background worker.`
+      detail: `Learning Autopilot is processing one pending item in ${vaultName(pendingVault.vaultPath)} (${pendingVault.pendingRawCount} raw file(s), ${pendingVault.pendingResourceCount} captured resource(s), ${pendingVault.pendingMediaCount} media retry item(s)).`
     };
     lastIngestMessage = reportStatus(`Operation progress: ${ingestProgress.percent}%. ${ingestProgress.detail}`);
     setAutomationRuntime(pendingVault.vaultPath, {
@@ -4425,8 +4585,10 @@ async function runAutoIngest() {
         resourceLimit: batchSize,
         maxQueueAttempts: 3,
         copyTimeoutMs: 5000,
+        skipProviderReadinessProbe: true,
         reprocessPendingMedia: pendingVault.pendingMediaCount > 0,
-        pendingMediaScanLimit: 120
+        pendingMediaLimit: 1,
+        pendingMediaScanLimit: 240
       },
       timeoutMs: autoIngestWorkerTimeoutMs()
     });
@@ -4438,24 +4600,56 @@ async function runAutoIngest() {
         console.log(`[bootstrap] ${item.vault}: ${item.bootstrapped.join(", ")}`);
       }
       updateRuntimeFromAutomationResult(vaultPath, item.automationResult || {});
+      if (item.automationResult?.providerReady) markProviderReadyFromIngest();
       const results = item.automationResult?.results || [];
-      count += results.length;
-      void syncNotificationReminderMirrorIfEnabled(vaultPath).catch((error) => {
-        console.error(`[learning-reminders] ${error.stack || error.message}`);
-      });
+      const completedResults = results.filter((result) => !result.duplicateSkipped && !result.pendingContent && !result.pendingProviderAnalysis && !result.learning?.pendingContent && !result.learning?.pendingProviderAnalysis);
+      count += completedResults.length;
+      if (completedResults.length) {
+        changedKinds.add("files");
+        changedKinds.add("topics");
+        changedKinds.add("learning");
+        clearTopicContentCache();
+        void syncNotificationReminderMirrorIfEnabled(vaultPath).catch((error) => {
+          console.error(`[learning-reminders] ${error.stack || error.message}`);
+        });
+      }
       for (const result of results) {
-        console.log(`[auto-ingest] ${result.vault}: ${result.source} -> ${result.sourcePage}`);
+        if (result.duplicateSkipped) {
+          console.log(`[auto-ingest] ${result.vault}: duplicate ${result.source} archived without provider analysis.`);
+        } else {
+          console.log(`[auto-ingest] ${result.vault}: ${result.source} -> ${result.sourcePage}`);
+        }
       }
     }
-    const attention = completedVaults.find((item) => item.automationResult?.status === "capture_attention")?.automationResult;
-    const idleDetail = attention?.detail || `${vaultName(pendingVault.vaultPath)} has no ready files after staging at ${formatLocal(new Date())}.`;
+    if (pendingVault.pendingMediaCount > 0) {
+      pendingMediaRetryAfter.set(pendingVault.vaultPath, Date.now() + 10 * 60 * 1000);
+    }
+    const automationResult = completedVaults.find((item) => item.automationResult)?.automationResult || {};
+    const remainingRawCount = safeRawCandidateCount(pendingVault.vaultPath);
+    const remainingResourceCount = safeQueueableResourceCount(pendingVault.vaultPath);
+    const remainingTotal = remainingRawCount + remainingResourceCount;
+    const startingPrimaryCount = Number(pendingVault.pendingRawCount || 0) + Number(pendingVault.pendingResourceCount || 0);
+    const madeQueueProgress = remainingTotal < startingPrimaryCount;
+    const noProgress = count === 0 && remainingTotal > 0 && !madeQueueProgress;
+    if (noProgress) {
+      autoIngestRetryAfter.set(
+        pendingVault.vaultPath,
+        Date.now() + Math.max(autoIngestIntervalMs * 8, 2 * 60 * 1000)
+      );
+    } else {
+      autoIngestRetryAfter.delete(pendingVault.vaultPath);
+    }
+    const retryDetail = noProgress
+      ? ` ${remainingTotal} pending item(s) remain; this vault will retry after ${formatLocal(new Date(autoIngestRetryAfter.get(pendingVault.vaultPath)))}.`
+      : "";
+    const idleDetail = `${automationResult.detail || `${vaultName(pendingVault.vaultPath)} has no ready files after staging.`}${retryDetail}`;
     lastIngestMessage = count
       ? reportStatus(`Operation progress: 100%. Processed ${count} file${count === 1 ? "" : "s"} from ${vaultName(pendingVault.vaultPath)} at ${formatLocal(new Date())}.`)
       : reportStatus(`Operation progress: 100%. ${idleDetail}`);
-    autoIngestBackoffUntil = 0;
+    if (!noProgress) autoIngestBackoffUntil = 0;
     ingestProgress = progressState({
       completed: count,
-      total: Math.max(count, pendingVault.pendingRawCount || 1),
+      total: Math.max(count, pendingVault.totalPendingCount || 1),
       vault: vaultName(pendingVault.vaultPath),
       detail: lastIngestMessage
     });
@@ -4488,8 +4682,15 @@ async function runAutoIngest() {
     console.error(`[auto-ingest] ${error.stack || error.message}`);
   } finally {
     ingestRunning = false;
-    refreshChangedTabsAfterIngest();
+    for (const kind of changedKinds) scheduleTabDataRefresh(kind);
   }
+}
+
+function nextAutoIngestRetryAt() {
+  const future = [...autoIngestRetryAfter.values()]
+    .map(Number)
+    .filter((value) => Number.isFinite(value) && value > Date.now());
+  return future.length ? Math.min(...future) : 0;
 }
 
 function autoIngestWorkerTimeoutMs() {
@@ -4510,6 +4711,7 @@ function autoIngestWorkerTimeoutMs() {
 function nextAutoIngestVault() {
   const vaults = cachedVaultPaths(config);
   if (!vaults.length) return null;
+  const candidates = [];
   for (let index = 0; index < vaults.length; index += 1) {
     const cursor = (autoIngestVaultCursor + index) % vaults.length;
     const vaultPath = vaults[cursor];
@@ -4520,12 +4722,39 @@ function nextAutoIngestVault() {
     if (["paused", "snoozed", "stopped"].includes(control.status)) continue;
     const pendingRawCount = safeRawCandidateCount(vaultPath);
     const pendingResourceCount = safeQueueableResourceCount(vaultPath);
-    const pendingMediaCount = safePendingProviderMediaCount(vaultPath);
-    if (!pendingRawCount && !pendingResourceCount && !pendingMediaCount) continue;
+    if (!pendingRawCount && !pendingResourceCount) autoIngestRetryAfter.delete(vaultPath);
+    candidates.push({
+      cursor,
+      vaultPath,
+      pendingRawCount,
+      pendingResourceCount,
+      retryAfter: Number(autoIngestRetryAfter.get(vaultPath) || 0)
+    });
+  }
+  const primary = candidates.find((item) =>
+    (item.pendingRawCount || item.pendingResourceCount) && Date.now() >= item.retryAfter
+  );
+  if (primary) {
+    autoIngestVaultCursor = (primary.cursor + 1) % vaults.length;
+    return {
+      vaultPath: primary.vaultPath,
+      pendingRawCount: primary.pendingRawCount,
+      totalPendingCount: primary.pendingRawCount + primary.pendingResourceCount,
+      pendingRawCountKnown: true,
+      pendingResourceCount: primary.pendingResourceCount,
+      pendingMediaCount: 0
+    };
+  }
+  for (const candidate of candidates) {
+    const { cursor, vaultPath, pendingRawCount, pendingResourceCount } = candidate;
+    const canRetryMedia = Date.now() >= Number(pendingMediaRetryAfter.get(vaultPath) || 0);
+    const pendingMediaCount = canRetryMedia ? safePendingProviderMediaCount(vaultPath) : 0;
+    if (!pendingMediaCount) continue;
     autoIngestVaultCursor = (cursor + 1) % vaults.length;
     return {
       vaultPath,
-      pendingRawCount: pendingRawCount + pendingResourceCount + pendingMediaCount,
+      pendingRawCount,
+      totalPendingCount: pendingRawCount + pendingResourceCount + pendingMediaCount,
       pendingRawCountKnown: true,
       pendingResourceCount,
       pendingMediaCount
@@ -4573,11 +4802,11 @@ function runAutoIngestWorker(options = {}) {
     ];
     args.push(options.vaultPath || "");
     args.push(JSON.stringify(options.options || {}));
-    const worker = spawn(process.execPath, args, {
+    const worker = spawn(process.execPath, args, workerSpawnOptions({
       cwd: agentRoot,
       env: process.env,
       stdio: "ignore"
-    });
+    }));
     autoIngestWorker = worker;
     let forceKillTimer = null;
     let workerTimedOut = false;
@@ -4595,9 +4824,9 @@ function runAutoIngestWorker(options = {}) {
         code: "AUTO_INGEST_TIMEOUT",
         partialResult
       });
-      worker.kill("SIGTERM");
+      terminateWorkerTree(worker, "SIGTERM");
       forceKillTimer = setTimeout(() => {
-        worker.kill("SIGKILL");
+        terminateWorkerTree(worker, "SIGKILL");
       }, 1500);
       cleanupWorkerResult(resultFile);
       finish(() => reject(error));
@@ -4835,7 +5064,7 @@ function readPersistedTabCache(kind) {
 }
 
 function writePersistedTabCache(kind, items, updatedAt = new Date().toISOString()) {
-  if (!listTabKinds.has(kind) || !Array.isArray(items)) return;
+  if (!persistedTabKinds.has(kind) || !Array.isArray(items)) return;
   try {
     fs.mkdirSync(tabCacheDir, { recursive: true });
     fs.writeFileSync(persistedTabCacheFile(kind), JSON.stringify({ kind, items, updatedAt }, null, 2), "utf8");
@@ -4956,9 +5185,58 @@ function withTimeout(promise, timeoutMs, message) {
   ]).finally(() => clearTimeout(timer));
 }
 
+function workerSpawnOptions(options = {}) {
+  return {
+    ...options,
+    detached: process.platform !== "win32"
+  };
+}
+
+function terminateWorkerTree(worker, signal = "SIGTERM") {
+  if (!worker?.pid) return;
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-worker.pid, signal);
+      return;
+    } catch {
+      // Fall through when the process group has already exited.
+    }
+  }
+  try {
+    worker.kill(signal);
+  } catch {
+    // Worker cleanup is best effort.
+  }
+}
+
+function installWorkerShutdownHandlers() {
+  let stopping = false;
+  const stop = (signal) => {
+    if (stopping) return;
+    stopping = true;
+    const workers = new Set([
+      autoIngestWorker,
+      providerStatusWorker,
+      startupLearningBackfillWorker,
+      ...tabDataWorkers.values(),
+      ...captureScanWorkers.values()
+    ].filter(Boolean));
+    for (const worker of workers) terminateWorkerTree(worker, "SIGTERM");
+    setTimeout(() => {
+      for (const worker of workers) terminateWorkerTree(worker, "SIGKILL");
+      process.exit(signal === "SIGINT" ? 130 : 0);
+    }, 500).unref();
+  };
+  process.once("SIGTERM", () => stop("SIGTERM"));
+  process.once("SIGINT", () => stop("SIGINT"));
+}
+
 function topicContentFromCachedVault(currentConfig, input = {}) {
   const vaultPath = resolveCachedVaultPath(currentConfig, input.vault);
   const requestedRel = normalizeSafeWikiRel(input.path);
+  const cacheKey = `${path.resolve(vaultPath)}|${requestedRel}|${String(input.title || "")}`;
+  const cached = topicContentCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < 10 * 60 * 1000) return cached.answer;
   const topicRel = resolveExistingCachedTopicRel(vaultPath, requestedRel);
   const topicTitle = String(input.title || titleFromFastPath(topicRel));
   const topicText = readTopicPageWithTimeout(path.join(vaultPath, topicRel));
@@ -4975,7 +5253,7 @@ function topicContentFromCachedVault(currentConfig, input = {}) {
   const lines = [
     `# ${topicTitle}`,
     "",
-    "The selected page is shown with linked wiki pages that are already indexed locally.",
+    "Loaded from processed wiki pages already stored in this vault. Selecting a topic does not call an AI provider or reprocess its source.",
     ""
   ];
   for (const rel of bounded) {
@@ -4992,7 +5270,14 @@ function topicContentFromCachedVault(currentConfig, input = {}) {
     lines.push(`Related pages truncated to ${bounded.length} items so the UI stays responsive.`);
   }
   if (ordered.length === 0) lines.push("No related wiki pages were found.");
-  return lines.join("\n");
+  const answer = lines.join("\n");
+  topicContentCache.set(cacheKey, { answer, cachedAt: Date.now() });
+  while (topicContentCache.size > 200) topicContentCache.delete(topicContentCache.keys().next().value);
+  return answer;
+}
+
+function clearTopicContentCache() {
+  topicContentCache.clear();
 }
 
 function resolveExistingCachedTopicRel(vaultPath, rel) {
@@ -5390,6 +5675,18 @@ function requestIsLoopback(request) {
   return address === "::1" || address === "127.0.0.1" || address.startsWith("127.") || address.startsWith("::ffff:127.");
 }
 
+function requestTargetsLoopback(request) {
+  if (!requestIsLoopback(request)) return false;
+  const hostHeader = String(request.headers.host || "").trim();
+  if (!hostHeader) return false;
+  try {
+    const hostname = new URL(`http://${hostHeader}`).hostname.toLowerCase();
+    return hostname === "localhost" || hostname === "::1" || hostname === "127.0.0.1" || hostname.startsWith("127.");
+  } catch {
+    return false;
+  }
+}
+
 function mobileStudyRequestToken(request, url) {
   const queryToken = String(url.searchParams.get("token") || "").trim();
   if (queryToken) return queryToken;
@@ -5409,7 +5706,7 @@ function authorizedBridgeRequest(request, response) {
   return false;
 }
 
-function renderHtml() {
+function renderHtml(options = {}) {
   const vaultOptions = "";
   return `<!doctype html>
 <html lang="en">
@@ -5671,6 +5968,16 @@ function renderHtml() {
     .learning-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
     .learning-toolbar select { min-width: min(220px, 100%); flex: 1 1 220px; }
     .learning-toolbar .copy-feedback { margin-left: auto; }
+    .learning-device-access { display: grid; gap: 10px; }
+    .device-url-list { display: grid; gap: 8px; }
+    .device-url-row { display: grid; grid-template-columns: minmax(100px, 130px) minmax(240px, 1fr) auto auto minmax(0, auto); align-items: center; gap: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); min-width: 0; }
+    .device-url-row strong, .device-url-input, .device-url-feedback { min-width: 0; }
+    .device-url-input { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .device-url-feedback { min-width: 56px; }
+    @media (max-width: 760px) {
+      .device-url-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+      .device-url-row strong, .device-url-input, .device-url-feedback { grid-column: 1 / -1; }
+    }
     .learning-jump, .learning-target-button { appearance: none; border: 0; background: transparent; color: var(--accent); font: inherit; font-weight: 750; padding: 0; cursor: pointer; text-align: start; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; white-space: normal; overflow-wrap: break-word; word-break: normal; hyphens: none; max-width: 100%; }
     .learning-jump:hover, .learning-target-button:hover { color: var(--accent-2); }
     .learning-target-highlight { outline: 3px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 3px; box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 12%, transparent); }
@@ -6196,6 +6503,7 @@ function renderHtml() {
             <label class="inline-toggle"><input data-config-key="AUTO_INGEST_ON_START" type="checkbox"> Auto-process raw/inbox and raw/input in every vault</label>
             <label class="learning-field"><span>Raw scan interval ms</span><input data-config-key="WATCH_INTERVAL_MS" type="number" min="1000" step="1000" placeholder="5000"></label>
             <label class="learning-field"><span>Provider timeout ms</span><input data-config-key="AI_PROVIDER_TIMEOUT_MS" type="number" min="5000" step="5000" placeholder="180000"></label>
+            <label class="learning-field"><span>Analysis text per request</span><input data-config-key="INGEST_ANALYSIS_PROMPT_MAX_CHARS" type="number" min="4000" step="1000" placeholder="24000"></label>
           </div>
           <p class="muted">When enabled, Learning Boost watches each vault for new files under <code>raw/inbox</code> and <code>raw/input</code>. Processed files and vault media assets are skipped.</p>
         </section>
@@ -6265,6 +6573,8 @@ function renderHtml() {
             <label class="learning-field"><span>Subscription client</span><input data-config-key="OPENAI_SUBSCRIPTION_CLIENT" list="subscription-client-options" autocomplete="off" placeholder="codex"></label>
             <label class="learning-field"><span>Codex command</span><input data-config-key="OPENAI_CODEX_COMMAND" list="provider-command-options" autocomplete="off" placeholder="codex"></label>
             <label class="learning-field"><span>Timeout ms</span><input data-config-key="OPENAI_CODEX_TIMEOUT_MS" type="number" min="1000" step="1000" placeholder="180000"></label>
+            <label class="learning-field"><span>Background analysis timeout ms</span><input data-config-key="OPENAI_CODEX_AUTOMATION_TIMEOUT_MS" type="number" min="1000" step="1000" placeholder="150000"></label>
+            <label class="learning-field"><span>Background reasoning effort</span><input data-config-key="OPENAI_CODEX_AUTOMATION_REASONING_EFFORT" list="codex-reasoning-options" autocomplete="off" placeholder="low"></label>
           </div>
         </section>
         <section class="provider-group" data-provider-group="anthropic">
@@ -6306,6 +6616,7 @@ function renderHtml() {
       <datalist id="provider-model-options"></datalist>
       <datalist id="provider-access-options"><option value="local_first"></option><option value="api_key"></option><option value="subscription"></option></datalist>
       <datalist id="provider-auth-options"></datalist>
+      <datalist id="codex-reasoning-options"><option value="minimal"></option><option value="low"></option><option value="medium"></option><option value="high"></option></datalist>
       <datalist id="provider-endpoint-options"></datalist>
       <datalist id="provider-command-options"></datalist>
       <datalist id="provider-priority-options"></datalist>
@@ -6325,6 +6636,7 @@ function renderHtml() {
 	          <button id="learning-notification-control" class="secondary" type="button">Enable learning notifications</button>
 	          <span id="learning-feedback" class="copy-feedback"></span>
 	        </div>
+        ${renderDeviceAccessPanel(options)}
 
         <section class="learning-section">
           <h3>Overview</h3>
@@ -6340,7 +6652,7 @@ function renderHtml() {
               <label class="inline-toggle"><input id="auto-draft-plans-toggle" type="checkbox"> Auto-draft plans and goals</label>
               <label class="inline-toggle"><input id="auto-suggest-plan-updates-toggle" type="checkbox"> Auto-suggest plan updates</label>
               <label class="inline-toggle"><input id="native-mac-notifications-toggle" type="checkbox"> Native macOS notifications</label>
-              <label class="inline-toggle"><input id="reminders-notification-mirror-toggle" type="checkbox"> Sync alerts to Apple devices via Reminders</label>
+              <label class="inline-toggle" title="Creates privacy-safe alerts in Apple Reminders so iCloud can notify your iPhone, iPad, or other Macs."><input id="reminders-notification-mirror-toggle" type="checkbox"> Sync alerts to iPhone/iPad via Apple Reminders</label>
               <label class="inline-toggle"><input id="approval-gates-toggle" type="checkbox" checked disabled> Require approval for activation and external writes</label>
             </div>
             <div class="learning-button-row">
@@ -6919,6 +7231,8 @@ function renderHtml() {
     let selectedRange = null;
     let notesCache = [];
     let highlightsCache = [];
+    let notesLoadRetryCount = 0;
+    let notesLoadRetryTimer = null;
     let highlightCache = {};
     let persistedHighlightKeys = new Set();
     let notePopoverTimer = null;
@@ -7718,6 +8032,32 @@ function renderHtml() {
       topicsTypeFilter.value = "";
       renderTopicsTable();
     });
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest(".device-url-copy, .device-url-open");
+      if (!button) return;
+      const row = button.closest(".device-url-row");
+      const input = row?.querySelector(".device-url-input");
+      const feedback = row?.querySelector(".device-url-feedback");
+      const url = input?.value?.trim() || "";
+      if (!url) return;
+      if (button.classList.contains("device-url-copy")) {
+        try {
+          await navigator.clipboard.writeText(url);
+        } catch {
+          input.focus();
+          input.select();
+          document.execCommand("copy");
+        }
+        if (feedback) feedback.textContent = "Copied";
+        setTimeout(() => { if (feedback) feedback.textContent = ""; }, 1800);
+        return;
+      }
+      const nativeBridge = window.webkit?.messageHandlers?.openExternal;
+      if (nativeBridge) nativeBridge.postMessage({ url });
+      else window.open(url, "_blank", "noopener,noreferrer");
+      if (feedback) feedback.textContent = "Opened";
+      setTimeout(() => { if (feedback) feedback.textContent = ""; }, 1800);
+    });
     document.addEventListener("click", (event) => {
       const retry = event.target.closest(".table-retry");
       if (!retry) return;
@@ -8347,7 +8687,8 @@ function renderHtml() {
       element.innerHTML =
         '<strong>' + escapeHtml(label) + '</strong>' +
         '<span class="summary-pill">' + escapeHtml(statusLabel(status)) + '</span>' +
-        '<span>' + escapeHtml("Showing " + visible.length + " of " + rows.length) + '</span>' +
+        '<span class="summary-pill">' + escapeHtml("Total: " + rows.length) + '</span>' +
+        '<span>' + escapeHtml("Showing: " + visible.length) + '</span>' +
         (detail ? '<span>' + escapeHtml(detail) + '</span>' : "") +
         vaults;
     }
@@ -8376,7 +8717,8 @@ function renderHtml() {
         .sort(([a], [b]) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" }))
         .slice(0, 8)
         .map(([vault, count]) => '<span class="summary-pill">' + escapeHtml(vault + ": " + count) + '</span>')
-        .join("");
+        .join("") +
+        (counts.size > 8 ? '<span class="summary-pill">' + escapeHtml("+" + (counts.size - 8) + " vaults") + '</span>' : "");
     }
 
     function updateSortHeaders(table) {
@@ -10975,15 +11317,32 @@ function renderHtml() {
       providerTabDot.title = [label || "Unknown", detail || ""].filter(Boolean).join(": ");
     }
 
-    async function refreshProviderTabDot() {
+    let providerDotForcePolls = 0;
+    async function refreshProviderTabDot(options = {}) {
       try {
-        const response = await fetch("/api/provider-status");
+        const response = await fetch("/api/provider-status" + (options.force ? "?refresh=1" : ""));
         const data = await response.json();
         if (data.error) throw new Error(data.error);
         providerStatusCache = data;
         updateProviderTabStatus(data.statusColor, data.status, data.statusDetail);
+        const statusText = [data.status, data.statusDetail, data.activeProvider, data.model].filter(Boolean).join(" ").toLowerCase();
+        const stillSettling = data.loading === true ||
+          data.statusColor === "grey" ||
+          statusText.includes("checking") ||
+          statusText.includes("unknown") ||
+          statusText.includes("loading");
+        if (stillSettling && providerDotForcePolls < 8) {
+          providerDotForcePolls += 1;
+          setTimeout(() => refreshProviderTabDot({ force: true }), 1800);
+        } else if (data.statusColor === "green" || data.statusColor === "red") {
+          providerDotForcePolls = 0;
+        }
       } catch (error) {
         updateProviderTabStatus("orange", "Provider status unknown", error.message);
+        if (providerDotForcePolls < 5) {
+          providerDotForcePolls += 1;
+          setTimeout(() => refreshProviderTabDot({ force: true }), 2200);
+        }
       }
     }
 
@@ -11035,7 +11394,9 @@ function renderHtml() {
     }
 
     function applySideTopicsPayload(data) {
-      sideTopicsCache = (data.topics || []).filter((topic) => !isScaffoldTopic(topic));
+      sideTopicsCache = (data.topics || [])
+        .filter((topic) => !isScaffoldTopic(topic))
+        .filter((topic) => !isPendingMetadataOnlyTopic(topic));
       sideTopicsLoaded = true;
       sideTopicsUpdatedAt = data.updatedAt || new Date().toISOString();
       renderTopicTypeOptions();
@@ -11149,7 +11510,7 @@ function renderHtml() {
         const recentClass = recentTopicClass(group.topic);
         const duplicateBadge = group.count > 1 ? '<span class="side-topic-match-count">' + escapeHtml(group.count + " similar") + '</span>' : "";
         return '<button class="' + recentClass + '" type="button" data-title="' + escapeHtml(group.topic.title) + '" data-vault="' + escapeHtml(group.topic.vault) + '" data-path="' + escapeHtml(group.topic.path) + '" data-type="' + escapeHtml(group.topic.type || "") + '" data-updated="' + escapeHtml(group.updated || group.topic.updated || "") + '" data-tags="' + escapeHtml((group.tags || []).join(", ")) + '" title="' + escapeHtml(group.title) + '">' +
-          '<span class="side-topic-title-row"><span class="side-topic-title-text">' + escapeHtml(group.topic.title) + '</span>' + duplicateBadge + renderAnnotationBadges({ ...annotations, active }) + '</span>' +
+          '<span class="side-topic-title-row"><span class="side-topic-title-text">' + escapeHtml(group.displayTitle || group.topic.title) + '</span>' + duplicateBadge + renderAnnotationBadges({ ...annotations, active }) + '</span>' +
           '<span class="side-topic-meta">' + escapeHtml(group.meta) + '</span></button>';
     }
 
@@ -11206,8 +11567,10 @@ function renderHtml() {
         const dateAdded = sorted.map((item) => item.created || item.updated).filter(Boolean).sort().at(-1) || "";
         const duplicateText = items.length > 1 ? " | " + items.length + " matches" : "";
         const vaultText = vaults.length > 1 ? " | " + vaults.length + " vaults" : vaults[0] ? " | " + vaults[0] : "";
+        const displayTitle = sideTopicDisplayTitle(topic, items);
         return {
           topic,
+          displayTitle,
           count: items.length,
           updated,
           dateAdded,
@@ -11336,6 +11699,8 @@ function renderHtml() {
         .replace(/\\.md$/i, "")
         .replace(/^\\d{4}-\\d{2}-\\d{2}--/i, "")
         .replace(/\\d{4}-\\d{2}-\\d{2}t\\d{2}-\\d{2}-\\d{2}--/ig, ""));
+      const captureKey = captureSideTopicKey(topic, compactTitle, pathKey);
+      if (captureKey) return captureKey;
       const combined = normalizeTopicTitle(compactTitle + " " + pathKey)
         .replace(/\\b\\d+\\b/g, " ")
         .replace(/\\s+/g, " ")
@@ -11347,10 +11712,56 @@ function renderHtml() {
     function compactSideTopicText(value) {
       return normalizeTopicTitle(String(value || "")
         .replace(/[a-f0-9]{8,}/gi, " ")
-        .replace(/\\d{4}-\\d{2}-\\d{2}(?:t\\d{2}-\\d{2}-\\d{2})?/gi, " ")
+        .replace(/\\d{4}[ -]\\d{2}[ -]\\d{2}(?:[t ]\\d{2}[ -]\\d{2}[ -]\\d{2})?/gi, " ")
         .replace(/\\b(captured|downloaded?|browser|clip|media|image|screenshot|pasted|transcript|raw|input|processed|source|sources|wiki)\\b/gi, " ")
+        .replace(/\\b(download|capture|screen|shot|png|jpe?g|webp|gif|heic|tiff?)\\b/gi, " ")
         .replace(/[\\/_-]+/g, " ")
         .replace(/\\b\\d+\\b/g, " "));
+    }
+
+    function captureSideTopicKey(topic, compactTitle, pathKey) {
+      const haystack = normalizeTopicTitle([topic.title, topic.path, topic.summary].filter(Boolean).join(" "));
+      const sourceLike = String(topic.type || "").toLowerCase() === "source" || haystack.includes("wiki/sources/");
+      if (!sourceLike) return "";
+      const isCapture = /\\b(captured|download|browser clip|pasted image|screenshot|media from|transcript)\\b/i.test(haystack);
+      if (!isCapture) return "";
+      const extension = haystack.match(/\\.(png|jpe?g|webp|gif|heic|tiff?|pdf|mp4|mov|m4a|mp3|wav|webm|srt|vtt|txt|md)\\b/i)?.[1]?.toLowerCase() ||
+        haystack.match(/\\b(png|jpe?g|webp|gif|heic|tiff?|pdf|mp4|mov|m4a|mp3|wav|webm|srt|vtt)\\b/i)?.[1]?.toLowerCase() ||
+        "capture";
+      const vault = normalizeTopicTitle(topic.vault || "");
+      const day = String(topic.created || topic.updated || "").slice(0, 10);
+      const sequenceKey = captureSequenceSideTopicKey(haystack, extension);
+      if (sequenceKey) return ["capture", vault, day, sequenceKey].filter(Boolean).join(":");
+      const semantic = normalizeTopicTitle([compactTitle, pathKey].join(" "))
+        .replace(/\\b[a-f0-9]{6,}\\b/g, " ")
+        .replace(/\\b\\d+\\b/g, " ")
+        .replace(/\\b(png|jpe?g|webp|gif|heic|tiff?|pdf|mp4|mov|m4a|mp3|wav|webm|srt|vtt|txt|md)\\b/g, " ")
+        .replace(/\\b\\w{1,2}\\b/g, " ")
+        .replace(/\\s+/g, " ")
+        .trim();
+      if (!semantic || semantic === extension) return ["capture", vault, day, extension].filter(Boolean).join(":");
+      return ["capture", vault, day, extension, semantic.slice(0, 80)].filter(Boolean).join(":");
+    }
+
+    function captureSequenceSideTopicKey(haystack, extension) {
+      const text = normalizeTopicTitle(haystack);
+      const capturedDownload = text.match(/\\bcaptured\\s+download\\s+(\\d+)\\s+(png|jpe?g|webp|gif|heic|tiff?)\\b/i);
+      if (capturedDownload) return ["captured-download", capturedDownload[1], capturedDownload[2].toLowerCase()].join(":");
+      if (/\\bpasted\\s+image\\s+\\d{8,}\\b/i.test(text)) return ["pasted-image", extension || "image"].join(":");
+      if (/\\b(?:screenshot|screen\\s+shot)\\b/i.test(text) && extension) return ["screenshot", extension].join(":");
+      return "";
+    }
+
+    function sideTopicDisplayTitle(topic, items = []) {
+      const haystack = normalizeTopicTitle([topic.title, topic.path, topic.summary].filter(Boolean).join(" "));
+      const isCapture = /\\b(captured|download|browser clip|pasted image|screenshot|media from|transcript)\\b/i.test(haystack);
+      if (!isCapture) return topic.title;
+      const count = items.length || 1;
+      const extension = haystack.match(/\\.(png|jpe?g|webp|gif|heic|tiff?|pdf|mp4|mov|m4a|mp3|wav|webm|srt|vtt|txt|md)\\b/i)?.[1]?.toUpperCase() ||
+        haystack.match(/\\b(png|jpe?g|webp|gif|heic|tiff?|pdf|mp4|mov|m4a|mp3|wav|webm|srt|vtt)\\b/i)?.[1]?.toUpperCase() ||
+        "captured";
+      const day = String(topic.created || topic.updated || "").slice(0, 10);
+      return extension + " capture" + (count > 1 ? " group" : "") + (day ? " from " + day : "");
     }
 
     function normalizeTopicTitle(title) {
@@ -11476,6 +11887,34 @@ function renderHtml() {
         title === "persistent synthesis" ||
         title === "wiki maintenance loop" ||
         title === "how should this vault operate?";
+    }
+
+    function isPendingMetadataOnlyTopic(topic) {
+      const sourceStatus = String(topic.sourceStatus || "").toLowerCase();
+      const mediaStatus = String(topic.mediaAnalysisStatus || "").toLowerCase();
+      const learningStatus = String(topic.learningOutputStatus || "").toLowerCase();
+      const providerInput = String(topic.providerInputStatus || "").toLowerCase();
+      const summary = String(topic.summary || "").toLowerCase();
+      const haystack = [topic.title, topic.path, topic.summary].filter(Boolean).join(" ").toLowerCase();
+      const metadataOnlyText =
+        summary.includes("provider media analysis") ||
+        summary.includes("provider analysis is pending") ||
+        summary.includes("provider did not return a media analysis") ||
+        summary.includes("records metadata and keeps the source available") ||
+        summary.includes("source preserved as a local asset") ||
+        summary.includes("metadata-only") ||
+        summary.includes("raw media bytes were not sent") ||
+        summary.includes("no learning cards or bits were created");
+      const fallbackCapture = mediaStatus === "fallback" &&
+        learningStatus === "learning_output" &&
+        /\\b(captured|download|browser clip|pasted image|screenshot|media from|transcript)\\b/i.test(haystack) &&
+        metadataOnlyText;
+      return sourceStatus === "pending_content" ||
+        mediaStatus === "pending_provider_analysis" ||
+        learningStatus === "pending_learning_output" ||
+        providerInput === "metadata_prompt_sent" ||
+        metadataOnlyText ||
+        fallbackCapture;
     }
 
     async function loadStatus() {
@@ -12426,19 +12865,27 @@ function renderHtml() {
       const annotateResults = options.annotateResults !== false;
       notesList.textContent = "Loading...";
       try {
-        const [notesResponse, highlightsResponse] = await Promise.all([
-          fetch("/api/notes"),
-          fetch("/api/highlights")
+        const [data, highlightsData] = await Promise.all([
+          fetchJsonWithTimeout("/api/notes", { timeoutMs: 12000 }),
+          fetchJsonWithTimeout("/api/highlights", { timeoutMs: 12000 })
         ]);
-        const data = await notesResponse.json();
-        const highlightsData = await highlightsResponse.json();
-        if (data.loading && !(data.notes || []).length) {
-          notesList.textContent = "Loading notes...";
-          setTimeout(() => loadNotes(options), 1200);
+        const stillLoading = (data.loading && !(data.notes || []).length) ||
+          (highlightsData.loading && !(highlightsData.highlights || []).length);
+        if (stillLoading) {
+          notesLoadRetryCount += 1;
+          if (notesLoadRetryCount <= 4) {
+            notesList.textContent = "Loading stored notes and highlights...";
+            clearTimeout(notesLoadRetryTimer);
+            notesLoadRetryTimer = setTimeout(() => loadNotes(options), Math.min(5000, 1000 * notesLoadRetryCount));
+          } else {
+            showNotesRetry("The notes index is still being prepared. Existing notes remain on disk.", options);
+          }
           return;
         }
         if (data.error) throw new Error(data.error);
         if (highlightsData.error) throw new Error(highlightsData.error);
+        notesLoadRetryCount = 0;
+        clearTimeout(notesLoadRetryTimer);
         const notes = data.notes || [];
         notesCache = notes;
         highlightsCache = highlightsData.highlights || [];
@@ -12447,18 +12894,25 @@ function renderHtml() {
         renderNotesList();
         updateAnnotationIndicators();
       } catch (error) {
-        notesList.textContent = error.message;
+        showNotesRetry(error.message, options);
       }
+    }
+
+    function showNotesRetry(message, options = {}) {
+      notesList.innerHTML = '<p class="error">' + escapeHtml(message || "Notes could not be loaded.") + '</p><button class="secondary notes-retry" type="button">Retry notes</button>';
+      notesList.querySelector(".notes-retry")?.addEventListener("click", () => {
+        notesLoadRetryCount = 0;
+        loadNotes(options);
+      });
     }
 
     async function loadAnnotations(options = {}) {
       try {
-        const [notesResponse, highlightsResponse] = await Promise.all([
-          fetch("/api/notes"),
-          fetch("/api/highlights")
+        const [notesData, highlightsData] = await Promise.all([
+          fetchJsonWithTimeout("/api/notes", { timeoutMs: 12000 }),
+          fetchJsonWithTimeout("/api/highlights", { timeoutMs: 12000 })
         ]);
-        const notesData = await notesResponse.json();
-        const highlightsData = await highlightsResponse.json();
+        if (notesData.loading || highlightsData.loading) return;
         if (notesData.error) throw new Error(notesData.error);
         if (highlightsData.error) throw new Error(highlightsData.error);
         notesCache = notesData.notes || [];
@@ -13138,12 +13592,18 @@ function renderHtml() {
     loadChatVaults();
     loadAnnotations({ annotateResults: false });
     loadStatus();
-    refreshProviderTabDot();
+    refreshProviderTabDot({ force: true });
+    setTimeout(() => refreshProviderTabDot({ force: true }), 2500);
+    setTimeout(() => refreshProviderTabDot(), 7000);
     loadProviderStatus();
     loadLearning();
     setInterval(loadChatVaults, 10000);
     setInterval(loadStatus, 5000);
     setInterval(refreshProviderTabDot, 15000);
+    window.addEventListener("focus", () => refreshProviderTabDot({ force: true }));
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refreshProviderTabDot({ force: true });
+    });
   </script>
 </body>
 </html>`;

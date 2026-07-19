@@ -114,12 +114,16 @@ function codexCliProvider(options, model) {
   }
   return {
     name: "codex-cli",
-    async complete(messages, { allowTools = false } = {}) {
+    async complete(messages, { allowTools = false, automation = false } = {}) {
       return runCodexExec({
         command: options.codexCommand || "codex",
         model,
-        timeoutMs: options.codexTimeoutMs || 180000,
-        prompt: codexPrompt(messages, { allowTools })
+        timeoutMs: automation
+          ? (options.codexAutomationTimeoutMs || 150000)
+          : (options.codexTimeoutMs || 180000),
+        prompt: codexPrompt(messages, { allowTools }),
+        isolatedAutomation: automation,
+        reasoningEffort: options.codexAutomationReasoningEffort || "low"
       });
     }
   };
@@ -229,7 +233,7 @@ function mlxLmCliProvider(options) {
   };
 }
 
-async function runCodexExec({ command, model, timeoutMs, prompt }) {
+async function runCodexExec({ command, model, timeoutMs, prompt, isolatedAutomation = false, reasoningEffort = "low" }) {
   let lastError = null;
   for (const candidate of codexCommandCandidates(command)) {
     try {
@@ -238,22 +242,42 @@ async function runCodexExec({ command, model, timeoutMs, prompt }) {
         prefixArgs: candidate.args,
         model,
         timeoutMs,
-        prompt
+        prompt,
+        isolatedAutomation,
+        reasoningEffort
       });
     } catch (error) {
       lastError = error;
+      if (isolatedAutomation && isUnsupportedCodexAutomationFlagError(error.message)) {
+        try {
+          return await runSingleCodexExec({
+            command: candidate.command,
+            prefixArgs: candidate.args,
+            model,
+            timeoutMs,
+            prompt,
+            isolatedAutomation: false,
+            reasoningEffort
+          });
+        } catch (fallbackError) {
+          lastError = fallbackError;
+          if (!isBrokenCodexInstall(fallbackError.message)) throw fallbackError;
+          continue;
+        }
+      }
       if (!isBrokenCodexInstall(error.message)) throw error;
     }
   }
   throw lastError || new ProviderError("Codex CLI was not found.");
 }
 
-function runSingleCodexExec({ command, prefixArgs = [], model, timeoutMs, prompt }) {
+function runSingleCodexExec({ command, prefixArgs = [], model, timeoutMs, prompt, isolatedAutomation = false, reasoningEffort = "low" }) {
   return new Promise((resolve, reject) => {
     const outputFile = path.join(os.tmpdir(), `llm-wiki-codex-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`);
     const args = [
       ...prefixArgs,
       "exec",
+      ...(isolatedAutomation ? codexAutomationArgs(reasoningEffort) : []),
       "--model", model,
       "--sandbox", "read-only",
       "--skip-git-repo-check",
@@ -310,6 +334,32 @@ function runSingleCodexExec({ command, prefixArgs = [], model, timeoutMs, prompt
       stdinError = error;
     }
   });
+}
+
+function codexAutomationArgs(reasoningEffort) {
+  const effort = ["minimal", "low", "medium", "high", "xhigh"].includes(String(reasoningEffort || "").toLowerCase())
+    ? String(reasoningEffort).toLowerCase()
+    : "low";
+  return [
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--disable", "plugins",
+    "--disable", "apps",
+    "--disable", "multi_agent",
+    "--disable", "shell_tool",
+    "--disable", "unified_exec",
+    "--disable", "browser_use",
+    "--disable", "computer_use",
+    "--disable", "image_generation",
+    "--disable", "goals",
+    "--disable", "hooks",
+    "--disable", "tool_suggest",
+    "--config", `model_reasoning_effort=${JSON.stringify(effort)}`
+  ];
+}
+
+function isUnsupportedCodexAutomationFlagError(message = "") {
+  return /(?:unexpected argument|unknown (?:argument|option|feature)|unrecognized option).*(?:ignore-user-config|ignore-rules|disable|config)/is.test(String(message));
 }
 
 function codexPrompt(messages, { allowTools = false } = {}) {

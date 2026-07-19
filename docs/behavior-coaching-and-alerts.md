@@ -52,7 +52,7 @@ Notification alerts avoid sensitive source text unless detailed notifications ar
 
 In the native macOS app, Learning Boost uses `UserNotifications`. A notification is marked delivered only after macOS accepts it. If permission is denied, not enabled, or the macOS add request fails, the in-app Notification Center keeps the alert visible and shows the native delivery blocker. Browser notifications are only a fallback outside the native wrapper.
 
-For other Apple devices, enable `Sync alerts to Apple devices via Reminders` in Learning Autopilot. Learning Boost creates privacy-safe reminder items in the `Learning Boost` Reminders list on this Mac; iCloud/Reminders can then sync those items to iPhone, iPad, or other Macs if your Apple ID and Focus/notification settings allow it. Reminders mirroring has its own status: mirrored, pending, or failed.
+For other Apple devices, enable `Sync alerts to iPhone/iPad via Apple Reminders` in Learning Autopilot. Learning Boost creates privacy-safe reminder items in the `Learning Boost` Reminders list on this Mac; iCloud/Reminders can then sync those items to iPhone, iPad, or other Macs if your Apple ID and Focus/notification settings allow it. Reminders mirroring has its own status: mirrored, pending, or failed.
 
 Provider-blocked alerts are resolved automatically when the selected provider answers again. Resolved alerts display as `Learning provider recovered`, stay as read history, and are no longer retried through macOS notifications or Apple Reminders.
 
@@ -66,4 +66,4 @@ Each alert offers at most three actions. Example actions include:
 - Review 5 due cards.
 - Retry Ollama/MLX or choose a LAN endpoint.
 
-Mobile companion notifications remain out of scope for this macOS-only copy until explicitly reintroduced.
+This Reminders bridge is the current iPhone/iPad alert handoff. It is not a separate mobile app; it uses Apple Reminders and iCloud sync.

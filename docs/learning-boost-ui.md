@@ -94,7 +94,7 @@ LEARNING_BOOST_MOBILE_STUDY=true
 
 Then open `http://<your-mac-lan-ip>:8789/mobile?token=choose-a-long-local-token` from Safari, Arc, or another browser on the device. The mobile page is for study, quiz/test, and review only; it does not expose Provider settings or file/export controls.
 
-The mobile page includes jump buttons for Today, Quiz/Test, Cards, Bits, and Alerts. Tapping a card, bit, quiz, session, or alert enters focus mode: the selected item stays clear while surrounding content is visually de-emphasized. Use Clear focus or Escape to return to the full page. Mixed Arabic/English prompts and answers use automatic direction and plaintext bidi handling so RTL/LTR text wraps naturally.
+The mobile page keeps the title, generated time, jump buttons, vault selector, Refresh, and Clear focus controls sticky at the top without covering the section you jump to. Tapping a card, bit, quiz, session, or alert enters focus mode: the selected item stays clear while surrounding content is visually de-emphasized. Use Clear focus, Escape, or tap empty page space outside the selected item to return to the full page. Mixed Arabic/English prompts and answers use automatic direction and plaintext bidi handling so RTL/LTR text wraps naturally.
 
 The Help/notice area reports the local Mac URL and, when configured, the trusted-LAN mobile URL. Non-local devices must use the tokenized URL. If the page opens on the Mac but not on another device, confirm `MAC_BRIDGE_HOST=0.0.0.0`, `CHAT_HOST=0.0.0.0`, a long `LEARNING_BOOST_MOBILE_TOKEN`, and the correct Mac LAN address such as `http://172.16.1.117:8789/mobile?token=...`.
 
@@ -168,6 +168,8 @@ Use `Reprocess history` to pick a favorite previous ingestion. Select exactly on
 
 Use `Audit duplicate sources` when repeated captures or old baseline pages are cluttering learning output. The report groups active and archived source pages by capture identity, content hash, URL, or normalized title, flags pages that contain the old baseline-provider fallback text, and lets you click an active item to filter the Files table to the exact source page. The audit is non-destructive; after filtering, use the existing reprocess, history restore, merge, or archive controls.
 
+The Local sidebar search also groups repeated captured/downloaded assets by vault, date, extension, and normalized capture identity. Pending metadata-only media pages are excluded from that sidebar by default; use Files if you need to inspect or reprocess those preserved assets.
+
 ## Capture Scan Status
 
 Source Capture includes Scan capture sources now. It runs safe local collectors for enabled watch folders, screenshot folders, ResourceInbox staging status, and preview-safe opened-document metadata when explicitly enabled. It shows captured, duplicate, skipped, and last-scan counts so enabled capture controls have visible feedback.
@@ -180,7 +182,7 @@ The scan does not silently start live screen recording, broad browser history im
 
 The Notification Center has a stack summary for unread, pending macOS delivery, delivered, blocked/failed, Reminders mirrored, and pending Reminders alerts. Delivered alerts stay visible until you choose Mark read or Dismiss.
 
-Use `Sync alerts to Apple devices via Reminders` when you want privacy-safe learning alerts to reach other Apple devices through iCloud Reminders. Use `Sync alerts to Reminders` to retry pending mirrors or diagnose macOS Automation permission blockers.
+Use `Sync alerts to iPhone/iPad via Apple Reminders` when you want privacy-safe learning alerts to reach other Apple devices through iCloud Reminders. Use `Sync alerts to Reminders` to retry pending mirrors or diagnose macOS Automation permission blockers.
 
 For the full user flow, see [Learning Flow and Notifications](learning-flow-and-notifications.md).
 

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { listVaults, listWikiFiles, slugify, vaultName } from "./vaults.mjs";
 
 const START = "<!-- agent-note:";
@@ -8,29 +9,47 @@ const HIGHLIGHT_START = "<!-- agent-highlight:";
 const HIGHLIGHT_END = "<!-- /agent-highlight:";
 
 export function listNotes(config) {
+  return listAnnotations(config).notes;
+}
+
+export function listHighlights(config) {
+  return listAnnotations(config).highlights;
+}
+
+export function listAnnotations(config) {
   const notes = [];
+  const highlights = [];
   for (const vaultPath of listVaults(config.vaultsRoot)) {
-    for (const file of listWikiFiles(vaultPath)) {
+    for (const file of annotationWikiFiles(vaultPath)) {
       const relativePath = path.relative(vaultPath, file);
       if (!relativePath.startsWith(`wiki${path.sep}`)) continue;
       const text = fs.readFileSync(file, "utf8");
       notes.push(...parseNotes(text, vaultName(vaultPath), relativePath));
-    }
-  }
-  return notes.sort((a, b) => b.updated.localeCompare(a.updated));
-}
-
-export function listHighlights(config) {
-  const highlights = [];
-  for (const vaultPath of listVaults(config.vaultsRoot)) {
-    for (const file of listWikiFiles(vaultPath)) {
-      const relativePath = path.relative(vaultPath, file);
-      if (!relativePath.startsWith(`wiki${path.sep}`)) continue;
-      const text = fs.readFileSync(file, "utf8");
       highlights.push(...parseHighlights(text, vaultName(vaultPath), relativePath));
     }
   }
-  return highlights.sort((a, b) => b.updated.localeCompare(a.updated));
+  notes.sort((a, b) => b.updated.localeCompare(a.updated));
+  highlights.sort((a, b) => b.updated.localeCompare(a.updated));
+  return { notes, highlights };
+}
+
+function annotationWikiFiles(vaultPath) {
+  const wikiRoot = path.join(vaultPath, "wiki");
+  if (process.platform !== "darwin" || !fs.existsSync(wikiRoot)) return listWikiFiles(vaultPath);
+  const query = 'kMDItemTextContent == "*agent-note*"c || kMDItemTextContent == "*agent-highlight*"c';
+  const result = spawnSync("/usr/bin/mdfind", ["-onlyin", wikiRoot, query], {
+    encoding: "utf8",
+    timeout: 10000,
+    maxBuffer: 4 * 1024 * 1024
+  });
+  if (result.error || result.status !== 0) return listWikiFiles(vaultPath);
+  const files = new Set(String(result.stdout || "").split(/\r?\n/).filter(Boolean));
+  const defaultNotes = path.join(wikiRoot, "questions", "agent-ui-notes.md");
+  if (fs.existsSync(defaultNotes)) files.add(defaultNotes);
+  return [...files].filter((file) => {
+    const relative = path.relative(wikiRoot, file);
+    return relative && !relative.startsWith("..") && !path.isAbsolute(relative) && path.extname(file).toLowerCase() === ".md";
+  });
 }
 
 export async function listNotesAsync(config) {

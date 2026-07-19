@@ -60,6 +60,7 @@ async function main() {
         resourceLimit: workerOptions.resourceLimit || workerOptions.limit || 12,
         maxQueueAttempts: workerOptions.maxQueueAttempts,
         copyTimeoutMs: workerOptions.copyTimeoutMs,
+        skipProviderReadinessProbe: workerOptions.skipProviderReadinessProbe === true,
         reprocessPendingMedia: workerOptions.reprocessPendingMedia === true,
         pendingMediaScanLimit: workerOptions.pendingMediaScanLimit
       });

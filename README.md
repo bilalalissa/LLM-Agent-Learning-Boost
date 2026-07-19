@@ -46,4 +46,4 @@ npm run learning:export-remnote
 
 ## Scope
 
-This copy is macOS/local-first. A native iPhone/iPad/Watch app is not included, but the Mac app now serves a lightweight `/mobile` study page for iPhone/iPad cards, bits, short quiz/test items, and review actions when you intentionally expose the local server on a trusted LAN with a mobile token. Privacy-safe alert handoff to iPhone, iPad, and other Macs is handled through Apple Reminders sync when `Sync alerts to Apple devices via Reminders` is enabled.
+This copy is macOS/local-first. A native iPhone/iPad/Watch app is not included, but the Mac app now serves a lightweight `/mobile` study page for iPhone/iPad cards, bits, short quiz/test items, and review actions when you intentionally expose the local server on a trusted LAN with a mobile token. Privacy-safe alert handoff to iPhone, iPad, and other Macs is handled through Apple Reminders sync when `Sync alerts to iPhone/iPad via Apple Reminders` is enabled.

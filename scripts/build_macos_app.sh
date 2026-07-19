@@ -112,6 +112,11 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key><string>0.1.1</string>
   <key>CFBundleVersion</key><string>2</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSDocumentsFolderUsageDescription</key><string>Learning Boost reads and updates user-selected Obsidian vaults stored in Documents or iCloud Drive.</string>
+  <key>NSDownloadsFolderUsageDescription</key><string>Learning Boost scans user-enabled Downloads watch folders for learning sources.</string>
+  <key>NSDesktopFolderUsageDescription</key><string>Learning Boost scans Desktop folders only when the user selects them as capture sources.</string>
+  <key>NSNetworkVolumesUsageDescription</key><string>Learning Boost accesses a network vault only when the user explicitly selects that location.</string>
+  <key>NSRemovableVolumesUsageDescription</key><string>Learning Boost accesses a removable-drive vault only when the user explicitly selects that location.</string>
 </dict>
 </plist>
 PLIST

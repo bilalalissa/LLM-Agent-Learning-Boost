@@ -14,9 +14,9 @@ export const PROVIDER_CONFIG_KEYS = [
   "CHAT_HOST",
   "MAC_BRIDGE_HOST",
   "LEARNING_BOOST_MOBILE_STUDY",
-  "LEARNING_BOOST_MOBILE_TOKEN",
   "LEARNING_BOOST_MOBILE_BASE_URL",
   "AI_PROVIDER_TIMEOUT_MS",
+  "INGEST_ANALYSIS_PROMPT_MAX_CHARS",
   "AI_ACCESS_METHOD",
   "DEFAULT_AI_PROVIDER",
   "DEFAULT_AI_MODEL",
@@ -48,6 +48,8 @@ export const PROVIDER_CONFIG_KEYS = [
   "OPENAI_SUBSCRIPTION_CLIENT",
   "OPENAI_CODEX_COMMAND",
   "OPENAI_CODEX_TIMEOUT_MS",
+  "OPENAI_CODEX_AUTOMATION_TIMEOUT_MS",
+  "OPENAI_CODEX_AUTOMATION_REASONING_EFFORT",
   "ANTHROPIC_AUTH_METHOD",
   "ANTHROPIC_BASE_URL",
   "OPENAI_COMPAT_AUTH_METHOD",
@@ -58,6 +60,7 @@ export const PROVIDER_CONFIG_KEYS = [
 ];
 
 export const PROVIDER_SECRET_KEYS = [
+  "LEARNING_BOOST_MOBILE_TOKEN",
   "MLX_LM_SERVER_API_KEY",
   "OPENAI_API_KEY",
   "ANTHROPIC_API_KEY",
@@ -82,6 +85,7 @@ const PROVIDER_DEFAULTS = {
   LEARNING_BOOST_MOBILE_TOKEN: "",
   LEARNING_BOOST_MOBILE_BASE_URL: "",
   AI_PROVIDER_TIMEOUT_MS: "180000",
+  INGEST_ANALYSIS_PROMPT_MAX_CHARS: "24000",
   AI_ACCESS_METHOD: "local_first",
   DEFAULT_AI_PROVIDER: "local_auto",
   DEFAULT_AI_MODEL: "qwen3:8b",
@@ -113,6 +117,8 @@ const PROVIDER_DEFAULTS = {
   OPENAI_SUBSCRIPTION_CLIENT: "codex",
   OPENAI_CODEX_COMMAND: "codex",
   OPENAI_CODEX_TIMEOUT_MS: "180000",
+  OPENAI_CODEX_AUTOMATION_TIMEOUT_MS: "150000",
+  OPENAI_CODEX_AUTOMATION_REASONING_EFFORT: "low",
   ANTHROPIC_AUTH_METHOD: "api_key",
   ANTHROPIC_BASE_URL: "https://api.anthropic.com",
   OPENAI_COMPAT_AUTH_METHOD: "api_key",
@@ -204,6 +210,7 @@ export function getConfig() {
     autoIngestOnStart: env.AUTO_INGEST_ON_START !== "false",
     providerTimeoutMs: Number(env.AI_PROVIDER_TIMEOUT_MS || 180000),
     ingestMaxChars: Number(env.INGEST_MAX_CHARS || 60000),
+    ingestAnalysisPromptMaxChars: Number(env.INGEST_ANALYSIS_PROMPT_MAX_CHARS || 24000),
     chatMaxFiles: Number(env.CHAT_MAX_FILES || 24),
     chatPort: Number(env.CHAT_PORT || 8789),
     bridgeHost: env.MAC_BRIDGE_HOST || env.CHAT_HOST || "127.0.0.1",
@@ -257,6 +264,8 @@ export function getConfig() {
       subscriptionClient: env.OPENAI_SUBSCRIPTION_CLIENT || "codex",
       codexCommand: env.OPENAI_CODEX_COMMAND || "codex",
       codexTimeoutMs: Number(env.OPENAI_CODEX_TIMEOUT_MS || 180000),
+      codexAutomationTimeoutMs: Number(env.OPENAI_CODEX_AUTOMATION_TIMEOUT_MS || 150000),
+      codexAutomationReasoningEffort: env.OPENAI_CODEX_AUTOMATION_REASONING_EFFORT || "low",
       timeoutMs: Number(env.AI_PROVIDER_TIMEOUT_MS || 180000)
     },
     anthropic: {
